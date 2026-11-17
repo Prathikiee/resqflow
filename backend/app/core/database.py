@@ -7,19 +7,24 @@ logger = logging.getLogger(__name__)
 
 db_url = settings.effective_database_url
 
-is_sqlite = db_url.startswith("sqlite")
-connect_args = {"check_same_thread": False} if is_sqlite else {}
-
-try:
+if settings.is_postgres_configured:
+    # Attempt real PostgreSQL connection; do not silently swallow errors or fallback
+    logger.info("Connecting to remote PostgreSQL database...")
+    try:
+        engine = create_engine(
+            db_url,
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10,
+        )
+    except Exception as e:
+        logger.error(f"PostgreSQL connection initialization failed: {type(e).__name__}: {e}")
+        raise
+else:
+    # Local SQLite fallback only when no PostgreSQL URL is configured
+    logger.info("No PostgreSQL URL configured. Utilizing local SQLite database.")
     engine = create_engine(
         db_url,
-        connect_args=connect_args,
-        pool_pre_ping=True,
-    )
-except Exception as e:
-    logger.warning(f"Failed to connect using primary DATABASE_URL ({e}). Falling back to local SQLite.")
-    engine = create_engine(
-        "sqlite:///./resqflow.db",
         connect_args={"check_same_thread": False},
         pool_pre_ping=True,
     )
