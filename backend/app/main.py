@@ -1,20 +1,46 @@
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.app.core.config import settings
-from backend.app.core.database import get_db, Base, engine, SessionLocal
+from backend.app.core.database import get_db, Base, engine, SessionLocal, upgrade_schema
 from backend.app.services.seed_service import seed_database
 from backend.app.core.ws import ws_manager
 from backend.app.api import incidents, ambulances, hospitals, seed, dispatch
+from backend.app.api.dispatch import check_and_escalate_expired_dispatches
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create tables
+# Create tables & safely upgrade schema if new columns exist
 Base.metadata.create_all(bind=engine)
+upgrade_schema(engine)
+
+async def run_escalation_worker():
+    """
+    Lightweight in-process background worker that periodically sweeps
+    expired pending confirmation dispatches every 5 seconds and automatically
+    triggers smart escalation.
+    """
+    logger.info("Starting ResQFlow Smart Emergency Escalation background worker (poll: 5s)...")
+    while True:
+        try:
+            await asyncio.sleep(5)
+            db = SessionLocal()
+            try:
+                check_and_escalate_expired_dispatches(db)
+            except Exception as e:
+                logger.debug(f"Escalation sweep note: {e}")
+            finally:
+                db.close()
+        except asyncio.CancelledError:
+            logger.info("Escalation background worker stopped.")
+            break
+        except Exception as e:
+            logger.warning(f"Unexpected error in escalation worker loop: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -26,7 +52,16 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Auto-seed during startup skipped: {e}")
     finally:
         db.close()
-    yield
+
+    worker_task = asyncio.create_task(run_escalation_worker())
+    try:
+        yield
+    finally:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
 
 app = FastAPI(
     title=settings.APP_NAME,

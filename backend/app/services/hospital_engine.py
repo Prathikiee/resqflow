@@ -37,6 +37,8 @@ class HospitalRankingCandidate:
             "available_icu_beds": self.hospital.available_icu_beds,
             "total_icu_beds": self.hospital.total_icu_beds,
             "available_emergency_beds": self.hospital.available_emergency_beds,
+            "reserved_emergency_beds": getattr(self.hospital, "reserved_emergency_beds", 0) or 0,
+            "effective_available_emergency_beds": max(0, self.hospital.available_emergency_beds - (getattr(self.hospital, "reserved_emergency_beds", 0) or 0)),
             "total_emergency_beds": self.hospital.total_emergency_beds,
             "specialties": self.hospital.specialties,
             "matched_specialties": self.matched_specialties,
@@ -113,9 +115,11 @@ def rank_suitable_hospitals(
         reasons.append(f"Critical Bed Status: {h.available_icu_beds}/{h.total_icu_beds} ICU beds vacant.")
 
         # 4. Emergency Bay Capacity Score (Weight: 15%)
-        er_ratio = h.available_emergency_beds / max(1, h.total_emergency_beds)
+        reserved_beds = getattr(h, "reserved_emergency_beds", 0) or 0
+        effective_er_beds = max(0, h.available_emergency_beds - reserved_beds)
+        er_ratio = effective_er_beds / max(1, h.total_emergency_beds)
         s_er = min(100.0, er_ratio * 100.0)
-        reasons.append(f"Emergency Bay Status: {h.available_emergency_beds}/{h.total_emergency_beds} bays open.")
+        reasons.append(f"Emergency Bay Status: {effective_er_beds}/{h.total_emergency_beds} unreserved bays open ({reserved_beds} reserved).")
 
         total_score = (0.35 * s_specialty) + (0.30 * s_proximity) + (0.20 * s_icu) + (0.15 * s_er)
 

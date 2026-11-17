@@ -375,6 +375,9 @@ export default function AllocationModal({
           <div className="text-xs text-slate-400">
             Assigned: <strong className="text-blue-400">{selectedAmbulance?.call_sign}</strong> → Destination:{" "}
             <strong className="text-emerald-400">{selectedHospital?.name}</strong>
+            <span className="block text-[10px] text-slate-500 font-mono mt-0.5">
+              Provisional reservation holds ambulance & ER bay for 90s until dual confirmation
+            </span>
           </div>
 
           <div className="flex items-center gap-3">
@@ -391,7 +394,7 @@ export default function AllocationModal({
               disabled={submitting || !selectedAmbulance}
               className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-600/30 transition flex items-center gap-2"
             >
-              {submitting ? "Initiating Dispatch..." : "Confirm & Dispatch Emergency Unit"}
+              {submitting ? "Initiating Dual-Reservation..." : "Confirm & Reserve Unit (Dual Confirmation)"}
             </button>
           </div>
         </div>

@@ -31,7 +31,7 @@ def update_ambulance_status(ambulance_id: int, status: str, db: Session = Depend
     if not amb:
         raise HTTPException(status_code=404, detail="Ambulance unit not found")
 
-    valid_statuses = ["AVAILABLE", "DISPATCHED", "EN_ROUTE", "ON_SCENE", "TRANSPORTING", "MAINTENANCE", "OFF_DUTY"]
+    valid_statuses = ["AVAILABLE", "RESERVED", "DISPATCHED", "EN_ROUTE", "ON_SCENE", "TRANSPORTING", "MAINTENANCE", "OFF_DUTY"]
     s_upper = status.upper().strip()
     if s_upper not in valid_statuses:
         raise HTTPException(status_code=400, detail=f"Invalid ambulance status '{status}'. Valid: {valid_statuses}")

@@ -14,6 +14,7 @@ class HospitalOut(BaseModel):
     available_icu_beds: int
     total_emergency_beds: int
     available_emergency_beds: int
+    reserved_emergency_beds: int = 0
     specialties: List[str]
     accepting_emergencies: bool
     contact_number: str

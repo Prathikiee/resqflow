@@ -11,6 +11,7 @@ class AmbulanceOut(BaseModel):
     equipment: List[str]
     paramedic_level: str
     status: str
+    reservation_dispatch_id: Optional[int] = None
     base_station: str
     current_latitude: float
     current_longitude: float

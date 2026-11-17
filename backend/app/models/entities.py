@@ -77,8 +77,9 @@ class Ambulance(Base):
     equipment_json = Column(Text, default="[]")        # ["ventilator", "defibrillator", "oxygen", "ecg_monitor"]
     paramedic_level = Column(String(30), default="BASIC")  # ADVANCED, BASIC
 
-    # Status: AVAILABLE, DISPATCHED, EN_ROUTE, ON_SCENE, TRANSPORTING, MAINTENANCE, OFF_DUTY
+    # Status: AVAILABLE, RESERVED, DISPATCHED, EN_ROUTE, ON_SCENE, TRANSPORTING, MAINTENANCE, OFF_DUTY
     status = Column(String(40), default="AVAILABLE", index=True)
+    reservation_dispatch_id = Column(Integer, nullable=True)  # ID of dispatch holding provisional reservation
 
     base_station = Column(String(120), nullable=False)
     current_latitude = Column(Float, nullable=False)
@@ -116,6 +117,7 @@ class Hospital(Base):
     available_icu_beds = Column(Integer, default=5)
     total_emergency_beds = Column(Integer, default=20)
     available_emergency_beds = Column(Integer, default=10)
+    reserved_emergency_beds = Column(Integer, default=0, nullable=False)
 
     # Specialized departments
     # ["Trauma Level 1", "Cardiology", "Stroke Unit", "Pediatrics", "Burn Care", "Neurosurgery"]
@@ -151,6 +153,22 @@ class Dispatch(Base):
     # Lifecycle status: ASSIGNED, ACKNOWLEDGED, EN_ROUTE_INCIDENT, ON_SCENE, EN_ROUTE_HOSPITAL, COMPLETED, CANCELLED
     status = Column(String(40), default="ASSIGNED", index=True)
 
+    # Dual Confirmation & Reservation State
+    # PENDING_CONFIRMATIONS, CONFIRMED, REJECTED, EXPIRED, REASSIGNMENT_REQUIRED
+    coordination_status = Column(String(40), default="PENDING_CONFIRMATIONS", index=True, nullable=False)
+    ambulance_confirmation_status = Column(String(20), default="PENDING", nullable=False)  # PENDING, ACCEPTED, REJECTED
+    hospital_confirmation_status = Column(String(20), default="PENDING", nullable=False)   # PENDING, ACCEPTED, REJECTED
+
+    reservation_expires_at = Column(DateTime, nullable=True)
+    ambulance_confirmed_at = Column(DateTime, nullable=True)
+    hospital_confirmed_at = Column(DateTime, nullable=True)
+    confirmed_at = Column(DateTime, nullable=True)
+
+    rejection_source = Column(String(30), nullable=True)  # AMBULANCE, HOSPITAL, TIMEOUT
+    rejection_reason = Column(Text, nullable=True)
+    attempt_number = Column(Integer, default=1, nullable=False)
+    escalation_history_json = Column(Text, default="[]")  # JSON audit trail of all escalation attempts
+
     dispatched_at = Column(DateTime, default=utc_now, nullable=False)
     arrived_incident_at = Column(DateTime, nullable=True)
     departed_incident_at = Column(DateTime, nullable=True)
@@ -184,6 +202,17 @@ class Dispatch(Base):
     @allocation_breakdown.setter
     def allocation_breakdown(self, val: dict):
         self.allocation_breakdown_json = json.dumps(val or {})
+
+    @property
+    def escalation_history(self) -> list:
+        try:
+            return json.loads(self.escalation_history_json or "[]")
+        except Exception:
+            return []
+
+    @escalation_history.setter
+    def escalation_history(self, val: list):
+        self.escalation_history_json = json.dumps(val or [])
 
     @property
     def route_geometry(self) -> list:

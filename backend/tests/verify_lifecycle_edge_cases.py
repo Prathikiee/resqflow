@@ -6,9 +6,9 @@ from fastapi import HTTPException
 from backend.app.core.database import SessionLocal, Base, engine
 from backend.app.models.entities import Incident, Ambulance, Hospital, Dispatch
 from backend.app.services.seed_service import seed_database
-from backend.app.api.dispatch import create_dispatch, advance_dispatch_lifecycle
+from backend.app.api.dispatch import create_dispatch, advance_dispatch_lifecycle, confirm_ambulance, confirm_hospital
 from backend.app.api.incidents import update_incident_status
-from backend.app.schemas.dispatch import DispatchRequest, IncidentStatusUpdate
+from backend.app.schemas.dispatch import DispatchRequest, IncidentStatusUpdate, ConfirmationDecision
 
 def test_lifecycle_edge_cases():
     print("=== LIFECYCLE & DUPLICATE DISPATCH EDGE CASES VERIFICATION ===")
@@ -36,9 +36,19 @@ def test_lifecycle_edge_cases():
             db=db,
         )
         assert d1.id is not None
+        assert amb1.status == "RESERVED"
+        assert incident.status == "ALLOCATED"
+        assert d1.coordination_status == "PENDING_CONFIRMATIONS"
+        print("✓ First dispatch provisional reservation successful.")
+
+        # Confirm both ambulance and hospital
+        confirm_ambulance(dispatch_id=d1.id, payload=ConfirmationDecision(decision="ACCEPTED"), db=db)
+        confirm_hospital(dispatch_id=d1.id, payload=ConfirmationDecision(decision="ACCEPTED"), db=db)
+        db.refresh(amb1)
+        db.refresh(incident)
         assert amb1.status == "DISPATCHED"
         assert incident.status == "DISPATCHED"
-        print("✓ First dispatch successful.")
+        print("✓ Dual confirmation successful; ambulance marked DISPATCHED.")
 
         # 2. Duplicate dispatch test on SAME incident with different ambulance
         print("Testing duplicate dispatch rejection for same incident...")

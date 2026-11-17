@@ -10,6 +10,15 @@ class DispatchRequest(BaseModel):
 class IncidentStatusUpdate(BaseModel):
     status: str = Field(..., description="REPORTED, TRIAGED, ALLOCATED, DISPATCHED, EN_ROUTE, ON_SCENE, TRANSPORTING, AT_HOSPITAL, RESOLVED, CANCELLED")
 
+class ConfirmationDecision(BaseModel):
+    decision: str = Field(..., description="ACCEPTED or REJECTED")
+    reason: Optional[str] = None
+
+class SimulateDecisionRequest(BaseModel):
+    party: str = Field(..., description="AMBULANCE, HOSPITAL, or BOTH")
+    decision: str = Field(..., description="ACCEPTED or REJECTED")
+    reason: Optional[str] = None
+
 class DispatchOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -18,6 +27,20 @@ class DispatchOut(BaseModel):
     ambulance_id: int
     destination_hospital_id: Optional[int] = None
     status: str
+
+    # Dual confirmation & reservation fields
+    coordination_status: str = "PENDING_CONFIRMATIONS"
+    ambulance_confirmation_status: str = "PENDING"
+    hospital_confirmation_status: str = "PENDING"
+    reservation_expires_at: Optional[datetime] = None
+    ambulance_confirmed_at: Optional[datetime] = None
+    hospital_confirmed_at: Optional[datetime] = None
+    confirmed_at: Optional[datetime] = None
+    rejection_source: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    attempt_number: int = 1
+    escalation_history: Optional[List[Dict[str, Any]]] = None
+
     dispatched_at: datetime
     arrived_incident_at: Optional[datetime] = None
     departed_incident_at: Optional[datetime] = None

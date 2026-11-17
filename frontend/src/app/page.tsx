@@ -171,10 +171,71 @@ export default function CommandCenterDashboard() {
     }
   };
 
+  const handleConfirmAmbulance = async (dispatchId: number, decision: "ACCEPTED" | "REJECTED") => {
+    try {
+      const res = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/confirm/ambulance`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        alert(`Ambulance confirmation error: ${err.detail || "Failed"}`);
+      }
+      await fetchData();
+    } catch (err: any) {
+      console.error("Ambulance confirm failed:", err);
+    }
+  };
+
+  const handleConfirmHospital = async (dispatchId: number, decision: "ACCEPTED" | "REJECTED") => {
+    try {
+      const res = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/confirm/hospital`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        alert(`Hospital confirmation error: ${err.detail || "Failed"}`);
+      }
+      await fetchData();
+    } catch (err: any) {
+      console.error("Hospital confirm failed:", err);
+    }
+  };
+
+  const handleReassignDispatch = async (dispatchId: number) => {
+    try {
+      const res = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/reassign`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        alert(`Reassignment failed: ${err.detail || "Could not reassign"}`);
+      }
+      await fetchData();
+    } catch (err: any) {
+      console.error("Reassignment error:", err);
+    }
+  };
+
+  // 1-second interval to update reservation countdown tickers
+  const [countdownTick, setCountdownTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCountdownTick((t) => t + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   // Find active dispatch for currently selected incident
   const currentDispatch = dispatches.find((d) => d.incident_id === selectedIncident?.id);
   const assignedAmbulance = ambulances.find((a) => a.id === currentDispatch?.ambulance_id);
   const assignedHospital = hospitals.find((h) => h.id === currentDispatch?.destination_hospital_id);
+  const lastEscalation = currentDispatch?.escalation_history && currentDispatch.escalation_history.length > 0
+    ? currentDispatch.escalation_history[currentDispatch.escalation_history.length - 1]
+    : null;
 
   // Filtered incidents
   const filteredIncidents = incidents.filter((inc) => {
@@ -423,16 +484,28 @@ export default function CommandCenterDashboard() {
                 </ul>
               </div>
 
-              {/* Active Dispatch & Lifecycle Stepper Card */}
+              {/* Active Dispatch & Dual Confirmation Lifecycle Card */}
               {currentDispatch ? (
                 <div className="p-3.5 rounded-lg border border-blue-900/60 bg-blue-950/20 space-y-3">
                   <div className="flex items-center justify-between border-b border-blue-900/50 pb-2">
                     <span className="text-xs font-bold text-blue-300 flex items-center gap-1.5">
                       <Radio className="w-3.5 h-3.5 animate-pulse text-blue-400" />
-                      Active Dispatch Lifecycle
+                      Dispatch Coordination
                     </span>
-                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-900/40 text-blue-300 border border-blue-800">
-                      {currentDispatch.status}
+                    <span
+                      className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border ${
+                        currentDispatch.coordination_status === "CONFIRMED"
+                          ? "bg-emerald-950 text-emerald-400 border-emerald-800"
+                          : currentDispatch.coordination_status === "PENDING_CONFIRMATIONS"
+                          ? "bg-amber-950 text-amber-400 border-amber-800 animate-pulse"
+                          : currentDispatch.coordination_status === "REJECTED"
+                          ? "bg-red-950 text-red-400 border-red-800"
+                          : currentDispatch.coordination_status === "EXPIRED"
+                          ? "bg-orange-950 text-orange-400 border-orange-800"
+                          : "bg-blue-900/40 text-blue-300 border-blue-800"
+                      }`}
+                    >
+                      {currentDispatch.coordination_status || currentDispatch.status}
                     </span>
                   </div>
 
@@ -456,10 +529,193 @@ export default function CommandCenterDashboard() {
                         {formatDuration(currentDispatch.estimated_eta_seconds || 0)}
                       </span>
                     </div>
+                    {currentDispatch.attempt_number > 1 && (
+                      <div className="flex justify-between font-mono text-[10px] text-amber-400">
+                        <span>Dispatch Attempt:</span>
+                        <span>#{currentDispatch.attempt_number} (Reassigned)</span>
+                      </div>
+                    )}
                   </div>
 
-                  {/* Lifecycle Step Action Button */}
-                  {currentDispatch.status !== "COMPLETED" && (
+                  {/* Smart Escalation Alert Card */}
+                  {currentDispatch.attempt_number > 1 && (
+                    <div className="p-2.5 rounded-lg border border-amber-600/40 bg-amber-950/30 space-y-2">
+                      <div className="flex items-center justify-between text-xs font-bold text-amber-400">
+                        <span className="flex items-center gap-1.5">
+                          <AlertTriangle className="w-4 h-4 text-amber-400 animate-pulse" />
+                          Smart Escalation Active (Attempt #{currentDispatch.attempt_number})
+                        </span>
+                        <span className="text-[9px] uppercase font-mono px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-300 border border-amber-700">
+                          Auto-Reassigned
+                        </span>
+                      </div>
+
+                      {/* Escalation Failure Context */}
+                      {lastEscalation && (
+                        <div className="text-[10px] space-y-1 text-slate-300 bg-slate-950/70 p-2 rounded border border-amber-900/30">
+                          <div className="text-amber-300 font-semibold">
+                            Trigger: <span className="text-slate-200">{lastEscalation.failure_reason}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-slate-400 font-mono text-[9px] pt-0.5">
+                            <span className="line-through text-red-400">{lastEscalation.failed_ambulance_call_sign || "Previous Unit"}</span>
+                            <ArrowRight className="w-3 h-3 text-amber-400" />
+                            <span className="text-emerald-400 font-bold">{lastEscalation.replacement_ambulance_call_sign || assignedAmbulance?.call_sign}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="text-[9px] text-amber-200/90 font-mono">
+                        {currentDispatch.coordination_status === "PENDING_CONFIRMATIONS"
+                          ? "⏳ Awaiting dual confirmation for replacement unit..."
+                          : "✓ Replacement unit confirmed and operational"}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* No Alternatives Available Alert Card */}
+                  {currentDispatch.coordination_status === "REASSIGNMENT_REQUIRED" && (
+                    <div className="p-2.5 rounded-lg border border-red-600/60 bg-red-950/40 space-y-2">
+                      <div className="flex items-center gap-1.5 text-xs font-bold text-red-400">
+                        <ShieldAlert className="w-4 h-4 text-red-500" />
+                        <span>Escalation Alert: No Alternatives Available</span>
+                      </div>
+                      <p className="text-[10px] text-red-300 leading-snug">
+                        All alternative fleet units are currently committed or incompatible with clinical triage needs. Incident preserved in queue for dispatcher manual intervention.
+                      </p>
+                      <button
+                        onClick={() => handleReassignDispatch(currentDispatch.id)}
+                        className="w-full py-1.5 px-3 rounded-lg bg-red-700 hover:bg-red-600 text-white text-xs font-bold shadow-md transition flex items-center justify-center gap-1.5"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Retry Fleet Availability Scan</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Dual Confirmation & Resource Reservation Box */}
+                  <div className="p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 space-y-2">
+                    <div className="flex items-center justify-between text-[11px] font-bold text-slate-200">
+                      <span className="flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 text-blue-400" />
+                        Dual Confirmation Status
+                      </span>
+                      {currentDispatch.coordination_status === "PENDING_CONFIRMATIONS" && currentDispatch.reservation_expires_at && (
+                        <span className="font-mono text-[10px] text-amber-400 bg-amber-950/60 border border-amber-800 px-1.5 py-0.5 rounded">
+                          TTL: {Math.max(0, Math.floor((new Date(currentDispatch.reservation_expires_at).getTime() - Date.now()) / 1000))}s
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Ambulance Confirmation Row */}
+                    <div className="flex items-center justify-between text-[10px] p-1.5 rounded bg-slate-900 border border-slate-800">
+                      <div className="flex items-center gap-1.5">
+                        <Ambulance className="w-3.5 h-3.5 text-blue-400" />
+                        <span className="text-slate-300">Ambulance Crew:</span>
+                      </div>
+                      <span
+                        className={`font-mono font-bold px-1.5 py-0.5 rounded text-[9px] uppercase ${
+                          currentDispatch.ambulance_confirmation_status === "ACCEPTED"
+                            ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
+                            : currentDispatch.ambulance_confirmation_status === "REJECTED"
+                            ? "bg-red-950 text-red-400 border border-red-800"
+                            : "bg-amber-950 text-amber-400 border border-amber-800"
+                        }`}
+                      >
+                        {currentDispatch.ambulance_confirmation_status}
+                      </span>
+                    </div>
+
+                    {/* Hospital Confirmation Row */}
+                    <div className="flex items-center justify-between text-[10px] p-1.5 rounded bg-slate-900 border border-slate-800">
+                      <div className="flex items-center gap-1.5">
+                        <Building2 className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-slate-300">Hospital ER Bay:</span>
+                      </div>
+                      <span
+                        className={`font-mono font-bold px-1.5 py-0.5 rounded text-[9px] uppercase ${
+                          currentDispatch.hospital_confirmation_status === "ACCEPTED"
+                            ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
+                            : currentDispatch.hospital_confirmation_status === "REJECTED"
+                            ? "bg-red-950 text-red-400 border border-red-800"
+                            : "bg-amber-950 text-amber-400 border border-amber-800"
+                        }`}
+                      >
+                        {currentDispatch.hospital_confirmation_status}
+                      </span>
+                    </div>
+
+                    {/* Demo Field Simulation Buttons (Clearly Labeled) */}
+                    {currentDispatch.coordination_status === "PENDING_CONFIRMATIONS" && (
+                      <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
+                        <div className="text-[9px] uppercase font-mono font-bold text-slate-400 flex items-center justify-between">
+                          <span>Simulated Responses</span>
+                          <span className="text-amber-400 text-[8px] font-semibold">[Demo Terminals]</span>
+                        </div>
+
+                        {/* Ambulance Simulation */}
+                        {currentDispatch.ambulance_confirmation_status === "PENDING" && (
+                          <div className="grid grid-cols-2 gap-1 text-[10px]">
+                            <button
+                              onClick={() => handleConfirmAmbulance(currentDispatch.id, "ACCEPTED")}
+                              className="px-2 py-1 rounded bg-emerald-700/40 hover:bg-emerald-600/60 border border-emerald-600/50 text-emerald-300 font-semibold transition"
+                            >
+                              ✓ Amb Accept
+                            </button>
+                            <button
+                              onClick={() => handleConfirmAmbulance(currentDispatch.id, "REJECTED")}
+                              className="px-2 py-1 rounded bg-red-900/40 hover:bg-red-800/60 border border-red-700/50 text-red-300 font-semibold transition"
+                            >
+                              ✕ Amb Reject
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Hospital Simulation */}
+                        {currentDispatch.hospital_confirmation_status === "PENDING" && (
+                          <div className="grid grid-cols-2 gap-1 text-[10px]">
+                            <button
+                              onClick={() => handleConfirmHospital(currentDispatch.id, "ACCEPTED")}
+                              className="px-2 py-1 rounded bg-emerald-700/40 hover:bg-emerald-600/60 border border-emerald-600/50 text-emerald-300 font-semibold transition"
+                            >
+                              ✓ Hosp Accept
+                            </button>
+                            <button
+                              onClick={() => handleConfirmHospital(currentDispatch.id, "REJECTED")}
+                              className="px-2 py-1 rounded bg-red-900/40 hover:bg-red-800/60 border border-red-700/50 text-red-300 font-semibold transition"
+                            >
+                              ✕ Hosp Reject
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Reassignment Action Panel for Rejections & Expirations */}
+                  {(currentDispatch.coordination_status === "REJECTED" ||
+                    currentDispatch.coordination_status === "EXPIRED" ||
+                    currentDispatch.coordination_status === "REASSIGNMENT_REQUIRED") && (
+                    <div className="p-2.5 rounded-lg border border-red-800/50 bg-red-950/20 space-y-2">
+                      <div className="text-[10px] text-red-300">
+                        <strong>
+                          {currentDispatch.coordination_status === "EXPIRED"
+                            ? "Reservation Expired: "
+                            : "Dispatch Rejected: "}
+                        </strong>
+                        {currentDispatch.rejection_reason || "Resource declined assignment"}
+                      </div>
+                      <button
+                        onClick={() => handleReassignDispatch(currentDispatch.id)}
+                        className="w-full py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold shadow-md shadow-amber-600/30 transition flex items-center justify-center gap-2"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Reassign to Alternative Resource</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Lifecycle Step Action Button (Active ONLY when CONFIRMED) */}
+                  {currentDispatch.coordination_status === "CONFIRMED" && currentDispatch.status !== "COMPLETED" && (
                     <button
                       onClick={() => handleStepLifecycle(currentDispatch.id)}
                       className="w-full py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-md shadow-blue-600/30 transition flex items-center justify-center gap-2"

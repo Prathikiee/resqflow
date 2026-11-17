@@ -33,6 +33,56 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
+def upgrade_schema(target_engine=None):
+    """
+    Safely adds new columns to existing tables if missing (SQLite & PostgreSQL compatible).
+    """
+    from sqlalchemy import inspect, text
+    eng = target_engine or engine
+    try:
+        inspector = inspect(eng)
+        table_names = inspector.get_table_names()
+        with eng.connect() as conn:
+            if "ambulances" in table_names:
+                amb_cols = [c["name"] for c in inspector.get_columns("ambulances")]
+                if "reservation_dispatch_id" not in amb_cols:
+                    conn.execute(text("ALTER TABLE ambulances ADD COLUMN reservation_dispatch_id INTEGER"))
+                    conn.commit()
+
+            if "hospitals" in table_names:
+                hosp_cols = [c["name"] for c in inspector.get_columns("hospitals")]
+                if "reserved_emergency_beds" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN reserved_emergency_beds INTEGER DEFAULT 0"))
+                    conn.commit()
+
+            if "dispatches" in table_names:
+                disp_cols = [c["name"] for c in inspector.get_columns("dispatches")]
+                if "coordination_status" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN coordination_status VARCHAR(40) DEFAULT 'PENDING_CONFIRMATIONS'"))
+                if "ambulance_confirmation_status" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN ambulance_confirmation_status VARCHAR(20) DEFAULT 'PENDING'"))
+                if "hospital_confirmation_status" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN hospital_confirmation_status VARCHAR(20) DEFAULT 'PENDING'"))
+                if "reservation_expires_at" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN reservation_expires_at DATETIME"))
+                if "ambulance_confirmed_at" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN ambulance_confirmed_at DATETIME"))
+                if "hospital_confirmed_at" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN hospital_confirmed_at DATETIME"))
+                if "confirmed_at" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN confirmed_at DATETIME"))
+                if "rejection_source" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN rejection_source VARCHAR(30)"))
+                if "rejection_reason" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN rejection_reason TEXT"))
+                if "attempt_number" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN attempt_number INTEGER DEFAULT 1"))
+                if "escalation_history_json" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN escalation_history_json TEXT DEFAULT '[]'"))
+                conn.commit()
+    except Exception as e:
+        logger.warning(f"Schema upgrade check note: {e}")
+
 def get_db():
     db: Session = SessionLocal()
     try:

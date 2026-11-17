@@ -9,8 +9,10 @@ from backend.app.api.dispatch import (
     create_dispatch,
     advance_dispatch_lifecycle,
     list_dispatches,
+    confirm_ambulance,
+    confirm_hospital,
 )
-from backend.app.schemas.dispatch import DispatchRequest
+from backend.app.schemas.dispatch import DispatchRequest, ConfirmationDecision
 
 @pytest.fixture(scope="module")
 def db():
@@ -65,9 +67,26 @@ def test_full_emergency_response_lifecycle(db):
     assert dispatch.estimated_eta_seconds is not None
     assert len(dispatch.route_geometry) > 0
 
-    # Verify states updated
+    # Verify provisional reservation state (Feature 1: Dual Confirmation & Smart Reservation)
     db.refresh(incident)
     assigned_amb = db.query(Ambulance).filter(Ambulance.id == top_ambulance["ambulance_id"]).first()
+    assert dispatch.coordination_status == "PENDING_CONFIRMATIONS"
+    assert incident.status == "ALLOCATED"
+    assert assigned_amb.status == "RESERVED"
+
+    # Verify lifecycle cannot advance before dual confirmation
+    with pytest.raises(Exception):
+        advance_dispatch_lifecycle(dispatch_id=dispatch.id, db=db)
+
+    # Perform dual confirmations
+    confirm_ambulance(dispatch_id=dispatch.id, payload=ConfirmationDecision(decision="ACCEPTED"), db=db)
+    confirm_hospital(dispatch_id=dispatch.id, payload=ConfirmationDecision(decision="ACCEPTED"), db=db)
+
+    # Verify confirmed state
+    db.refresh(dispatch)
+    db.refresh(incident)
+    db.refresh(assigned_amb)
+    assert dispatch.coordination_status == "CONFIRMED"
     assert incident.status == "DISPATCHED"
     assert assigned_amb.status == "DISPATCHED"
 

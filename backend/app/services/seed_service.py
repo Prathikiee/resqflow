@@ -171,11 +171,16 @@ def seed_database(db: Session, force: bool = False) -> dict:
     """
     seeded_counts = {"hospitals": 0, "ambulances": 0, "incidents": 0}
 
+    if force:
+        db.query(Dispatch).delete()
+        db.query(Incident).delete()
+        db.query(Ambulance).delete()
+        db.query(Hospital).delete()
+        db.commit()
+
     # Seed Hospitals
     hospital_count = db.query(Hospital).count()
-    if hospital_count == 0 or force:
-        if force:
-            db.query(Hospital).delete()
+    if hospital_count == 0:
         for h_data in MANGALURU_HOSPITALS:
             h = Hospital(
                 name=h_data["name"],
@@ -186,6 +191,7 @@ def seed_database(db: Session, force: bool = False) -> dict:
                 available_icu_beds=h_data["available_icu_beds"],
                 total_emergency_beds=h_data["total_emergency_beds"],
                 available_emergency_beds=h_data["available_emergency_beds"],
+                reserved_emergency_beds=0,
                 accepting_emergencies=h_data["accepting_emergencies"],
                 contact_number=h_data["contact_number"],
             )
