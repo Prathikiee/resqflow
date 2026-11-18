@@ -148,13 +148,61 @@ class Hospital(Base):
 
     accepting_emergencies = Column(Boolean, default=True)
     contact_number = Column(String(40), nullable=False)
+    emergency_contact_person = Column(String(120), nullable=True)
     last_updated_by = Column(String(120), default="System Seed")
+
+    # Additional Hospital Readiness Information
+    oxygen_status = Column(String(50), default="NORMAL")  # NORMAL, REFILL_SCHEDULED, LOW, CRITICAL
+    ventilators_total = Column(Integer, default=10)
+    ventilators_available = Column(Integer, default=6)
+    pediatric_beds_total = Column(Integer, default=10)
+    pediatric_beds_available = Column(Integer, default=5)
+    equipment_readiness_json = Column(Text, default="{}")  # {"ct_scanner": "OPERATIONAL", "cath_lab": "OPERATIONAL", ...}
+    blood_bank_status_json = Column(Text, default="{}")    # {"O_NEG": "ADEQUATE", "O_POS": "ADEQUATE", ...}
 
     last_updated = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     # Relationships
     dispatches = relationship("Dispatch", back_populates="destination_hospital")
     staff_users = relationship("User", back_populates="hospital")
+
+    @property
+    def occupied_emergency_beds(self) -> int:
+        return max(0, (self.total_emergency_beds or 0) - (self.available_emergency_beds or 0))
+
+    @property
+    def occupied_icu_beds(self) -> int:
+        return max(0, (self.total_icu_beds or 0) - (self.available_icu_beds or 0))
+
+    @property
+    def occupied_ward_beds(self) -> int:
+        return max(0, (self.total_ward_beds or 0) - (self.available_ward_beds or 0))
+
+    @property
+    def occupied_pediatric_beds(self) -> int:
+        return max(0, (self.pediatric_beds_total or 0) - (self.pediatric_beds_available or 0))
+
+    @property
+    def equipment_readiness(self) -> dict:
+        try:
+            return json.loads(self.equipment_readiness_json or "{}")
+        except Exception:
+            return {}
+
+    @equipment_readiness.setter
+    def equipment_readiness(self, val: dict):
+        self.equipment_readiness_json = json.dumps(val or {})
+
+    @property
+    def blood_bank_status(self) -> dict:
+        try:
+            return json.loads(self.blood_bank_status_json or "{}")
+        except Exception:
+            return {}
+
+    @blood_bank_status.setter
+    def blood_bank_status(self, val: dict):
+        self.blood_bank_status_json = json.dumps(val or {})
 
     @property
     def specialties(self) -> List[str]:
@@ -189,6 +237,13 @@ class Dispatch(Base):
 
     # Lifecycle status: ASSIGNED, ACKNOWLEDGED, EN_ROUTE_INCIDENT, ON_SCENE, EN_ROUTE_HOSPITAL, COMPLETED, CANCELLED
     status = Column(String(40), default="ASSIGNED", index=True)
+
+    # Hospital Preparation Workflow Status
+    # NOT_STARTED, TEAM_NOTIFIED, BAY_PREPARED, SPECIALISTS_STANDBY, READY_FOR_ARRIVAL
+    hospital_preparation_status = Column(String(40), default="NOT_STARTED", nullable=False)
+    hospital_preparation_notes = Column(Text, nullable=True)
+    hospital_acknowledged_at = Column(DateTime, nullable=True)
+    patient_arrived_hospital_confirmed_at = Column(DateTime, nullable=True)
 
     # Dual Confirmation & Reservation State
     # PENDING_CONFIRMATIONS, CONFIRMED, REJECTED, EXPIRED, REASSIGNMENT_REQUIRED
@@ -470,3 +525,61 @@ class User(Base):
     hospital = relationship("Hospital", back_populates="staff_users")
     ambulance = relationship("Ambulance", back_populates="crew_users")
     reported_incidents = relationship("Incident", back_populates="reporter")
+
+
+class CrashAlert(Base):
+    __tablename__ = "crash_alerts"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    ambulance_id = Column(Integer, ForeignKey("ambulances.id", ondelete="CASCADE"), nullable=False, index=True)
+    incident_id = Column(Integer, ForeignKey("incidents.id", ondelete="SET NULL"), nullable=True, index=True)
+    hospital_id = Column(Integer, ForeignKey("hospitals.id", ondelete="CASCADE"), nullable=False, index=True)
+    dispatch_id = Column(Integer, ForeignKey("dispatches.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    # Source: HARDWARE_IOT (future ESP32/GPS/IMU hardware), DEMO_SIMULATION
+    source = Column(String(30), default="DEMO_SIMULATION", nullable=False)
+    # Severity: MINOR, MODERATE, SEVERE, CRITICAL
+    severity = Column(String(30), default="CRITICAL", nullable=False)
+
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+    location_description = Column(String(255), nullable=True)
+
+    # Telemetry / Sensor Information: {"g_force": 4.8, "rollover": True, "impact_velocity_kmh": 62, "airbag_deployed": True}
+    sensor_data_json = Column(Text, default="{}")
+
+    # Acknowledgment & Hospital Response Status:
+    # TRIGGERED, ACKNOWLEDGED, TEAM_NOTIFIED, BACKUP_REQUESTED, RESOLVED
+    status = Column(String(40), default="TRIGGERED", nullable=False)
+    acknowledged_at = Column(DateTime, nullable=True)
+    acknowledged_by = Column(String(120), nullable=True)
+    response_notes = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=utc_now, nullable=False, index=True)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    # Relationships
+    ambulance = relationship("Ambulance")
+    hospital = relationship("Hospital")
+    incident = relationship("Incident")
+    dispatch = relationship("Dispatch")
+
+    @property
+    def ambulance_call_sign(self) -> Optional[str]:
+        return self.ambulance.call_sign if self.ambulance else None
+
+    @property
+    def hospital_name(self) -> Optional[str]:
+        return self.hospital.name if self.hospital else None
+
+    @property
+    def sensor_data(self) -> dict:
+        try:
+            return json.loads(self.sensor_data_json or "{}")
+        except Exception:
+            return {}
+
+    @sensor_data.setter
+    def sensor_data(self, val: dict):
+        self.sensor_data_json = json.dumps(val or {})
+

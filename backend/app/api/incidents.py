@@ -159,8 +159,15 @@ def list_incidents(
     """
     query = db.query(Incident)
     auth_user = current_user if isinstance(current_user, User) else None
-    if auth_user and auth_user.role == ROLE_CITIZEN:
-        query = query.filter(Incident.reporter_user_id == auth_user.id)
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            query = query.filter(Incident.reporter_user_id == auth_user.id)
+        elif auth_user.role == ROLE_HOSPITAL_STAFF:
+            if not auth_user.hospital_id:
+                return []
+            query = query.join(Dispatch, Dispatch.incident_id == Incident.id).filter(
+                Dispatch.destination_hospital_id == auth_user.hospital_id
+            ).distinct()
 
     return query.order_by(Incident.triage_score.desc(), Incident.created_at.desc()).all()
 
@@ -175,12 +182,28 @@ def get_incident(
         raise HTTPException(status_code=404, detail="Emergency incident not found")
 
     auth_user = current_user if isinstance(current_user, User) else None
-    if auth_user and auth_user.role == ROLE_CITIZEN:
-        if incident.reporter_user_id != auth_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied: Citizens can only inspect their own reported emergency incidents",
-            )
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            if incident.reporter_user_id != auth_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied: Citizens can only inspect their own reported emergency incidents",
+                )
+        elif auth_user.role == ROLE_HOSPITAL_STAFF:
+            if not auth_user.hospital_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied: Hospital staff not assigned to a facility",
+                )
+            has_dispatch = db.query(Dispatch).filter(
+                Dispatch.incident_id == incident.id,
+                Dispatch.destination_hospital_id == auth_user.hospital_id,
+            ).first()
+            if not has_dispatch:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied: Incident is not allocated to your hospital facility",
+                )
 
     return incident
 

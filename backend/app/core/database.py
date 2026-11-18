@@ -79,10 +79,34 @@ def upgrade_schema(target_engine=None):
                     conn.execute(text("ALTER TABLE hospitals ADD COLUMN doctors_availability_json TEXT DEFAULT '[]'"))
                 if "last_updated_by" not in hosp_cols:
                     conn.execute(text("ALTER TABLE hospitals ADD COLUMN last_updated_by VARCHAR(120) DEFAULT 'System Seed'"))
+                if "emergency_contact_person" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN emergency_contact_person VARCHAR(120)"))
+                if "oxygen_status" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN oxygen_status VARCHAR(50) DEFAULT 'NORMAL'"))
+                if "ventilators_total" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN ventilators_total INTEGER DEFAULT 10"))
+                if "ventilators_available" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN ventilators_available INTEGER DEFAULT 6"))
+                if "pediatric_beds_total" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN pediatric_beds_total INTEGER DEFAULT 10"))
+                if "pediatric_beds_available" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN pediatric_beds_available INTEGER DEFAULT 5"))
+                if "equipment_readiness_json" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN equipment_readiness_json TEXT DEFAULT '{}'"))
+                if "blood_bank_status_json" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN blood_bank_status_json TEXT DEFAULT '{}'"))
                 conn.commit()
 
             if "dispatches" in table_names:
                 disp_cols = [c["name"] for c in inspector.get_columns("dispatches")]
+                if "hospital_preparation_status" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN hospital_preparation_status VARCHAR(40) DEFAULT 'NOT_STARTED'"))
+                if "hospital_preparation_notes" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN hospital_preparation_notes TEXT"))
+                if "hospital_acknowledged_at" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN hospital_acknowledged_at DATETIME"))
+                if "patient_arrived_hospital_confirmed_at" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN patient_arrived_hospital_confirmed_at DATETIME"))
                 if "coordination_status" not in disp_cols:
                     conn.execute(text("ALTER TABLE dispatches ADD COLUMN coordination_status VARCHAR(40) DEFAULT 'PENDING_CONFIRMATIONS'"))
                 if "ambulance_confirmation_status" not in disp_cols:
@@ -125,6 +149,11 @@ def upgrade_schema(target_engine=None):
             if "users" not in table_names:
                 from backend.app.models.entities import User
                 User.__table__.create(bind=conn, checkfirst=True)
+                conn.commit()
+
+            if "crash_alerts" not in table_names:
+                from backend.app.models.entities import CrashAlert
+                CrashAlert.__table__.create(bind=conn, checkfirst=True)
                 conn.commit()
     except Exception as e:
         logger.warning(f"Schema upgrade check note: {e}")

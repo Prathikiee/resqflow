@@ -8,17 +8,32 @@ interface DemoAccount {
   label: string;
   role: string;
   email: string;
+  password?: string;
   description: string;
   badgeBg: string;
   badgeText: string;
   badgeBorder: string;
 }
 
+const HOSPITAL_DEMO_ACCOUNTS = [
+  { name: "KMC Hospital (Ambedkar Circle)", email: "kmc@lifelink.demo", password: "Kmc#HospitalPass2026!Mangaluru", code: "KMC-AMB-01" },
+  { name: "A.J. Hospital & Research Centre", email: "aj@lifelink.demo", password: "Aj#HospitalPass2026!Mangaluru", code: "AJH-KUN-02" },
+  { name: "Unity Hospital (Kankanady)", email: "unity@lifelink.demo", password: "Unity#HospitalPass2026!Mangaluru", code: "UNT-KAN-03" },
+  { name: "Indiana Hospital (Pumpwell)", email: "indiana@lifelink.demo", password: "Indiana#HospitalPass2026!Mangaluru", code: "IND-PUM-04" },
+  { name: "Yenepoya Speciality Hospital", email: "yenepoya@lifelink.demo", password: "Yenepoya#HospitalPass2026!Mangaluru", code: "YEN-KOD-05" },
+  { name: "Father Muller Medical College Hospital", email: "fathermuller@lifelink.demo", password: "FatherMuller#HospitalPass2026!Mangaluru", code: "FMM-KAN-06" },
+  { name: "City Hospital Research Centre", email: "cityhospital@lifelink.demo", password: "CityHospital#HospitalPass2026!Mangaluru", code: "CTH-MGL-07" },
+  { name: "Highland Hospital (Falnir)", email: "highland@lifelink.demo", password: "Highland#HospitalPass2026!Mangaluru", code: "HGH-FLN-08" },
+  { name: "Tejasvini Hospital (Kadri)", email: "tejasvini@lifelink.demo", password: "Tejasvini#HospitalPass2026!Mangaluru", code: "TEJ-KDR-09" },
+  { name: "Mangala Hospital (Kadri)", email: "mangala@lifelink.demo", password: "Mangala#HospitalPass2026!Mangaluru", code: "MGL-MGL-10" },
+];
+
 const DEMO_ACCOUNTS: DemoAccount[] = [
   {
     label: "Regional Dispatcher HQ",
     role: "DISPATCHER",
     email: "dispatcher@lifelink.demo",
+    password: "Lifelink@2026!",
     description: "Regional GIS command center, fleet tracking & manual reassignment",
     badgeBg: "bg-red-50",
     badgeText: "text-red-700",
@@ -28,6 +43,7 @@ const DEMO_ACCOUNTS: DemoAccount[] = [
     label: "Paramedic Unit (ALS-101)",
     role: "AMBULANCE_CREW",
     email: "als101@lifelink.demo",
+    password: "Lifelink@2026!",
     description: "KA-19-ALS-101 mission acceptance, live GPS & lifecycle stepping",
     badgeBg: "bg-blue-50",
     badgeText: "text-blue-700",
@@ -37,6 +53,7 @@ const DEMO_ACCOUNTS: DemoAccount[] = [
     label: "Hospital ER (KMC)",
     role: "HOSPITAL_STAFF",
     email: "kmc@lifelink.demo",
+    password: "Kmc#HospitalPass2026!Mangaluru",
     description: "KMC Ambedkar Circle bed reservation & pre-arrival handover review",
     badgeBg: "bg-emerald-50",
     badgeText: "text-emerald-700",
@@ -46,6 +63,7 @@ const DEMO_ACCOUNTS: DemoAccount[] = [
     label: "Citizen SOS Reporter",
     role: "CITIZEN",
     email: "citizen@lifelink.demo",
+    password: "Lifelink@2026!",
     description: "Civilian emergency request, private tracking & witness intelligence",
     badgeBg: "bg-amber-50",
     badgeText: "text-amber-800",
@@ -55,6 +73,7 @@ const DEMO_ACCOUNTS: DemoAccount[] = [
     label: "Super Administrator",
     role: "SUPER_ADMIN",
     email: "admin@lifelink.demo",
+    password: "Lifelink@2026!",
     description: "Regional emergency service authority & user account management",
     badgeBg: "bg-purple-50",
     badgeText: "text-purple-700",
@@ -72,9 +91,19 @@ export default function LoginPage() {
 
   const selectDemoAccount = (acc: DemoAccount) => {
     setEmail(acc.email);
-    setPassword("Lifelink@2026!");
+    setPassword(acc.password || "Lifelink@2026!");
     setSelectedRole(acc.role);
     setErrorMsg(null);
+  };
+
+  const selectHospitalAccount = (emailVal: string) => {
+    const found = HOSPITAL_DEMO_ACCOUNTS.find((h) => h.email === emailVal);
+    if (found) {
+      setEmail(found.email);
+      setPassword(found.password);
+      setSelectedRole("HOSPITAL_STAFF");
+      setErrorMsg(null);
+    }
   };
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -167,6 +196,28 @@ export default function LoginPage() {
                 <p className="text-[11px] text-slate-500 line-clamp-1">{acc.description}</p>
               </button>
             ))}
+          </div>
+
+          {/* Mangaluru 10 Hospitals Selector */}
+          <div className="mt-3 pt-3 border-t border-slate-100">
+            <label className="block text-[11px] font-semibold text-slate-600 mb-1 flex items-center justify-between">
+              <span>Switch Hospital ER Account (10 Mangaluru Facilities):</span>
+              <span className="text-[10px] text-emerald-600 font-mono font-medium">Isolated Facility Context</span>
+            </label>
+            <select
+              value={email.endsWith("@lifelink.demo") && HOSPITAL_DEMO_ACCOUNTS.some(h => h.email === email) ? email : ""}
+              onChange={(e) => {
+                if (e.target.value) selectHospitalAccount(e.target.value);
+              }}
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800 font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500"
+            >
+              <option value="" disabled>-- Select one of 10 Mangaluru Demo Hospitals --</option>
+              {HOSPITAL_DEMO_ACCOUNTS.map((hosp) => (
+                <option key={hosp.email} value={hosp.email}>
+                  {hosp.name} [{hosp.code}]
+                </option>
+              ))}
+            </select>
           </div>
         </div>
 

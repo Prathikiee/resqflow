@@ -35,6 +35,11 @@ def login(
     """
     email_clean = payload.email.strip().lower()
     user = db.query(User).filter(User.email == email_clean).first()
+    if not user and "@" not in email_clean:
+        # Support using hospital username/code as login identity
+        user = db.query(User).filter(User.email == f"{email_clean}@lifelink.demo").first()
+    if not user and "@" not in email_clean:
+        user = db.query(User).filter(User.email.ilike(f"{email_clean}%@lifelink.demo")).first()
 
     if not user:
         # Prevent timing enumeration attacks with a dummy verify

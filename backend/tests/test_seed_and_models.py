@@ -4,13 +4,13 @@ from backend.app.services.seed_service import seed_database
 
 def test_seed_database(db):
     results = seed_database(db, force=True)
-    assert results["hospitals"] == 5
+    assert results["hospitals"] == 10
     assert results["ambulances"] >= 4
     assert results["incidents"] == 1
 
     # Check hospital coordinates & specialties
     hospitals = db.query(Hospital).all()
-    assert len(hospitals) == 5
+    assert len(hospitals) == 10
     for h in hospitals:
         assert 12.80 <= h.latitude <= 13.00
         assert 74.70 <= h.longitude <= 74.90

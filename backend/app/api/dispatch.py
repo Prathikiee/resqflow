@@ -12,6 +12,7 @@ from backend.app.schemas.dispatch import (
     SimulateDecisionRequest,
     HandoverAcknowledgeRequest,
     HandoverPacketOut,
+    HospitalPreparationUpdate,
 )
 from backend.app.services.allocation_engine import score_and_rank_ambulances
 from backend.app.services.hospital_engine import rank_suitable_hospitals
@@ -1570,6 +1571,143 @@ def acknowledge_handover_packet(
     )
 
     return packet
+
+@router.patch("/{dispatch_id}/preparation", response_model=DispatchOut)
+def update_hospital_preparation(
+    dispatch_id: int,
+    payload: HospitalPreparationUpdate,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot update hospital preparation")
+        if auth_user.role == ROLE_AMBULANCE_CREW:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ambulance crew cannot update hospital ER preparation")
+        if auth_user.role == ROLE_HOSPITAL_STAFF:
+            if not auth_user.hospital_id or dispatch.destination_hospital_id != auth_user.hospital_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot update preparation for another hospital facility")
+
+    valid_prep = ["NOT_STARTED", "TEAM_NOTIFIED", "BAY_PREPARED", "SPECIALISTS_STANDBY", "READY_FOR_ARRIVAL"]
+    if payload.preparation_status not in valid_prep:
+        raise HTTPException(status_code=400, detail=f"Invalid preparation status '{payload.preparation_status}'. Valid: {valid_prep}")
+
+    dispatch.hospital_preparation_status = payload.preparation_status
+    if payload.preparation_notes:
+        existing = dispatch.hospital_preparation_notes or ""
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        entry = f"[{ts}] {payload.preparation_notes}"
+        dispatch.hospital_preparation_notes = f"{existing}\n{entry}".strip()
+
+    if not dispatch.hospital_acknowledged_at:
+        dispatch.hospital_acknowledged_at = get_utc_now()
+
+    db.commit()
+    db.refresh(dispatch)
+
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="HOSPITAL_PREPARATION_UPDATED",
+        event_title="Hospital Emergency Preparation Updated",
+        event_description=f"Receiving hospital updated status to '{payload.preparation_status}'.",
+        actor_type="HOSPITAL_ER",
+        actor_reference=payload.acknowledged_by or (auth_user.email if auth_user else "Hospital ER Staff"),
+        metadata={
+            "dispatch_id": dispatch.id,
+            "preparation_status": dispatch.hospital_preparation_status,
+            "preparation_notes": dispatch.hospital_preparation_notes,
+        },
+    )
+
+    inc = db.query(Incident).filter(Incident.id == dispatch.incident_id).first()
+    broadcast_sync(
+        "HOSPITAL_PREPARATION_UPDATED",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "destination_hospital_id": dispatch.destination_hospital_id,
+            "hospital_preparation_status": dispatch.hospital_preparation_status,
+            "hospital_preparation_notes": dispatch.hospital_preparation_notes,
+            "hospital_acknowledged_at": dispatch.hospital_acknowledged_at.isoformat() if dispatch.hospital_acknowledged_at else None,
+        },
+        ambulance_id=dispatch.ambulance_id,
+        hospital_id=dispatch.destination_hospital_id,
+        reporter_user_id=inc.reporter_user_id if inc else None,
+        entity_type="dispatch",
+        entity_id=dispatch.id,
+    )
+
+    return dispatch
+
+@router.post("/{dispatch_id}/confirm-arrival", response_model=DispatchOut)
+def confirm_patient_arrival_at_hospital(
+    dispatch_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot confirm hospital patient arrival")
+        if auth_user.role == ROLE_HOSPITAL_STAFF:
+            if not auth_user.hospital_id or dispatch.destination_hospital_id != auth_user.hospital_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot confirm arrival for another hospital facility")
+
+    now = get_utc_now()
+    dispatch.patient_arrived_hospital_confirmed_at = now
+    if dispatch.status in ["ASSIGNED", "EN_ROUTE", "ON_SCENE", "TRANSPORTING"]:
+        dispatch.status = "AT_HOSPITAL"
+
+    incident = db.query(Incident).filter(Incident.id == dispatch.incident_id).first()
+    if incident and incident.status in ["REPORTED", "TRIAGED", "ALLOCATED", "DISPATCHED", "EN_ROUTE", "ON_SCENE", "TRANSPORTING"]:
+        incident.status = "AT_HOSPITAL"
+
+    db.commit()
+    db.refresh(dispatch)
+
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="PATIENT_ARRIVED_HOSPITAL",
+        event_title="Patient Arrived at Hospital ER",
+        event_description="Emergency department confirmed patient arrival and reception into trauma bay.",
+        actor_type="HOSPITAL_ER",
+        actor_reference=auth_user.email if auth_user else "Hospital ER Staff",
+        metadata={
+            "dispatch_id": dispatch.id,
+            "confirmed_at": now.isoformat(),
+        },
+    )
+
+    broadcast_sync(
+        "PATIENT_ARRIVED_HOSPITAL",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "destination_hospital_id": dispatch.destination_hospital_id,
+            "status": dispatch.status,
+            "patient_arrived_hospital_confirmed_at": now.isoformat(),
+        },
+        ambulance_id=dispatch.ambulance_id,
+        hospital_id=dispatch.destination_hospital_id,
+        reporter_user_id=incident.reporter_user_id if incident else None,
+        entity_type="dispatch",
+        entity_id=dispatch.id,
+    )
+
+    return dispatch
 
 @router.get("/route/preview")
 def preview_route(

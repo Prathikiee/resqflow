@@ -10,7 +10,7 @@ from backend.app.core.database import get_db, Base, engine, SessionLocal, upgrad
 from backend.app.services.seed_service import seed_database
 from backend.app.core.ws import ws_manager
 from backend.app.core.security import decode_access_token
-from backend.app.api import incidents, ambulances, hospitals, seed, dispatch, witness_reports, auth
+from backend.app.api import incidents, ambulances, hospitals, seed, dispatch, witness_reports, auth, crash_alerts
 from backend.app.api.dispatch import check_and_escalate_expired_dispatches
 
 logging.basicConfig(level=logging.INFO)
@@ -87,6 +87,7 @@ app.include_router(ambulances.router)
 app.include_router(hospitals.router)
 app.include_router(dispatch.router)
 app.include_router(witness_reports.router)
+app.include_router(crash_alerts.router)
 app.include_router(seed.router)
 
 def authenticate_websocket_connection(websocket: WebSocket):

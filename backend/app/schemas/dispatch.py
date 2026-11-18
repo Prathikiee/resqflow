@@ -23,6 +23,12 @@ class SimulateDecisionRequest(BaseModel):
 class HandoverAcknowledgeRequest(BaseModel):
     acknowledged_by: Optional[str] = None
 
+class HospitalPreparationUpdate(BaseModel):
+    preparation_status: str = Field(..., description="NOT_STARTED, TEAM_NOTIFIED, BAY_PREPARED, SPECIALISTS_STANDBY, READY_FOR_ARRIVAL")
+    preparation_notes: Optional[str] = None
+    acknowledged_by: Optional[str] = None
+
+
 class HandoverPacketOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -69,6 +75,12 @@ class DispatchOut(BaseModel):
     ambulance_id: int
     destination_hospital_id: Optional[int] = None
     status: str
+
+    # Hospital Preparation Workflow fields
+    hospital_preparation_status: str = "NOT_STARTED"
+    hospital_preparation_notes: Optional[str] = None
+    hospital_acknowledged_at: Optional[datetime] = None
+    patient_arrived_hospital_confirmed_at: Optional[datetime] = None
 
     # Dual confirmation & reservation fields
     coordination_status: str = "PENDING_CONFIRMATIONS"

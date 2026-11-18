@@ -10,7 +10,7 @@ def test_hospital_ranking_for_cardiac(db):
     result = rank_suitable_hospitals(incident=incident, hospitals=hospitals)
     ranked = result["ranked_hospitals"]
 
-    assert len(ranked) == 5
+    assert len(ranked) == 10
     top_hospital = ranked[0]
     assert top_hospital["rank"] == 1
     assert "Cardiology" in top_hospital["matched_specialties"]
