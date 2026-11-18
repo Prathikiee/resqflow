@@ -45,7 +45,9 @@ export default function UnifiedTimelinePanel({
   const fetchTimeline = useCallback(async () => {
     if (!incidentId) return;
     try {
-      const res = await fetch(`${backendUrl}/api/incidents/${incidentId}/timeline`);
+      const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+      const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+      const res = await fetch(`${backendUrl}/api/incidents/${incidentId}/timeline`, { headers });
       if (res.ok) {
         setEvents(await res.json());
       }

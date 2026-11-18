@@ -51,18 +51,8 @@ from backend.app.core.ws import (
 from backend.app.core.database import Base, engine, SessionLocal, upgrade_schema
 from backend.app.services.seed_service import seed_database, seed_demo_users
 
-@pytest.fixture(scope="module")
-def fresh_db():
-    Base.metadata.create_all(bind=engine)
-    upgrade_schema()
-    session = SessionLocal()
-    seed_database(session, force=True)
-    yield session
-    session.close()
-
 @pytest.fixture
 def sync_db(fresh_db: Session):
-    fresh_db.rollback()
     seed_demo_users(fresh_db)
     return fresh_db
 

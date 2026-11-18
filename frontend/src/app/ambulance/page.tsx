@@ -23,6 +23,8 @@ import {
   Check,
   X,
   ShieldAlert,
+  Compass,
+  ExternalLink,
 } from "lucide-react";
 
 interface DispatchRecord {
@@ -32,6 +34,9 @@ interface DispatchRecord {
   ambulance_call_sign: string;
   destination_hospital_name: string;
   destination_hospital_id: number;
+  destination_hospital_address?: string;
+  destination_hospital_latitude?: number;
+  destination_hospital_longitude?: number;
   coordination_status: string;
   ambulance_confirmation_status: string;
   hospital_confirmation_status: string;
@@ -40,11 +45,16 @@ interface DispatchRecord {
   reservation_expires_at?: string;
   estimated_eta_seconds?: number;
   route_distance_meters?: number;
+  incident_latitude?: number;
+  incident_longitude?: number;
+  incident_address?: string;
   incident?: {
     id: number;
     caller_name: string;
     caller_phone: string;
     location_address: string;
+    latitude?: number;
+    longitude?: number;
     chief_complaint: string;
     triage_level: string;
     triage_color: string;
@@ -54,9 +64,9 @@ interface DispatchRecord {
 }
 
 const NEXT_LIFECYCLE_ACTION: Record<string, { nextStatus: string; label: string; icon: string }> = {
-  ASSIGNED: { nextStatus: "EN_ROUTE_INCIDENT", label: "Confirm En Route to Patient Scene", icon: "Navigation" },
+  ASSIGNED: { nextStatus: "EN_ROUTE_INCIDENT", label: "Confirm En Route to Incident Scene", icon: "Navigation" },
   EN_ROUTE_INCIDENT: { nextStatus: "ON_SCENE", label: "Confirm Arrived on Scene with Patient", icon: "MapPin" },
-  ON_SCENE: { nextStatus: "EN_ROUTE_HOSPITAL", label: "Departing Scene towards Hospital ER", icon: "Building2" },
+  ON_SCENE: { nextStatus: "EN_ROUTE_HOSPITAL", label: "Patient Onboard • Departing Scene towards Hospital ER", icon: "Building2" },
   EN_ROUTE_HOSPITAL: { nextStatus: "COMPLETED", label: "Confirm Arrived at ER & Safe Handover", icon: "CheckCircle2" },
 };
 
@@ -446,10 +456,16 @@ export default function AmbulancePortalPage() {
             </div>
 
             {/* Mission Details Preview */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-4 rounded-xl bg-white border border-amber-200 text-xs font-mono">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 p-4 rounded-xl bg-white border border-amber-200 text-xs font-mono">
+              <div>
+                <span className="text-slate-400 block text-[10px]">Patient Scene:</span>
+                <strong className="text-slate-900 text-xs truncate block">
+                  {pendingDispatch.incident?.location_address || pendingDispatch.incident_address || "Mangaluru Scene"}
+                </strong>
+              </div>
               <div>
                 <span className="text-slate-400 block text-[10px]">Destination ER:</span>
-                <strong className="text-slate-900 text-sm">{pendingDispatch.destination_hospital_name}</strong>
+                <strong className="text-slate-900 text-xs truncate block">{pendingDispatch.destination_hospital_name}</strong>
               </div>
               <div>
                 <span className="text-slate-400 block text-[10px]">Hospital Bed Status:</span>
@@ -524,6 +540,119 @@ export default function AmbulancePortalPage() {
                   <span>{actionLoading ? "Updating..." : nextAction.label} &rarr;</span>
                 </button>
               )}
+            </div>
+
+            {/* Turn-by-Turn GPS Tactical Navigation Panel */}
+            <div className="p-4 rounded-xl bg-slate-900 text-white space-y-3 shadow-md">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Compass className="w-4 h-4 text-emerald-400" />
+                  <h4 className="text-xs font-mono font-bold tracking-wider uppercase text-slate-200">
+                    Tactical Turn-by-Turn GPS Navigation
+                  </h4>
+                </div>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold">
+                  LIVE GIS ROUTING
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                {/* 1. Patient Scene Destination */}
+                <div className={`p-3.5 rounded-lg border flex flex-col justify-between space-y-2 ${
+                  activeMission.status === "ASSIGNED" || activeMission.status === "EN_ROUTE_INCIDENT"
+                    ? "bg-slate-800 border-emerald-500 ring-2 ring-emerald-500/20"
+                    : "bg-slate-800/60 border-slate-700"
+                }`}>
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-mono font-bold text-emerald-400 uppercase">
+                        Waypoint 1: Patient Scene
+                      </span>
+                      {(activeMission.status === "ASSIGNED" || activeMission.status === "EN_ROUTE_INCIDENT") && (
+                        <span className="text-[9px] font-mono bg-emerald-500 text-slate-950 px-1.5 py-0.5 rounded font-black">
+                          ACTIVE LEG
+                        </span>
+                      )}
+                    </div>
+                    <strong className="block text-slate-100 mt-1 text-sm font-semibold">
+                      {activeMission.incident?.location_address || activeMission.incident_address || "Patient Scene Location"}
+                    </strong>
+                    <span className="text-[10px] font-mono text-slate-400 block mt-0.5">
+                      Coordinates: {activeMission.incident?.latitude || activeMission.incident_latitude || 12.8770}° N, {activeMission.incident?.longitude || activeMission.incident_longitude || 74.8580}° E
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <a
+                      href={`https://www.google.com/maps/dir/?api=1&destination=${activeMission.incident?.latitude || activeMission.incident_latitude || 12.8770},${activeMission.incident?.longitude || activeMission.incident_longitude || 74.8580}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex-1 py-2 px-3 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-center text-[11px] transition flex items-center justify-center gap-1.5 shadow-xs"
+                    >
+                      <Navigation className="w-3.5 h-3.5" />
+                      <span>Navigate via Google Maps</span>
+                      <ExternalLink className="w-3 h-3 ml-0.5 opacity-80" />
+                    </a>
+                    <a
+                      href={`https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=;${activeMission.incident?.latitude || activeMission.incident_latitude || 12.8770},${activeMission.incident?.longitude || activeMission.incident_longitude || 74.8580}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="py-2 px-2.5 rounded-md bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px] font-mono transition"
+                      title="Open in OpenStreetMap"
+                    >
+                      OSM
+                    </a>
+                  </div>
+                </div>
+
+                {/* 2. Destination Hospital ER */}
+                <div className={`p-3.5 rounded-lg border flex flex-col justify-between space-y-2 ${
+                  activeMission.status === "ON_SCENE" || activeMission.status === "EN_ROUTE_HOSPITAL"
+                    ? "bg-slate-800 border-blue-500 ring-2 ring-blue-500/20"
+                    : "bg-slate-800/60 border-slate-700"
+                }`}>
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-mono font-bold text-blue-400 uppercase">
+                        Waypoint 2: Destination Hospital ER
+                      </span>
+                      {(activeMission.status === "ON_SCENE" || activeMission.status === "EN_ROUTE_HOSPITAL") && (
+                        <span className="text-[9px] font-mono bg-blue-500 text-white px-1.5 py-0.5 rounded font-black">
+                          ACTIVE LEG
+                        </span>
+                      )}
+                    </div>
+                    <strong className="block text-slate-100 mt-1 text-sm font-semibold">
+                      {activeMission.destination_hospital_name || "Assigned Hospital Facility"}
+                    </strong>
+                    <span className="text-[10px] font-mono text-slate-400 block mt-0.5">
+                      Coordinates: {activeMission.destination_hospital_latitude || 12.8718}° N, {activeMission.destination_hospital_longitude || 74.8458}° E
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <a
+                      href={`https://www.google.com/maps/dir/?api=1&destination=${activeMission.destination_hospital_latitude || 12.8718},${activeMission.destination_hospital_longitude || 74.8458}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex-1 py-2 px-3 rounded-md bg-blue-600 hover:bg-blue-500 text-white font-bold text-center text-[11px] transition flex items-center justify-center gap-1.5 shadow-xs"
+                    >
+                      <Building2 className="w-3.5 h-3.5" />
+                      <span>Navigate to ER Dept</span>
+                      <ExternalLink className="w-3 h-3 ml-0.5 opacity-80" />
+                    </a>
+                    <a
+                      href={`https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=;${activeMission.destination_hospital_latitude || 12.8718},${activeMission.destination_hospital_longitude || 74.8458}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="py-2 px-2.5 rounded-md bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px] font-mono transition"
+                      title="Open in OpenStreetMap"
+                    >
+                      OSM
+                    </a>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* SBAR Pre-Arrival Handover Packet Preview */}

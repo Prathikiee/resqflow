@@ -1,8 +1,6 @@
 import pytest
 from fastapi import HTTPException
-from backend.app.core.database import SessionLocal, Base, engine
 from backend.app.models.entities import Incident, Ambulance, Hospital, Dispatch
-from backend.app.services.seed_service import seed_database
 from backend.app.api.incidents import create_incident
 from backend.app.schemas.incident import IncidentCreate
 from backend.app.api.dispatch import (
@@ -14,14 +12,6 @@ from backend.app.api.dispatch import (
     confirm_hospital,
 )
 from backend.app.schemas.dispatch import DispatchRequest, ConfirmationDecision
-
-@pytest.fixture(scope="module")
-def db():
-    Base.metadata.create_all(bind=engine)
-    session = SessionLocal()
-    seed_database(session, force=True)
-    yield session
-    session.close()
 
 def test_full_emergency_response_lifecycle(db):
     # 1. Emergency Registration & Transparent Triage

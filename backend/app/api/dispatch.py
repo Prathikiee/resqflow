@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
@@ -600,17 +600,79 @@ def get_dispatch_recommendation(incident_id: int, db: Session = Depends(get_db))
         "hospital_ranking": hospital_results,
     }
 
+@router.post("/auto-allocate/{incident_id}", response_model=DispatchOut, status_code=status.HTTP_201_CREATED)
+def auto_allocate_dispatch(
+    incident_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    request: Request = None,
+):
+    """
+    Automatic Ambulance & Hospital Allocation Engine:
+    Selects the best available ambulance and suitable hospital using multi-factor scoring
+    and establishes a temporary dual confirmation reservation with 90-second expiry.
+    """
+    auth_user = current_user if isinstance(current_user, User) else None
+    if request is not None and auth_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to trigger automatic dispatch allocation.",
+        )
+    if auth_user and auth_user.role not in (ROLE_DISPATCHER, ROLE_SUPER_ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: {auth_user.role} accounts cannot trigger dispatch allocation.",
+        )
+
+    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    ambulances = db.query(Ambulance).all()
+    hospitals = db.query(Hospital).all()
+
+    amb_results = score_and_rank_ambulances(incident=incident, ambulances=ambulances)
+    hosp_results = rank_suitable_hospitals(incident=incident, hospitals=hospitals)
+
+    rec_amb = amb_results.get("recommended_ambulance")
+    rec_hosp = hosp_results.get("recommended_hospital")
+
+    if not rec_amb:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No feasible ambulance currently available in the sector. Incident placed on priority manual dispatch queue.",
+        )
+    if not rec_hosp:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No suitable receiving emergency department currently available. Incident awaiting manual medical direction.",
+        )
+
+    dispatch_payload = DispatchRequest(
+        incident_id=incident.id,
+        ambulance_id=rec_amb["ambulance_id"],
+        destination_hospital_id=rec_hosp["hospital_id"],
+    )
+
+    return create_dispatch(payload=dispatch_payload, db=db, current_user=current_user, request=None)
+
 @router.post("", response_model=DispatchOut, status_code=status.HTTP_201_CREATED)
 def create_dispatch(
     payload: DispatchRequest,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_current_user),
+    request: Request = None,
 ):
     auth_user = current_user if isinstance(current_user, User) else None
-    if auth_user and auth_user.role in (ROLE_CITIZEN, ROLE_HOSPITAL_STAFF):
+    if request is not None and auth_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required: Only authorized regional dispatchers can create dispatches.",
+        )
+    if auth_user and auth_user.role not in (ROLE_DISPATCHER, ROLE_SUPER_ADMIN):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Access denied: {auth_user.role} accounts cannot directly issue fleet dispatches. Dispatches are created by Regional Dispatchers or Automated System.",
+            detail=f"Access denied: {auth_user.role} accounts cannot directly issue fleet dispatches. Only Dispatchers and Super Administrators are authorized.",
         )
 
     begin_immediate_if_sqlite(db)
@@ -1370,17 +1432,28 @@ def get_handover_packet(
     dispatch_id: int,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_current_user),
+    request: Request = None,
 ):
     """
     FEATURE 3 — EMERGENCY HANDOVER PACKET:
     Retrieves the persistent handover packet for a dispatch.
     Returns 404 if dispatch does not exist or if dual confirmation has not yet occurred.
+    Access Control:
+      - Blocked for unauthenticated HTTP requests.
+      - Citizens are strictly forbidden from clinical SBAR packets.
+      - Paramedics restricted to their assigned ambulance.
+      - Hospital staff restricted to their own facility.
     """
     dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
     if not dispatch:
         raise HTTPException(status_code=404, detail="Dispatch record not found")
 
     auth_user = current_user if isinstance(current_user, User) else None
+    if request is not None and auth_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to inspect clinical handover packets.",
+        )
     if auth_user:
         if auth_user.role == ROLE_CITIZEN:
             raise HTTPException(

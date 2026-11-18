@@ -264,7 +264,12 @@ def test_08_hospital_staff_assigned_access(fresh_db: Session):
     db = fresh_db
     kmc_user = db.query(User).filter(User.email == "kmc@lifelink.demo").first()
     inc = db.query(Incident).first()
-    amb = db.query(Ambulance).first()
+    amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
+    if not amb:
+        amb = db.query(Ambulance).first()
+        amb.status = "AVAILABLE"
+        amb.reservation_dispatch_id = None
+        db.commit()
 
     disp = Dispatch(
         incident_id=inc.id,
@@ -308,7 +313,12 @@ def test_09_hospital_staff_cross_facility_denial(fresh_db: Session):
     kmc = db.query(Hospital).filter(Hospital.facility_code == "HOSP-MNG-001").first()
     aj_user = db.query(User).filter(User.email == "aj@lifelink.demo").first()
     inc = db.query(Incident).first()
-    amb = db.query(Ambulance).first()
+    amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
+    if not amb:
+        amb = db.query(Ambulance).first()
+        amb.status = "AVAILABLE"
+        amb.reservation_dispatch_id = None
+        db.commit()
 
     # Dispatch routed to KMC, NOT AJ
     disp = Dispatch(
@@ -372,7 +382,12 @@ def test_10_dispatcher_regional_access(fresh_db: Session):
 
     amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
     if not amb:
+        amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
+    if not amb:
         amb = db.query(Ambulance).first()
+        amb.status = "AVAILABLE"
+        amb.reservation_dispatch_id = None
+        db.commit()
         amb.status = "AVAILABLE"
         amb.reservation_dispatch_id = None
         db.commit()
@@ -462,7 +477,12 @@ def test_13_cross_organization_data_isolation(fresh_db: Session):
     kmc = db.query(Hospital).filter(Hospital.facility_code == "HOSP-MNG-001").first()
     aj_user = db.query(User).filter(User.email == "aj@lifelink.demo").first()
     inc = db.query(Incident).first()
-    amb = db.query(Ambulance).first()
+    amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
+    if not amb:
+        amb = db.query(Ambulance).first()
+        amb.status = "AVAILABLE"
+        amb.reservation_dispatch_id = None
+        db.commit()
 
     # Confirmed dispatch routed to KMC Hospital
     disp = Dispatch(
@@ -487,3 +507,149 @@ def test_13_cross_organization_data_isolation(fresh_db: Session):
         get_handover_packet(disp.id, db=db, current_user=aj_user)
     assert exc_info.value.status_code == 403
     assert "Hospital staff can only view handover packets routed to their own facility" in exc_info.value.detail
+
+# =========================================================================
+# 14. Citizen and hospital staff cannot directly create fleet dispatches
+# =========================================================================
+def test_14_citizen_and_hospital_cannot_create_dispatch(fresh_db: Session):
+    db = fresh_db
+    citizen_user = db.query(User).filter(User.role == ROLE_CITIZEN).first()
+    hospital_user = db.query(User).filter(User.role == ROLE_HOSPITAL_STAFF).first()
+    disp_user = db.query(User).filter(User.role == ROLE_DISPATCHER).first()
+    inc = db.query(Incident).filter(Incident.status == "TRIAGED").first()
+    if not inc:
+        inc = db.query(Incident).first()
+    amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
+    if not amb:
+        amb = db.query(Ambulance).first()
+        amb.status = "AVAILABLE"
+        amb.reservation_dispatch_id = None
+        db.commit()
+    hosp = db.query(Hospital).first()
+
+    payload = DispatchRequest(incident_id=inc.id, ambulance_id=amb.id, destination_hospital_id=hosp.id)
+
+    # Citizen blocked with 403
+    with pytest.raises(HTTPException) as exc1:
+        create_dispatch(payload, db=db, current_user=citizen_user)
+    assert exc1.value.status_code == 403
+
+    # Hospital staff blocked with 403
+    with pytest.raises(HTTPException) as exc2:
+        create_dispatch(payload, db=db, current_user=hospital_user)
+    assert exc2.value.status_code == 403
+
+    # Dispatcher authorized
+    disp = create_dispatch(payload, db=db, current_user=disp_user)
+    assert disp.id is not None
+
+# =========================================================================
+# 15. Citizen strictly forbidden from accessing clinical handover packets
+# =========================================================================
+def test_15_citizen_strictly_forbidden_from_clinical_handover(fresh_db: Session):
+    db = fresh_db
+    citizen_user = db.query(User).filter(User.role == ROLE_CITIZEN).first()
+    inc = db.query(Incident).first()
+    amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
+    if not amb:
+        amb = db.query(Ambulance).first()
+        amb.status = "AVAILABLE"
+        amb.reservation_dispatch_id = None
+        db.commit()
+    hosp = db.query(Hospital).first()
+
+    disp = Dispatch(
+        incident_id=inc.id,
+        ambulance_id=amb.id,
+        destination_hospital_id=hosp.id,
+        coordination_status="CONFIRMED",
+        ambulance_confirmation_status="ACCEPTED",
+        hospital_confirmation_status="ACCEPTED",
+        attempt_number=1,
+    )
+    db.add(disp)
+    db.commit()
+    db.refresh(disp)
+
+    # Ensure Handover packet generated
+    get_handover_packet(disp.id, db=db)
+
+    # Citizen access to clinical SBAR packet is blocked
+    with pytest.raises(HTTPException) as exc:
+        get_handover_packet(disp.id, db=db, current_user=citizen_user)
+    assert exc.value.status_code == 403
+    assert "strictly confidential" in exc.value.detail.lower()
+
+# =========================================================================
+# 16. Seed/reset endpoint strictly restricted to SUPER_ADMIN
+# =========================================================================
+def test_16_seed_endpoint_strictly_restricted_to_super_admin(fresh_db: Session):
+    from backend.app.api.seed import trigger_seed
+    db = fresh_db
+    admin_user = db.query(User).filter(User.role == ROLE_SUPER_ADMIN).first()
+    disp_user = db.query(User).filter(User.role == ROLE_DISPATCHER).first()
+    citizen_user = db.query(User).filter(User.role == ROLE_CITIZEN).first()
+
+    # Citizen cannot seed
+    with pytest.raises(HTTPException) as exc1:
+        trigger_seed(force=False, db=db, current_user=citizen_user)
+    assert exc1.value.status_code == 403
+
+    # Dispatcher cannot seed
+    with pytest.raises(HTTPException) as exc2:
+        trigger_seed(force=False, db=db, current_user=disp_user)
+    assert exc2.value.status_code == 403
+
+    # Super Admin can seed
+    res = trigger_seed(force=False, db=db, current_user=admin_user)
+    assert res["status"] == "success"
+
+# =========================================================================
+# 17. Unauthenticated requests to operational endpoints rejected with 401
+# =========================================================================
+def test_17_unauthenticated_requests_to_operational_endpoints_rejected_with_401(fresh_db: Session):
+    from backend.app.api.hospitals import update_hospital_capacity, HospitalCapacityUpdate
+    from backend.app.api.ambulances import update_ambulance_status, update_ambulance_telemetry, AmbulanceLocationUpdate
+    db = fresh_db
+
+    hosp = db.query(Hospital).first()
+    amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
+    if not amb:
+        amb = db.query(Ambulance).first()
+        amb.status = "AVAILABLE"
+        amb.reservation_dispatch_id = None
+        db.commit()
+
+    # 1. Unauthenticated capacity update -> 401 Unauthorized
+    with pytest.raises(HTTPException) as exc1:
+        update_hospital_capacity(
+            hospital_id=hosp.id,
+            payload=HospitalCapacityUpdate(available_emergency_beds=5),
+            db=db,
+            current_user=None,
+        )
+    assert exc1.value.status_code == 401
+    assert "Authentication required" in exc1.value.detail
+
+    # 2. Unauthenticated ambulance status update -> 401 Unauthorized
+    with pytest.raises(HTTPException) as exc2:
+        update_ambulance_status(
+            ambulance_id=amb.id,
+            status="AVAILABLE",
+            db=db,
+            current_user=None,
+        )
+    assert exc2.value.status_code == 401
+    assert "Authentication required" in exc2.value.detail
+
+    # 3. Unauthenticated ambulance telemetry update -> 401 Unauthorized
+    with pytest.raises(HTTPException) as exc3:
+        update_ambulance_telemetry(
+            ambulance_id=amb.id,
+            payload=AmbulanceLocationUpdate(latitude=12.91, longitude=74.85),
+            db=db,
+            current_user=None,
+        )
+    assert exc3.value.status_code == 401
+    assert "Authentication required" in exc3.value.detail
+

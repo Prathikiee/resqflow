@@ -1,17 +1,7 @@
 import pytest
-from backend.app.core.database import SessionLocal, Base, engine
 from backend.app.models.entities import Ambulance, Incident
-from backend.app.services.seed_service import seed_database
 from backend.app.services.allocation_engine import score_and_rank_ambulances
 from backend.app.services.triage_engine import assess_incident_severity
-
-@pytest.fixture(scope="module")
-def db():
-    Base.metadata.create_all(bind=engine)
-    session = SessionLocal()
-    seed_database(session, force=True)
-    yield session
-    session.close()
 
 def test_allocation_excludes_busy_and_maintenance(db):
     incident = db.query(Incident).first()

@@ -3,21 +3,13 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Activity,
   AlertTriangle,
   Ambulance,
   CheckCircle2,
   Clock,
-  MapPin,
-  Phone,
   Radio,
-  Shield,
   RefreshCw,
   LogOut,
-  ChevronRight,
-  User,
-  Eye,
-  FileText,
   Building2,
   Bed,
   Check,
@@ -26,6 +18,11 @@ import {
   Minus,
   Sparkles,
   ShieldAlert,
+  UserCheck,
+  Stethoscope,
+  Users,
+  Eye,
+  FileText,
 } from "lucide-react";
 
 interface DispatchRecord {
@@ -52,6 +49,7 @@ interface DispatchRecord {
     triage_level: string;
     triage_color: string;
     status: string;
+    required_ambulance_type?: string;
   };
   handover_packet?: any;
 }
@@ -66,7 +64,7 @@ export default function HospitalPortalPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: "success" | "error" | "info" } | null>(null);
 
-  // Handover modal & clinician input
+  // SBAR Handover modal & clinician input
   const [activeHandoverPacket, setActiveHandoverPacket] = useState<any | null>(null);
   const [clinicianName, setClinicianName] = useState("");
 
@@ -150,14 +148,20 @@ export default function HospitalPortalPage() {
               if (processedEventsRef.current.has(data.event_id)) return;
               processedEventsRef.current.add(data.event_id);
             }
-            if (data.event && data.event !== "PONG" && data.event !== "HANDSHAKE") {
-              if (data.event === "DISPATCH_CREATED") {
-                setFeedbackMsg({ text: "Incoming Provisional Bed Reservation from Regional Dispatch!", type: "info" });
-              } else if (data.event === "HANDOVER_PACKET_GENERATED") {
-                setFeedbackMsg({ text: "Pre-arrival Clinical Handover Packet received for inbound patient!", type: "success" });
-              } else if (data.event === "HOSPITAL_CAPACITY_UPDATED") {
-                setFeedbackMsg({ text: "Emergency bed capacity synchronized across regional network.", type: "info" });
-              }
+
+            if (data.event === "DISPATCH_PROVISIONAL_RESERVATION") {
+              setFeedbackMsg({ text: "URGENT: Inbound patient bed reservation request received!", type: "info" });
+              fetchHospitalData();
+            } else if (data.event === "HOSPITAL_CAPACITY_UPDATED") {
+              setFeedbackMsg({ text: "Hospital capacity updated & synchronized across regional network.", type: "info" });
+              fetchHospitalData();
+            } else if (
+              data.event === "DISPATCH_CONFIRMATION_UPDATED" ||
+              data.event === "DISPATCH_CONFIRMED" ||
+              data.event === "DISPATCH_LIFECYCLE_STEPPED" ||
+              data.event === "DISPATCH_ESCALATED" ||
+              data.event === "DISPATCH_EXPIRED"
+            ) {
               fetchHospitalData();
             }
           } catch (_) {}
@@ -167,66 +171,65 @@ export default function HospitalPortalPage() {
 
     connect();
 
-    const pollInterval = setInterval(fetchHospitalData, 7000);
-
     return () => {
-      clearInterval(pollInterval);
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) ws.close();
     };
   }, [backendUrl, fetchHospitalData]);
 
-  // Active provisional dispatch targeting this hospital
+  // Active incoming requests
   const pendingDispatch = dispatches.find(
     (d) => d.coordination_status === "PENDING_CONFIRMATIONS" && d.hospital_confirmation_status === "PENDING"
   );
 
-  // Inbound en-route dispatches
-  const inboundDispatches = dispatches.filter(
+  const activeInboundDispatches = dispatches.filter(
     (d) => d.coordination_status === "CONFIRMED" && d.status !== "COMPLETED" && d.status !== "CANCELLED"
   );
 
-  // Completed / Admitted dispatches
   const completedDispatches = dispatches.filter((d) => d.status === "COMPLETED");
 
-  // Calculate live reservation countdown
+  // Reservation countdown timer
   useEffect(() => {
-    if (!pendingDispatch || !pendingDispatch.reservation_expires_at) {
+    if (!pendingDispatch?.reservation_expires_at) {
       setRemainingSeconds(null);
       return;
     }
 
     const updateTimer = () => {
-      const expiresMs = new Date(pendingDispatch.reservation_expires_at!).getTime();
-      const diffSecs = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
-      setRemainingSeconds(diffSecs);
+      const expMs = new Date(pendingDispatch.reservation_expires_at!).getTime();
+      const nowMs = Date.now();
+      const diffSec = Math.max(0, Math.floor((expMs - nowMs) / 1000));
+      setRemainingSeconds(diffSec);
     };
 
     updateTimer();
-    const timer = setInterval(updateTimer, 1000);
-    return () => clearInterval(timer);
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
   }, [pendingDispatch]);
 
-  const handleConfirmBedReservation = async (dispatchId: number, decision: "ACCEPTED" | "REJECTED") => {
+  // Handle Accept or Reject Incoming Case
+  const handleDecideReservation = async (dispatchId: number, decision: "ACCEPTED" | "REJECTED") => {
     if (isActionInProgressRef.current) return;
     isActionInProgressRef.current = true;
     setActionLoading(true);
-    setFeedbackMsg(null);
     const token = localStorage.getItem("lifelink_token");
 
     try {
-      const resp = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/confirm/hospital`, {
+      const resp = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/confirm-hospital`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify({
+          decision,
+          rejection_reason: decision === "REJECTED" ? "Emergency Department Divert / Capacity Exhausted" : undefined,
+        }),
       });
 
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
-        throw new Error(err.detail || "Failed to confirm bed reservation");
+        throw new Error(err.detail || `Failed to record decision (${resp.status})`);
       }
 
       setFeedbackMsg({
@@ -242,11 +245,10 @@ export default function HospitalPortalPage() {
     }
   };
 
-  const handleAdjustBeds = async (delta: number) => {
+  // AVAILABILITY MANAGEMENT: Update Readiness (Ready / Busy / Divert)
+  const handleSetReadiness = async (readiness: "READY" | "BUSY" | "DIVERT") => {
     if (!hospital?.id) return;
     const token = localStorage.getItem("lifelink_token");
-    const currentBeds = hospital.available_emergency_beds || 0;
-    const newBeds = Math.max(0, currentBeds + delta);
 
     try {
       const resp = await fetch(`${backendUrl}/api/hospitals/${hospital.id}/capacity`, {
@@ -255,41 +257,87 @@ export default function HospitalPortalPage() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ available_emergency_beds: newBeds }),
-      });
-
-      if (resp.ok) {
-        setHospital(await resp.json());
-        setFeedbackMsg({ text: `Available emergency bed capacity updated to ${newBeds}`, type: "success" });
-      }
-    } catch (_) {}
-  };
-
-  const handleToggleAccepting = async () => {
-    if (!hospital?.id) return;
-    const token = localStorage.getItem("lifelink_token");
-    const newStatus = !hospital.accepting_emergencies;
-
-    try {
-      const resp = await fetch(`${backendUrl}/api/hospitals/${hospital.id}/capacity`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ accepting_emergencies: newStatus }),
+        body: JSON.stringify({
+          readiness_status: readiness,
+          accepting_emergencies: readiness !== "DIVERT",
+          updated_by_name: user?.full_name || clinicianName,
+        }),
       });
 
       if (resp.ok) {
         setHospital(await resp.json());
         setFeedbackMsg({
-          text: `Facility emergency intake is now ${newStatus ? "ACTIVE / OPEN" : "ON DIVERT"}`,
-          type: newStatus ? "success" : "info",
+          text: `Facility operational readiness updated to ${readiness}. Persisted to database.`,
+          type: readiness === "READY" ? "success" : "info",
         });
       }
     } catch (_) {}
   };
 
+  // AVAILABILITY MANAGEMENT: Adjust Bed Counters
+  const handleAdjustBeds = async (type: "emergency" | "icu" | "ward", delta: number) => {
+    if (!hospital?.id) return;
+    const token = localStorage.getItem("lifelink_token");
+
+    const payload: any = { updated_by_name: user?.full_name || clinicianName };
+    if (type === "emergency") {
+      payload.available_emergency_beds = Math.max(0, (hospital.available_emergency_beds || 0) + delta);
+    } else if (type === "icu") {
+      payload.available_icu_beds = Math.max(0, (hospital.available_icu_beds || 0) + delta);
+    } else if (type === "ward") {
+      payload.available_ward_beds = Math.max(0, (hospital.available_ward_beds || 0) + delta);
+    }
+
+    try {
+      const resp = await fetch(`${backendUrl}/api/hospitals/${hospital.id}/capacity`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (resp.ok) {
+        setHospital(await resp.json());
+        setFeedbackMsg({ text: `Updated ${type} bed availability. Persisted to database.`, type: "success" });
+      }
+    } catch (_) {}
+  };
+
+  // AVAILABILITY MANAGEMENT: Toggle Doctor Availability Status
+  const handleToggleDoctorStatus = async (doctorIndex: number) => {
+    if (!hospital?.id || !hospital.doctors_availability) return;
+    const token = localStorage.getItem("lifelink_token");
+
+    const updatedDoctors = [...hospital.doctors_availability];
+    const currentStatus = updatedDoctors[doctorIndex].status;
+    updatedDoctors[doctorIndex].status = currentStatus === "AVAILABLE" ? "BUSY_IN_PROCEDURE" : "AVAILABLE";
+
+    try {
+      const resp = await fetch(`${backendUrl}/api/hospitals/${hospital.id}/capacity`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          doctors_availability: updatedDoctors,
+          updated_by_name: user?.full_name || clinicianName,
+        }),
+      });
+
+      if (resp.ok) {
+        setHospital(await resp.json());
+        setFeedbackMsg({
+          text: `Updated on-shift doctor status for ${updatedDoctors[doctorIndex].name}.`,
+          type: "success",
+        });
+      }
+    } catch (_) {}
+  };
+
+  // Inspect SBAR Handover Packet
   const handleInspectHandover = async (dispatchId: number) => {
     const token = localStorage.getItem("lifelink_token");
     try {
@@ -302,6 +350,7 @@ export default function HospitalPortalPage() {
     } catch (_) {}
   };
 
+  // Clinician Formal Sign-Off on SBAR Handover
   const handleAcknowledgeHandover = async () => {
     if (!activeHandoverPacket?.dispatch_id) return;
     if (isActionInProgressRef.current) return;
@@ -349,86 +398,66 @@ export default function HospitalPortalPage() {
   if (isLoading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="flex items-center gap-3 bg-white px-5 py-3 rounded-xl border border-slate-200 shadow-sm">
-          <Building2 className="w-5 h-5 text-emerald-600 animate-pulse" />
-          <span className="text-xs font-semibold text-slate-700">Connecting to Hospital ER Console...</span>
+        <div className="flex flex-col items-center gap-3 text-slate-700">
+          <RefreshCw className="w-8 h-8 animate-spin text-emerald-600" />
+          <span className="text-sm font-semibold">Loading Hospital ER Intake Console...</span>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans selection:bg-emerald-100 selection:text-emerald-900">
-      {/* Top Application Bar */}
-      <header className="border-b border-slate-200 bg-white/95 backdrop-blur px-5 py-3 flex flex-wrap items-center justify-between gap-4 sticky top-0 z-40 shadow-2xs">
-        <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center text-white shadow-md shadow-emerald-600/20">
-            <Building2 className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-base font-black tracking-tight text-slate-900">LIFELINK</h1>
-              <span className="text-xs font-semibold text-slate-400">/ Hospital ER Console</span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold uppercase">
-                {hospital?.facility_code || "HOSP-MNG"}
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans">
+      {/* ============================================================== */}
+      {/* HEADER                                                         */}
+      {/* ============================================================== */}
+      <header className="bg-white border-b border-slate-200 px-4 py-3 sm:px-6 sticky top-0 z-40 shadow-2xs">
+        <div className="max-w-7xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-600 flex items-center justify-center text-white shadow-md shadow-emerald-600/20">
+              <Building2 className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="font-black text-lg tracking-tight text-slate-900">
+                  {hospital?.name || "Hospital Emergency Dept"}
+                </h1>
+                <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
+                  {hospital?.facility_code || "HOSP-ER"}
+                </span>
+              </div>
+              <span className="text-xs text-slate-500 block">
+                Emergency Intake & Live Bed Availability Management
               </span>
             </div>
-            <p className="text-xs text-slate-500">
-              Facility: <strong className="text-slate-800">{hospital?.name}</strong> | Clinician: {user?.full_name}
-            </p>
-          </div>
-        </div>
-
-        {/* Live Status, Portal Switcher & Logout */}
-        <div className="flex items-center gap-3">
-          <div
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-mono font-medium ${
-              wsConnected
-                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                : "bg-amber-50 text-amber-700 border-amber-200"
-            }`}
-          >
-            <span className={`w-2 h-2 rounded-full ${wsConnected ? "bg-emerald-500 animate-ping" : "bg-amber-500"}`} />
-            <span>{wsConnected ? "Trauma Feed Live" : "Reconnecting..."}</span>
           </div>
 
-          <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs font-semibold">
-            <button
-              onClick={() => router.push("/dispatcher")}
-              className="px-2.5 py-1 rounded-md text-slate-600 hover:text-slate-900 hover:bg-white transition"
-              title="Regional Dispatcher Command HQ"
+          <div className="flex items-center gap-3">
+            <div
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-bold border ${
+                wsConnected
+                  ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                  : "bg-amber-50 text-amber-800 border-amber-200 animate-pulse"
+              }`}
             >
-              Dispatcher HQ
-            </button>
+              <span className={`w-2 h-2 rounded-full ${wsConnected ? "bg-emerald-500 animate-ping" : "bg-amber-500"}`} />
+              <span>{wsConnected ? "Network Online" : "Reconnecting..."}</span>
+            </div>
+
             <button
-              onClick={() => router.push("/ambulance")}
-              className="px-2.5 py-1 rounded-md text-slate-600 hover:text-slate-900 hover:bg-white transition"
-              title="Paramedic In-Vehicle Terminal"
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition"
             >
-              Ambulance
-            </button>
-            <button
-              onClick={() => router.push("/citizen")}
-              className="px-2.5 py-1 rounded-md text-slate-600 hover:text-slate-900 hover:bg-white transition"
-              title="Citizen SOS Portal"
-            >
-              Citizen SOS
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sign Out</span>
             </button>
           </div>
-
-          <button
-            onClick={handleLogout}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-bold transition cursor-pointer"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Sign Out</span>
-          </button>
         </div>
       </header>
 
-      {/* Main Workspace */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 space-y-6">
-        {/* Feedback message banner */}
+      {/* Main Container */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
+        {/* Feedback Alert */}
         {feedbackMsg && (
           <div
             className={`p-3.5 rounded-xl border text-xs font-medium flex items-center justify-between ${
@@ -445,85 +474,243 @@ export default function HospitalPortalPage() {
         )}
 
         {/* ============================================================== */}
-        {/* FACILITY CAPACITY & EMERGENCY INTAKE MANAGEMENT BAR           */}
+        {/* 1. COMPACT AVAILABILITY-MANAGEMENT SECTION                     */}
         {/* ============================================================== */}
-        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs grid grid-cols-1 sm:grid-cols-4 gap-4 items-center">
-          {/* Bed Counter */}
-          <div className="sm:col-span-2 flex items-center justify-between p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
             <div>
-              <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold block">
-                Available Emergency Bays
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-mono uppercase tracking-wider font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800">
+                  DEMO DATA
+                </span>
+                <h2 className="text-sm font-black text-slate-900 uppercase tracking-wide">
+                  Operational Facility Availability & Readiness
+                </h2>
+              </div>
+              <span className="text-[11px] text-slate-500">
+                Hospital staff directly manage capacity. Live updates are persisted in database and read by allocation engine.
               </span>
-              <div className="flex items-baseline gap-2 mt-0.5">
-                <span className="text-2xl font-black font-mono text-slate-900">
-                  {hospital?.available_emergency_beds ?? 0}
+            </div>
+
+            <div className="text-left sm:text-right text-[11px] text-slate-400 font-mono">
+              <span>Last updated: </span>
+              <strong className="text-slate-700">
+                {hospital?.last_updated ? new Date(hospital.last_updated).toLocaleTimeString() : "Just now"}
+              </strong>
+              <span> by </span>
+              <strong className="text-slate-700">{hospital?.last_updated_by || clinicianName}</strong>
+            </div>
+          </div>
+
+          {/* READINESS SELECTOR: READY / BUSY / DIVERT */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {[
+              {
+                id: "READY",
+                label: "Ready",
+                desc: "Normal emergency intake. Fully operational.",
+                activeColor: "bg-emerald-600 text-white border-emerald-600 shadow-md",
+                idleColor: "bg-slate-50 text-slate-700 hover:bg-emerald-50/50 border-slate-200",
+              },
+              {
+                id: "BUSY",
+                label: "Busy",
+                desc: "High volume. Extended triage wait times.",
+                activeColor: "bg-amber-600 text-white border-amber-600 shadow-md",
+                idleColor: "bg-slate-50 text-slate-700 hover:bg-amber-50/50 border-slate-200",
+              },
+              {
+                id: "DIVERT",
+                label: "Divert",
+                desc: "Facility closed to incoming non-critical ambulances.",
+                activeColor: "bg-rose-600 text-white border-rose-600 shadow-md",
+                idleColor: "bg-slate-50 text-slate-700 hover:bg-rose-50/50 border-slate-200",
+              },
+            ].map((st) => {
+              const isSelected = (hospital?.readiness_status || "READY") === st.id;
+              return (
+                <button
+                  key={st.id}
+                  onClick={() => handleSetReadiness(st.id as any)}
+                  className={`p-3.5 rounded-xl border text-left transition flex flex-col justify-between ${
+                    isSelected ? st.activeColor : st.idleColor
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-black text-sm uppercase tracking-wide">{st.label}</span>
+                    {isSelected && <Check className="w-4 h-4" />}
+                  </div>
+                  <span className={`text-[11px] mt-1 ${isSelected ? "text-white/90" : "text-slate-500"}`}>
+                    {st.desc}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* BED CAPACITY COUNTERS (EMERGENCY, ICU, WARD, RESERVED) */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {/* Emergency Beds */}
+            <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex flex-col justify-between">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500 font-bold block">
+                  Available ER Bays
                 </span>
-                <span className="text-xs text-slate-500 font-mono">
-                  / {hospital?.total_emergency_beds ?? 15} total capacity
-                </span>
+                <div className="flex items-baseline gap-1.5 mt-0.5">
+                  <span className="text-2xl font-black font-mono text-slate-900">
+                    {hospital?.available_emergency_beds ?? 0}
+                  </span>
+                  <span className="text-xs text-slate-500 font-mono">
+                    / {hospital?.total_emergency_beds ?? 35}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5 mt-2">
+                <button
+                  onClick={() => handleAdjustBeds("emergency", -1)}
+                  className="w-7 h-7 rounded-lg bg-white hover:bg-slate-200 border border-slate-300 flex items-center justify-center text-slate-700 font-bold transition"
+                  title="Decrease available ER bed"
+                >
+                  <Minus className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={() => handleAdjustBeds("emergency", 1)}
+                  className="w-7 h-7 rounded-lg bg-white hover:bg-slate-200 border border-slate-300 flex items-center justify-center text-slate-700 font-bold transition"
+                  title="Increase available ER bed"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
               </div>
             </div>
 
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => handleAdjustBeds(-1)}
-                className="w-8 h-8 rounded-lg bg-white hover:bg-slate-200 border border-slate-300 flex items-center justify-center text-slate-700 font-bold transition cursor-pointer"
-                title="Decrement available bay"
-              >
-                <Minus className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={() => handleAdjustBeds(1)}
-                className="w-8 h-8 rounded-lg bg-white hover:bg-slate-200 border border-slate-300 flex items-center justify-center text-slate-700 font-bold transition cursor-pointer"
-                title="Increment available bay"
-              >
-                <Plus className="w-3.5 h-3.5" />
-              </button>
+            {/* ICU Beds */}
+            <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex flex-col justify-between">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500 font-bold block">
+                  Available ICU Beds
+                </span>
+                <div className="flex items-baseline gap-1.5 mt-0.5">
+                  <span className="text-2xl font-black font-mono text-purple-900">
+                    {hospital?.available_icu_beds ?? 0}
+                  </span>
+                  <span className="text-xs text-slate-500 font-mono">
+                    / {hospital?.total_icu_beds ?? 22}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5 mt-2">
+                <button
+                  onClick={() => handleAdjustBeds("icu", -1)}
+                  className="w-7 h-7 rounded-lg bg-white hover:bg-slate-200 border border-slate-300 flex items-center justify-center text-slate-700 font-bold transition"
+                  title="Decrease available ICU bed"
+                >
+                  <Minus className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={() => handleAdjustBeds("icu", 1)}
+                  className="w-7 h-7 rounded-lg bg-white hover:bg-slate-200 border border-slate-300 flex items-center justify-center text-slate-700 font-bold transition"
+                  title="Increase available ICU bed"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+
+            {/* Ward Beds */}
+            <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex flex-col justify-between">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500 font-bold block">
+                  Available Ward Beds
+                </span>
+                <div className="flex items-baseline gap-1.5 mt-0.5">
+                  <span className="text-2xl font-black font-mono text-blue-900">
+                    {hospital?.available_ward_beds ?? 0}
+                  </span>
+                  <span className="text-xs text-slate-500 font-mono">
+                    / {hospital?.total_ward_beds ?? 60}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5 mt-2">
+                <button
+                  onClick={() => handleAdjustBeds("ward", -1)}
+                  className="w-7 h-7 rounded-lg bg-white hover:bg-slate-200 border border-slate-300 flex items-center justify-center text-slate-700 font-bold transition"
+                  title="Decrease available ward bed"
+                >
+                  <Minus className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={() => handleAdjustBeds("ward", 1)}
+                  className="w-7 h-7 rounded-lg bg-white hover:bg-slate-200 border border-slate-300 flex items-center justify-center text-slate-700 font-bold transition"
+                  title="Increase available ward bed"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+
+            {/* Reserved / Locked Bays */}
+            <div className="p-3.5 bg-blue-50/60 rounded-xl border border-blue-200 flex flex-col justify-between">
+              <div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-blue-700 font-bold block">
+                  Reserved / En Route
+                </span>
+                <div className="flex items-baseline gap-1.5 mt-0.5">
+                  <span className="text-2xl font-black font-mono text-blue-900">
+                    {hospital?.reserved_emergency_beds ?? 0}
+                  </span>
+                  <span className="text-xs text-blue-600 font-semibold">bays locked</span>
+                </div>
+              </div>
+              <span className="text-[10px] text-blue-600 mt-2 block">
+                Held during provisional mission & active transit.
+              </span>
             </div>
           </div>
 
-          {/* Reserved Beds Counter */}
-          <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
-            <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold block">
-              Reserved / En Route
+          {/* DOCTORS AVAILABILITY BY SPECIALTY & CURRENT SHIFT */}
+          <div className="space-y-2 pt-1">
+            <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
+              On-Shift Doctors & Clinical Specialists (Simulated Demo Availability)
             </span>
-            <div className="flex items-baseline gap-2 mt-0.5">
-              <span className="text-2xl font-black font-mono text-blue-700">
-                {hospital?.reserved_emergency_beds ?? 0}
-              </span>
-              <span className="text-xs text-slate-500">locked bays</span>
-            </div>
-          </div>
 
-          {/* Intake Status Toggle */}
-          <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between">
-            <div>
-              <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold block">
-                Intake Readiness
-              </span>
-              <span
-                className={`text-xs font-bold font-mono ${
-                  hospital?.accepting_emergencies ? "text-emerald-700" : "text-red-700"
-                }`}
-              >
-                {hospital?.accepting_emergencies ? "OPEN / ACCEPTING" : "ON DIVERT"}
-              </span>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {(hospital?.doctors_availability || []).map((doc: any, idx: number) => {
+                const isAvail = doc.status === "AVAILABLE";
+                return (
+                  <div
+                    key={idx}
+                    className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-between text-xs"
+                  >
+                    <div className="space-y-0.5">
+                      <span className="font-bold text-slate-900 block">{doc.name}</span>
+                      <span className="text-[11px] text-slate-500 block">
+                        {doc.specialty} • {doc.shift}
+                      </span>
+                    </div>
+
+                    <button
+                      onClick={() => handleToggleDoctorStatus(idx)}
+                      className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider transition ${
+                        isAvail
+                          ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-200"
+                          : "bg-amber-100 text-amber-800 hover:bg-amber-200"
+                      }`}
+                    >
+                      {isAvail ? "Available" : "In Procedure"}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
-            <button
-              onClick={handleToggleAccepting}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
-                hospital?.accepting_emergencies
-                  ? "bg-emerald-100 hover:bg-emerald-200 text-emerald-800"
-                  : "bg-red-100 hover:bg-red-200 text-red-800"
-              }`}
-            >
-              {hospital?.accepting_emergencies ? "Set Divert" : "Reopen ER"}
-            </button>
           </div>
         </div>
 
         {/* ============================================================== */}
-        {/* INCOMING PROVISIONAL RESERVATION BANNER WITH 90s COUNTDOWN    */}
+        {/* 2. INCOMING PROVISIONAL RESERVATION (90s TTL)                  */}
         {/* ============================================================== */}
         {pendingDispatch && (
           <div className="bg-amber-500/10 border-2 border-amber-500 rounded-2xl p-6 shadow-md space-y-4 animate-pulse-slow">
@@ -549,7 +736,7 @@ export default function HospitalPortalPage() {
 
               {/* Countdown Pill */}
               <div className="text-right">
-                <span className="text-[11px] font-mono text-slate-500 block">Dual Confirmation TTL Window</span>
+                <span className="text-[11px] font-mono text-slate-500 block">Confirmation TTL Window</span>
                 <div className="flex items-center gap-1.5 text-2xl font-black font-mono text-amber-900">
                   <Clock className="w-6 h-6 text-amber-600 animate-spin" />
                   <span>{remainingSeconds !== null ? `${remainingSeconds}s` : "90s"}</span>
@@ -558,10 +745,10 @@ export default function HospitalPortalPage() {
             </div>
 
             {/* Mission Details Preview */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-4 rounded-xl bg-white border border-amber-200 text-xs font-mono">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 p-4 rounded-xl bg-white border border-amber-200 text-xs font-mono">
               <div>
-                <span className="text-slate-400 block text-[10px]">Patient Chief Complaint:</span>
-                <strong className="text-slate-900 text-sm">
+                <span className="text-slate-400 block text-[10px]">Chief Complaint:</span>
+                <strong className="text-slate-900 text-xs">
                   {pendingDispatch.incident?.chief_complaint || "Emergency Patient Intake"}
                 </strong>
               </div>
@@ -569,6 +756,12 @@ export default function HospitalPortalPage() {
                 <span className="text-slate-400 block text-[10px]">Triage Priority:</span>
                 <strong className="text-red-700">
                   {pendingDispatch.incident?.triage_level || "P1 Critical"}
+                </strong>
+              </div>
+              <div>
+                <span className="text-slate-400 block text-[10px]">Required Care Tier:</span>
+                <strong className="text-blue-700">
+                  {pendingDispatch.incident?.required_ambulance_type || "ALS (Trauma/Cardiac)"}
                 </strong>
               </div>
               <div>
@@ -581,267 +774,179 @@ export default function HospitalPortalPage() {
               </div>
             </div>
 
-            {/* Accept / Decline CTAs */}
+            {/* Accept / Reject Buttons */}
             <div className="flex items-center justify-end gap-3 pt-2">
               <button
-                onClick={() => handleConfirmBedReservation(pendingDispatch.id, "REJECTED")}
+                onClick={() => handleDecideReservation(pendingDispatch.id, "REJECTED")}
                 disabled={actionLoading}
-                className="px-5 py-2.5 rounded-xl bg-white hover:bg-red-50 text-red-700 border border-red-300 font-bold text-xs transition cursor-pointer"
+                className="px-5 py-2.5 rounded-xl bg-white hover:bg-red-50 text-red-700 border border-red-300 font-bold text-xs transition flex items-center gap-1.5 cursor-pointer"
               >
-                Decline Bed / Divert
+                <X className="w-4 h-4 text-red-600" />
+                <span>Decline Intake (Divert to Alternative)</span>
               </button>
+
               <button
-                onClick={() => handleConfirmBedReservation(pendingDispatch.id, "ACCEPTED")}
+                onClick={() => handleDecideReservation(pendingDispatch.id, "ACCEPTED")}
                 disabled={actionLoading}
-                className="px-7 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-md shadow-emerald-600/30 transition cursor-pointer flex items-center gap-2"
+                className="px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-md transition flex items-center gap-1.5 cursor-pointer transform active:scale-95"
               >
                 <Check className="w-4 h-4" />
-                <span>Confirm Emergency Bed ({remainingSeconds || 90}s)</span>
+                <span>Confirm Bed & Accept Patient</span>
               </button>
             </div>
           </div>
         )}
 
         {/* ============================================================== */}
-        {/* INBOUND AMBULANCE QUEUE & HANDOVER INSPECTION                  */}
+        {/* 3. INBOUND EMERGENCY AMBULANCE QUEUE                           */}
         {/* ============================================================== */}
         <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+          <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Ambulance className="w-5 h-5 text-blue-600" />
-              <div>
-                <h3 className="text-sm font-bold text-slate-900">Inbound En-Route Ambulances ({inboundDispatches.length})</h3>
-                <p className="text-xs text-slate-500">Live ETA tracking and pre-arrival digital handover briefs</p>
-              </div>
+              <Ambulance className="w-5 h-5 text-emerald-600" />
+              <h2 className="text-base font-black text-slate-900">
+                Inbound Active Emergency Ambulance Queue
+              </h2>
             </div>
-            <button
-              onClick={fetchHospitalData}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Refresh</span>
-            </button>
+            <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
+              {activeInboundDispatches.length} active
+            </span>
           </div>
 
-          {inboundDispatches.length === 0 ? (
-            <div className="text-center py-8 text-xs text-slate-400 font-mono space-y-1">
-              <CheckCircle2 className="w-8 h-8 text-slate-300 mx-auto" />
-              <p>No ambulances currently en route to this emergency department.</p>
+          {activeInboundDispatches.length === 0 ? (
+            <div className="p-8 text-center text-xs text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+              No active ambulances currently en route to this facility.
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {inboundDispatches.map((disp) => (
-                <div
-                  key={disp.id}
-                  className="p-4 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-slate-50 transition space-y-3"
-                >
-                  <div className="flex items-start justify-between">
-                    <div>
+            <div className="divide-y divide-slate-100">
+              {activeInboundDispatches.map((disp) => {
+                return (
+                  <div key={disp.id} className="py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1">
                       <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs font-bold text-blue-700">#{disp.ambulance_call_sign}</span>
-                        <span className="font-mono text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 font-bold">
-                          {disp.status.replace(/_/g, " ")}
+                        <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-900">
+                          {disp.ambulance_call_sign}
+                        </span>
+                        <span className="text-xs font-bold text-slate-800">
+                          {disp.incident?.chief_complaint || "Emergency Patient"}
                         </span>
                       </div>
-                      <h4 className="text-sm font-bold text-slate-900 mt-1">
-                        {disp.incident?.chief_complaint || "Emergency Patient Intake"}
-                      </h4>
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 font-mono">
+                        <span>Status: <strong className="text-blue-700">{disp.status.replace(/_/g, " ")}</strong></span>
+                        {disp.estimated_eta_seconds && (
+                          <span>ETA: <strong className="text-amber-700">~{Math.ceil(disp.estimated_eta_seconds / 60)} mins</strong></span>
+                        )}
+                        <span>Triage: <strong className="text-red-700">{disp.incident?.triage_level}</strong></span>
+                      </div>
                     </div>
 
-                    <div className="text-right">
-                      <span className="text-[10px] font-mono text-slate-400 block">Estimated ETA</span>
-                      <strong className="text-sm font-black text-emerald-700 font-mono">
-                        {disp.estimated_eta_seconds
-                          ? `~${Math.ceil(disp.estimated_eta_seconds / 60)} mins`
-                          : "En route"}
-                      </strong>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between pt-2 border-t border-slate-200 text-xs">
-                    <span className="text-[11px] font-mono text-slate-500">
-                      Handover:{" "}
-                      <strong className={disp.handover_packet?.status === "ACKNOWLEDGED" ? "text-emerald-700" : "text-amber-700"}>
-                        {disp.handover_packet?.status || "Generated"}
-                      </strong>
-                    </span>
-
-                    <button
-                      onClick={() => handleInspectHandover(disp.id)}
-                      className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs transition flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <FileText className="w-3.5 h-3.5" />
-                      <span>Inspect Handover</span>
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* ============================================================== */}
-        {/* ADMITTED / COMPLETED EMERGENCY CASES LOG                       */}
-        {/* ============================================================== */}
-        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4">
-          <div className="pb-3 border-b border-slate-100">
-            <h3 className="text-sm font-bold text-slate-900">Admitted Patients & Handover Archive</h3>
-            <p className="text-xs text-slate-500">Record of emergency cases safely delivered and acknowledged</p>
-          </div>
-
-          {completedDispatches.length === 0 ? (
-            <p className="text-center py-4 text-xs text-slate-400 font-mono">No historical admissions today.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs text-left">
-                <thead className="bg-slate-50 text-slate-500 font-mono uppercase text-[10px] border-b border-slate-200">
-                  <tr>
-                    <th className="py-2.5 px-3">Dispatch</th>
-                    <th className="py-2.5 px-3">Unit</th>
-                    <th className="py-2.5 px-3">Complaint</th>
-                    <th className="py-2.5 px-3">Triage</th>
-                    <th className="py-2.5 px-3">Handover Officer</th>
-                    <th className="py-2.5 px-3">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {completedDispatches.map((disp) => (
-                    <tr key={disp.id} className="hover:bg-slate-50/80 transition">
-                      <td className="py-3 px-3 font-mono font-bold text-slate-700">#DSP-{disp.id}</td>
-                      <td className="py-3 px-3 font-mono font-bold text-blue-700">{disp.ambulance_call_sign}</td>
-                      <td className="py-3 px-3 font-semibold text-slate-800">
-                        {disp.incident?.chief_complaint || "Medical Case"}
-                      </td>
-                      <td className="py-3 px-3 font-mono text-[11px]">{disp.incident?.triage_level || "P1"}</td>
-                      <td className="py-3 px-3 text-slate-700 font-mono text-[11px]">
-                        {disp.handover_packet?.acknowledged_by || "ER Triage Desk"}
-                      </td>
-                      <td className="py-3 px-3">
-                        <span className="font-mono text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold">
-                          ADMITTED
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </main>
-
-      {/* Handover Packet Inspection Modal */}
-      {activeHandoverPacket && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fadeIn">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-xl max-w-xl w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2 text-blue-600">
-                <FileText className="w-5 h-5" />
-                <h3 className="font-bold text-base text-slate-900">
-                  Digital Pre-Arrival Handover Packet (SBAR)
-                </h3>
-              </div>
-              <button
-                onClick={() => setActiveHandoverPacket(null)}
-                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
-              >
-                ✕
-              </button>
-            </div>
-
-            {/* SBAR Sections */}
-            <div className="space-y-3 text-xs">
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
-                <span className="font-bold text-blue-900 font-mono uppercase text-[10px] block">
-                  1. Situation & Triage Assessment
-                </span>
-                <p className="text-slate-800 font-semibold">{activeHandoverPacket.chief_complaint}</p>
-                <div className="flex items-center gap-2 pt-1 font-mono text-[11px]">
-                  <span className="px-2 py-0.5 rounded bg-red-100 text-red-800 font-bold">
-                    {activeHandoverPacket.triage_priority} ({activeHandoverPacket.triage_color})
-                  </span>
-                  <span className="text-slate-500">Triage Score: {activeHandoverPacket.triage_score}/100</span>
-                </div>
-              </div>
-
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
-                <span className="font-bold text-blue-900 font-mono uppercase text-[10px] block">
-                  2. Background & Symptoms
-                </span>
-                <p className="text-slate-700">
-                  Patient Location: {activeHandoverPacket.incident_address || "Mangaluru Corridor"}
-                </p>
-                {activeHandoverPacket.reported_symptoms?.length > 0 && (
-                  <p className="text-slate-600 font-mono text-[11px] pt-1">
-                    Symptoms: {activeHandoverPacket.reported_symptoms.join(", ")}
-                  </p>
-                )}
-              </div>
-
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
-                <span className="font-bold text-blue-900 font-mono uppercase text-[10px] block">
-                  3. Inbound Ambulance Transport
-                </span>
-                <p className="text-slate-800 font-mono">Unit: {activeHandoverPacket.ambulance_call_sign}</p>
-                <p className="text-slate-600 font-mono text-[11px]">
-                  Equipment: {(activeHandoverPacket.required_equipment || []).join(", ") || "Standard Trauma Kit"}
-                </p>
-              </div>
-
-              {/* Acknowledgment Box */}
-              <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-emerald-900 block text-xs">
-                    Clinical Intake Acknowledgment Status:
-                  </span>
-                  <span className="font-mono text-[11px] font-bold text-emerald-800 uppercase">
-                    {activeHandoverPacket.status || "PENDING"}
-                  </span>
-                </div>
-
-                {activeHandoverPacket.status === "ACKNOWLEDGED" ? (
-                  <div className="text-xs text-emerald-800 font-mono">
-                    Acknowledged by: <strong>{activeHandoverPacket.acknowledged_by}</strong> on{" "}
-                    {new Date(activeHandoverPacket.acknowledged_at).toLocaleTimeString()}
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <label className="block text-emerald-900 font-bold text-[11px]">
-                      Clinician / Triage Officer Signature:
-                    </label>
                     <div className="flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={clinicianName}
-                        onChange={(e) => setClinicianName(e.target.value)}
-                        placeholder="e.g. Dr. A. Shenoy"
-                        className="flex-1 px-3 py-1.5 rounded-lg border border-emerald-300 bg-white text-xs"
-                      />
                       <button
-                        onClick={handleAcknowledgeHandover}
-                        disabled={actionLoading || !clinicianName.trim()}
-                        className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition cursor-pointer flex items-center gap-1.5"
+                        onClick={() => handleInspectHandover(disp.id)}
+                        className="px-3.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
                       >
-                        <Check className="w-3.5 h-3.5" />
-                        <span>Acknowledge</span>
+                        <FileText className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Inspect Digital SBAR Handover</span>
                       </button>
                     </div>
                   </div>
-                )}
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* ============================================================== */}
+        {/* SBAR HANDOVER PACKET INSPECTION & ACKNOWLEDGMENT MODAL        */}
+        {/* ============================================================== */}
+        {activeHandoverPacket && (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white border border-slate-200 rounded-3xl max-w-2xl w-full p-6 shadow-2xl space-y-5 animate-fade-in max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <Stethoscope className="w-5 h-5 text-emerald-600" />
+                  <h3 className="font-black text-slate-900 text-base">
+                    Pre-Arrival Digital SBAR Clinical Handover
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setActiveHandoverPacket(null)}
+                  className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center font-bold text-slate-600"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* SBAR Content Sections */}
+              <div className="space-y-3 text-xs">
+                {/* Situation */}
+                <div className="p-3 bg-red-50/60 rounded-xl border border-red-200 space-y-1">
+                  <span className="font-bold text-red-900 uppercase tracking-wider text-[10px] block">
+                    S — Situation
+                  </span>
+                  <p className="text-slate-800 leading-relaxed">{activeHandoverPacket.situation_summary}</p>
+                </div>
+
+                {/* Background */}
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-1">
+                  <span className="font-bold text-slate-700 uppercase tracking-wider text-[10px] block">
+                    B — Background & Vitals
+                  </span>
+                  <p className="text-slate-800 leading-relaxed">{activeHandoverPacket.background_summary}</p>
+                </div>
+
+                {/* Assessment */}
+                <div className="p-3 bg-amber-50/60 rounded-xl border border-amber-200 space-y-1">
+                  <span className="font-bold text-amber-900 uppercase tracking-wider text-[10px] block">
+                    A — Clinical Assessment
+                  </span>
+                  <p className="text-slate-800 leading-relaxed">{activeHandoverPacket.assessment_summary}</p>
+                </div>
+
+                {/* Recommendation */}
+                <div className="p-3 bg-blue-50/60 rounded-xl border border-blue-200 space-y-1">
+                  <span className="font-bold text-blue-900 uppercase tracking-wider text-[10px] block">
+                    R — Recommendation & Resuscitation Directives
+                  </span>
+                  <p className="text-slate-800 leading-relaxed">{activeHandoverPacket.recommendation_summary}</p>
+                </div>
+              </div>
+
+              {/* Clinician Sign-Off */}
+              <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-500 font-medium">Physician:</label>
+                  <input
+                    type="text"
+                    value={clinicianName}
+                    onChange={(e) => setClinicianName(e.target.value)}
+                    className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold text-slate-800"
+                    placeholder="Enter clinician name"
+                  />
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {activeHandoverPacket.status === "ACKNOWLEDGED" ? (
+                    <span className="px-3 py-1.5 rounded-lg bg-emerald-100 text-emerald-800 text-xs font-bold flex items-center gap-1.5">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      <span>Acknowledged by {activeHandoverPacket.acknowledged_by}</span>
+                    </span>
+                  ) : (
+                    <button
+                      onClick={handleAcknowledgeHandover}
+                      disabled={actionLoading}
+                      className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md transition flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <UserCheck className="w-4 h-4" />
+                      <span>Clinician Sign-Off & Acknowledge</span>
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
-
-            <div className="flex justify-end pt-2">
-              <button
-                onClick={() => setActiveHandoverPacket(null)}
-                className="px-4 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition"
-              >
-                Close
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+        )}
+      </main>
     </div>
   );
 }

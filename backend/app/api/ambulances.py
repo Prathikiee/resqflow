@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status as http_status
 from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
 from backend.app.models.entities import Ambulance, User
@@ -44,18 +44,22 @@ def update_ambulance_status(
         raise HTTPException(status_code=404, detail="Ambulance unit not found")
 
     auth_user = current_user if isinstance(current_user, User) else None
-    if auth_user:
-        if auth_user.role == ROLE_AMBULANCE_CREW:
-            if auth_user.ambulance_id != ambulance_id:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Access denied: Paramedic crews can only update status for their own assigned unit",
-                )
-        elif auth_user.role not in [ROLE_DISPATCHER, ROLE_SUPER_ADMIN]:
+    if not auth_user:
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to update ambulance unit status",
+        )
+    if auth_user.role == ROLE_AMBULANCE_CREW:
+        if auth_user.ambulance_id != ambulance_id:
             raise HTTPException(
                 status_code=403,
-                detail="Access denied: Insufficient permissions to update ambulance unit status",
+                detail="Access denied: Paramedic crews can only update status for their own assigned unit",
             )
+    elif auth_user.role not in [ROLE_DISPATCHER, ROLE_SUPER_ADMIN]:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: Insufficient permissions to update ambulance unit status",
+        )
 
     valid_statuses = ["AVAILABLE", "RESERVED", "DISPATCHED", "EN_ROUTE", "ON_SCENE", "TRANSPORTING", "MAINTENANCE", "OFF_DUTY"]
     s_upper = status.upper().strip()
@@ -94,18 +98,22 @@ def update_ambulance_telemetry(
         raise HTTPException(status_code=404, detail="Ambulance unit not found")
 
     auth_user = current_user if isinstance(current_user, User) else None
-    if auth_user:
-        if auth_user.role == ROLE_AMBULANCE_CREW:
-            if auth_user.ambulance_id != ambulance_id:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Access denied: Paramedic crews can only update telemetry for their own assigned unit",
-                )
-        elif auth_user.role not in [ROLE_DISPATCHER, ROLE_SUPER_ADMIN]:
+    if not auth_user:
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to update ambulance telemetry",
+        )
+    if auth_user.role == ROLE_AMBULANCE_CREW:
+        if auth_user.ambulance_id != ambulance_id:
             raise HTTPException(
                 status_code=403,
-                detail="Access denied: Insufficient permissions to update ambulance telemetry",
+                detail="Access denied: Paramedic crews can only update telemetry for their own assigned unit",
             )
+    elif auth_user.role not in [ROLE_DISPATCHER, ROLE_SUPER_ADMIN]:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: Insufficient permissions to update ambulance telemetry",
+        )
 
     amb.current_latitude = payload.latitude
     amb.current_longitude = payload.longitude

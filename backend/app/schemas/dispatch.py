@@ -86,6 +86,16 @@ class DispatchOut(BaseModel):
     # Emergency Handover Packet
     handover_packet: Optional[HandoverPacketOut] = None
 
+    # Embedded location coordinates for turn-by-turn navigation
+    incident_latitude: Optional[float] = None
+    incident_longitude: Optional[float] = None
+    incident_address: Optional[str] = None
+    destination_hospital_name: Optional[str] = None
+    destination_hospital_address: Optional[str] = None
+    destination_hospital_latitude: Optional[float] = None
+    destination_hospital_longitude: Optional[float] = None
+    ambulance_call_sign: Optional[str] = None
+
     dispatched_at: datetime
     arrived_incident_at: Optional[datetime] = None
     departed_incident_at: Optional[datetime] = None

@@ -16,52 +16,82 @@ MANGALURU_HOSPITALS = [
         "total_icu_beds": 22,
         "available_icu_beds": 7,
         "total_emergency_beds": 35,
-        "available_emergency_beds": 12,
+        "available_emergency_beds": 14,
+        "total_ward_beds": 60,
+        "available_ward_beds": 25,
+        "readiness_status": "READY",
         "specialties": ["Trauma Level 1", "Cardiology", "Stroke Unit", "Emergency Medicine", "Pediatrics"],
+        "doctors_availability": [
+            {"name": "Dr. Aditi Shenoy", "specialty": "Emergency Medicine", "shift": "Day (08:00 - 20:00)", "status": "AVAILABLE"},
+            {"name": "Dr. Rajesh Kamath", "specialty": "Cardiology", "shift": "On-Call (24h)", "status": "AVAILABLE"},
+            {"name": "Dr. Shwetha Rai", "specialty": "Pediatrics", "shift": "Day (08:00 - 20:00)", "status": "AVAILABLE"},
+        ],
         "accepting_emergencies": True,
         "contact_number": "+91 824 2444590",
     },
     {
-        "name": "Government Wenlock District Hospital",
-        "facility_code": "HOSP-MNG-002",
-        "address": "Hampankatta, Mangaluru, Karnataka 575001",
-        "latitude": 12.8647,
-        "longitude": 74.8427,
-        "total_icu_beds": 20,
-        "available_icu_beds": 5,
-        "total_emergency_beds": 50,
-        "available_emergency_beds": 18,
-        "specialties": ["Trauma Level 2", "Emergency Medicine", "General Surgery", "Pediatrics"],
-        "accepting_emergencies": True,
-        "contact_number": "+91 824 2423333",
-    },
-    {
-        "name": "Father Muller Medical College Hospital",
-        "facility_code": "HOSP-MNG-003",
-        "address": "Father Muller Road, Kankanady, Mangaluru, Karnataka 575002",
-        "latitude": 12.8622,
-        "longitude": 74.8625,
-        "total_icu_beds": 30,
-        "available_icu_beds": 11,
-        "total_emergency_beds": 40,
-        "available_emergency_beds": 15,
-        "specialties": ["Cardiology", "Emergency Medicine", "Pediatrics", "Trauma Level 2", "Neurosurgery"],
-        "accepting_emergencies": True,
-        "contact_number": "+91 824 2238000",
-    },
-    {
         "name": "AJ Hospital & Research Centre",
-        "facility_code": "HOSP-MNG-004",
+        "facility_code": "HOSP-MNG-002",
         "address": "NH 66, Kuntikan, Mangaluru, Karnataka 575004",
         "latitude": 12.8988,
         "longitude": 74.8465,
         "total_icu_beds": 25,
         "available_icu_beds": 8,
         "total_emergency_beds": 30,
-        "available_emergency_beds": 9,
+        "available_emergency_beds": 10,
+        "total_ward_beds": 50,
+        "available_ward_beds": 18,
+        "readiness_status": "READY",
         "specialties": ["Trauma Level 1", "Cardiology", "Burn Care", "Neurosurgery", "Emergency Medicine"],
+        "doctors_availability": [
+            {"name": "Dr. Vikram Hegde", "specialty": "Trauma Surgery", "shift": "Day (08:00 - 20:00)", "status": "AVAILABLE"},
+            {"name": "Dr. Vinay Alva", "specialty": "Emergency Medicine", "shift": "Night (20:00 - 08:00)", "status": "AVAILABLE"},
+            {"name": "Dr. Radhika Rao", "specialty": "Burn Care", "shift": "On-Call", "status": "AVAILABLE"},
+        ],
         "accepting_emergencies": True,
         "contact_number": "+91 824 2225533",
+    },
+    {
+        "name": "Unity Hospital",
+        "facility_code": "HOSP-MNG-003",
+        "address": "Highlands, Falnir / Kankanady, Mangaluru, Karnataka 575002",
+        "latitude": 12.8642,
+        "longitude": 74.8569,
+        "total_icu_beds": 18,
+        "available_icu_beds": 4,
+        "total_emergency_beds": 25,
+        "available_emergency_beds": 6,
+        "total_ward_beds": 45,
+        "available_ward_beds": 14,
+        "readiness_status": "READY",
+        "specialties": ["Cardiology", "Critical Care", "General Surgery", "Emergency Medicine"],
+        "doctors_availability": [
+            {"name": "Dr. Farhan Ahmed", "specialty": "Critical Care", "shift": "Day (08:00 - 20:00)", "status": "AVAILABLE"},
+            {"name": "Dr. Meera Pai", "specialty": "Emergency Medicine", "shift": "Day (08:00 - 20:00)", "status": "AVAILABLE"},
+        ],
+        "accepting_emergencies": True,
+        "contact_number": "+91 824 2422201",
+    },
+    {
+        "name": "Indiana Hospital",
+        "facility_code": "HOSP-MNG-004",
+        "address": "Mahaveera Circle, Pumpwell, Mangaluru, Karnataka 575002",
+        "latitude": 12.8614,
+        "longitude": 74.8698,
+        "total_icu_beds": 20,
+        "available_icu_beds": 1,
+        "total_emergency_beds": 28,
+        "available_emergency_beds": 2,
+        "total_ward_beds": 50,
+        "available_ward_beds": 5,
+        "readiness_status": "BUSY",  # Simulated busy hospital as requested
+        "specialties": ["Cardiology", "Vascular Surgery", "Emergency Medicine", "Pediatrics"],
+        "doctors_availability": [
+            {"name": "Dr. Santhosh Prabhu", "specialty": "Cardiology", "shift": "Day (08:00 - 20:00)", "status": "BUSY_IN_PROCEDURE"},
+            {"name": "Dr. Preethi D'Souza", "specialty": "Emergency Medicine", "shift": "Day (08:00 - 20:00)", "status": "AVAILABLE"},
+        ],
+        "accepting_emergencies": True,
+        "contact_number": "+91 824 2880880",
     },
     {
         "name": "Yenepoya Specialty Hospital",
@@ -73,7 +103,14 @@ MANGALURU_HOSPITALS = [
         "available_icu_beds": 4,
         "total_emergency_beds": 25,
         "available_emergency_beds": 8,
+        "total_ward_beds": 40,
+        "available_ward_beds": 15,
+        "readiness_status": "READY",
         "specialties": ["Cardiology", "Nephrology", "Emergency Medicine", "Oncology"],
+        "doctors_availability": [
+            {"name": "Dr. Ananya Bhat", "specialty": "Emergency Medicine", "shift": "Day (08:00 - 20:00)", "status": "AVAILABLE"},
+            {"name": "Dr. Karthik Shetty", "specialty": "Nephrology", "shift": "On-Call", "status": "AVAILABLE"},
+        ],
         "accepting_emergencies": True,
         "contact_number": "+91 824 4238855",
     },
@@ -86,10 +123,10 @@ MANGALURU_AMBULANCES = [
         "equipment": ["ventilator", "defibrillator", "oxygen", "ecg_monitor", "infusion_pump", "suction"],
         "paramedic_level": "ADVANCED",
         "status": "AVAILABLE",
-        "base_station": "KMC Central Hub",
-        "current_latitude": 12.8725,
-        "current_longitude": 74.8460,
-        "fuel_level_percent": 94,
+        "base_station": "Surathkal Sector Depot",
+        "current_latitude": 12.9815,
+        "current_longitude": 74.7950,
+        "fuel_level_percent": 95,
     },
     {
         "call_sign": "KA-19-ALS-102",
@@ -103,66 +140,33 @@ MANGALURU_AMBULANCES = [
         "fuel_level_percent": 88,
     },
     {
-        "call_sign": "KA-19-BLS-201",
-        "vehicle_type": "BLS",
-        "equipment": ["oxygen", "aed", "trauma_kit", "splints", "stretcher"],
-        "paramedic_level": "BASIC",
-        "status": "AVAILABLE",
-        "base_station": "Wenlock District Depot",
-        "current_latitude": 12.8640,
-        "current_longitude": 74.8420,
-        "fuel_level_percent": 92,
-    },
-    {
-        "call_sign": "KA-19-BLS-202",
-        "vehicle_type": "BLS",
-        "equipment": ["oxygen", "aed", "first_aid_kit", "stretcher"],
-        "paramedic_level": "BASIC",
-        "status": "AVAILABLE",
-        "base_station": "Kadri Fire & Rescue Post",
-        "current_latitude": 12.8780,
-        "current_longitude": 74.8600,
-        "fuel_level_percent": 85,
-    },
-    {
         "call_sign": "KA-19-ALS-103",
         "vehicle_type": "ALS",
-        "equipment": ["ventilator", "defibrillator", "oxygen", "ecg_monitor"],
+        "equipment": ["ventilator", "defibrillator", "oxygen", "ecg_monitor", "trauma_kit", "stretcher"],
         "paramedic_level": "ADVANCED",
         "status": "AVAILABLE",
-        "base_station": "Surathkal Sector Hub",
-        "current_latitude": 12.9790,
-        "current_longitude": 74.7950,
-        "fuel_level_percent": 90,
-    },
-    {
-        "call_sign": "KA-19-BLS-203",
-        "vehicle_type": "BLS",
-        "equipment": ["oxygen", "cpr_board", "trauma_kit", "stretcher"],
-        "paramedic_level": "BASIC",
-        "status": "AVAILABLE",
-        "base_station": "Ullal Coastal Unit",
-        "current_latitude": 12.8050,
-        "current_longitude": 74.8520,
-        "fuel_level_percent": 78,
+        "base_station": "Hampankatta Central Station",
+        "current_latitude": 12.8685,
+        "current_longitude": 74.8415,
+        "fuel_level_percent": 92,
     },
     {
         "call_sign": "KA-19-ALS-104",
         "vehicle_type": "ALS",
-        "equipment": ["ventilator", "defibrillator", "oxygen"],
+        "equipment": ["ventilator", "defibrillator", "oxygen", "stretcher"],
         "paramedic_level": "ADVANCED",
-        "status": "DISPATCHED",  # Demonstrates busy ambulance exclusion
-        "base_station": "Pumpwell Junction Hub",
-        "current_latitude": 12.8580,
-        "current_longitude": 74.8650,
-        "fuel_level_percent": 60,
+        "status": "MAINTENANCE",  # At least one ambulance unavailable as requested
+        "base_station": "Pumpwell Transit Depot",
+        "current_latitude": 12.8620,
+        "current_longitude": 74.8710,
+        "fuel_level_percent": 45,
     },
     {
         "call_sign": "KA-19-BLS-204",
         "vehicle_type": "BLS",
-        "equipment": ["oxygen", "stretcher"],
+        "equipment": ["oxygen", "aed", "stretcher", "trauma_kit"],
         "paramedic_level": "BASIC",
-        "status": "MAINTENANCE",  # Demonstrates out-of-service exclusion
+        "status": "MAINTENANCE",  # Out-of-service BLS unit
         "base_station": "Bejai Bus Terminal Post",
         "current_latitude": 12.8870,
         "current_longitude": 74.8480,
@@ -202,19 +206,29 @@ def seed_database(db: Session, force: bool = False) -> dict:
                 total_emergency_beds=h_data["total_emergency_beds"],
                 available_emergency_beds=h_data["available_emergency_beds"],
                 reserved_emergency_beds=0,
+                total_ward_beds=h_data.get("total_ward_beds", 50),
+                available_ward_beds=h_data.get("available_ward_beds", 20),
+                readiness_status=h_data.get("readiness_status", "READY"),
                 accepting_emergencies=h_data["accepting_emergencies"],
                 contact_number=h_data["contact_number"],
+                last_updated_by="System Seed (DEMO DATA)",
             )
             h.specialties = h_data["specialties"]
+            h.doctors_availability = h_data.get("doctors_availability", [])
             db.add(h)
             seeded_counts["hospitals"] += 1
         db.commit()
     else:
-        # Backfill facility codes if missing on existing records
+        # Backfill facility codes and attributes if missing on existing records
         for h_data in MANGALURU_HOSPITALS:
             existing_h = db.query(Hospital).filter(Hospital.name == h_data["name"]).first()
-            if existing_h and not existing_h.facility_code:
-                existing_h.facility_code = h_data.get("facility_code")
+            if existing_h:
+                if not existing_h.facility_code:
+                    existing_h.facility_code = h_data.get("facility_code")
+                if not existing_h.readiness_status:
+                    existing_h.readiness_status = h_data.get("readiness_status", "READY")
+                if not existing_h.doctors_availability:
+                    existing_h.doctors_availability = h_data.get("doctors_availability", [])
         db.commit()
 
     # Seed Ambulances

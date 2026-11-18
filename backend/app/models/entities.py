@@ -133,12 +133,22 @@ class Hospital(Base):
     total_emergency_beds = Column(Integer, default=20)
     available_emergency_beds = Column(Integer, default=10)
     reserved_emergency_beds = Column(Integer, default=0, nullable=False)
+    total_ward_beds = Column(Integer, default=50)
+    available_ward_beds = Column(Integer, default=20)
+
+    # Operational Readiness: READY, BUSY, DIVERT
+    readiness_status = Column(String(30), default="READY", nullable=False)
 
     # Specialized departments
     # ["Trauma Level 1", "Cardiology", "Stroke Unit", "Pediatrics", "Burn Care", "Neurosurgery"]
     specialties_json = Column(Text, default="[]")
+
+    # Doctors on shift and their availability: [{"name": "Dr. ...", "specialty": "...", "shift": "Day", "status": "AVAILABLE"}]
+    doctors_availability_json = Column(Text, default="[]")
+
     accepting_emergencies = Column(Boolean, default=True)
     contact_number = Column(String(40), nullable=False)
+    last_updated_by = Column(String(120), default="System Seed")
 
     last_updated = Column(DateTime, default=utc_now, onupdate=utc_now)
 
@@ -156,6 +166,17 @@ class Hospital(Base):
     @specialties.setter
     def specialties(self, val: List[str]):
         self.specialties_json = json.dumps(val or [])
+
+    @property
+    def doctors_availability(self) -> List[dict]:
+        try:
+            return json.loads(self.doctors_availability_json or "[]")
+        except Exception:
+            return []
+
+    @doctors_availability.setter
+    def doctors_availability(self, val: List[dict]):
+        self.doctors_availability_json = json.dumps(val or [])
 
 
 class Dispatch(Base):
@@ -241,6 +262,38 @@ class Dispatch(Base):
     @route_geometry.setter
     def route_geometry(self, val: list):
         self.route_geometry_json = json.dumps(val or [])
+
+    @property
+    def incident_latitude(self) -> Optional[float]:
+        return self.incident.latitude if self.incident else None
+
+    @property
+    def incident_longitude(self) -> Optional[float]:
+        return self.incident.longitude if self.incident else None
+
+    @property
+    def incident_address(self) -> Optional[str]:
+        return self.incident.location_address if self.incident else None
+
+    @property
+    def destination_hospital_latitude(self) -> Optional[float]:
+        return self.destination_hospital.latitude if self.destination_hospital else None
+
+    @property
+    def destination_hospital_longitude(self) -> Optional[float]:
+        return self.destination_hospital.longitude if self.destination_hospital else None
+
+    @property
+    def destination_hospital_address(self) -> Optional[str]:
+        return self.destination_hospital.address if self.destination_hospital else None
+
+    @property
+    def destination_hospital_name(self) -> Optional[str]:
+        return self.destination_hospital.name if self.destination_hospital else None
+
+    @property
+    def ambulance_call_sign(self) -> Optional[str]:
+        return self.ambulance.call_sign if self.ambulance else None
 
 
 class HandoverPacket(Base):

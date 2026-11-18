@@ -184,6 +184,7 @@ def test_concurrent_hospital_capacity_reservation(fresh_db):
     hosp.available_emergency_beds = 1
     hosp.reserved_emergency_beds = 0
     db.commit()
+    hosp_id = hosp.id
 
     barrier = threading.Barrier(2)
 
@@ -192,7 +193,7 @@ def test_concurrent_hospital_capacity_reservation(fresh_db):
         s = SessionLocal()
         try:
             res = create_dispatch(
-                DispatchRequest(incident_id=inc_id, ambulance_id=amb_id, destination_hospital_id=hosp.id),
+                DispatchRequest(incident_id=inc_id, ambulance_id=amb_id, destination_hospital_id=hosp_id),
                 db=s,
             )
             return {"status": "SUCCESS", "id": res.id}

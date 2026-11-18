@@ -69,6 +69,16 @@ def upgrade_schema(target_engine=None):
                     conn.execute(text("ALTER TABLE hospitals ADD COLUMN reserved_emergency_beds INTEGER DEFAULT 0"))
                 if "facility_code" not in hosp_cols:
                     conn.execute(text("ALTER TABLE hospitals ADD COLUMN facility_code VARCHAR(50)"))
+                if "readiness_status" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN readiness_status VARCHAR(30) DEFAULT 'READY'"))
+                if "total_ward_beds" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN total_ward_beds INTEGER DEFAULT 50"))
+                if "available_ward_beds" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN available_ward_beds INTEGER DEFAULT 20"))
+                if "doctors_availability_json" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN doctors_availability_json TEXT DEFAULT '[]'"))
+                if "last_updated_by" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN last_updated_by VARCHAR(120) DEFAULT 'System Seed'"))
                 conn.commit()
 
             if "dispatches" in table_names:

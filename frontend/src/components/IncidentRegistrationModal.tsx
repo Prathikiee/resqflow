@@ -133,9 +133,13 @@ export default function IncidentRegistrationModal({
     e.preventDefault();
     setSubmitting(true);
     try {
+      const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+
       const res = await fetch(`${backendUrl}/api/incidents`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           caller_name: callerName,
           caller_phone: callerPhone,

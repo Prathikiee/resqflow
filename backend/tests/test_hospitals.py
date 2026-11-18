@@ -1,16 +1,6 @@
 import pytest
-from backend.app.core.database import SessionLocal, Base, engine
 from backend.app.models.entities import Hospital, Incident
-from backend.app.services.seed_service import seed_database
 from backend.app.services.hospital_engine import rank_suitable_hospitals
-
-@pytest.fixture(scope="module")
-def db():
-    Base.metadata.create_all(bind=engine)
-    session = SessionLocal()
-    seed_database(session, force=True)
-    yield session
-    session.close()
 
 def test_hospital_ranking_for_cardiac(db):
     incident = db.query(Incident).first()
