@@ -1,4 +1,4 @@
-**ResQFlow — Emergency Response & Ambulance Coordination Platform**
+#**ResQFlow — Emergency Response & Ambulance Coordination Platform**#
 
 
 ResQFlow is an intelligent emergency medical dispatch and ambulance coordination platform engineered for rapid, explainable emergency response across the Mangaluru, Karnataka metropolitan corridor.
@@ -52,23 +52,23 @@ Copy .env.example to .env:
 cp .env.example .env
 (Leave DATABASE_URL empty to use automatic local SQLite, or paste your Supabase PostgreSQL connection string).
 2. Backend Setup & Run
-# Activate virtual environment
+ Activate virtual environment
 backend\.venv\Scripts\activate   # Windows
-# or: source backend/.venv/bin/activate (Linux/Mac)
+ or: source backend/.venv/bin/activate (Linux/Mac)
 
-# Install dependencies (if not already installed)
+ Install dependencies (if not already installed)
 pip install -r backend/requirements.txt
 
-# Run test suite (18 comprehensive unit & integration tests)
+ Run test suite (18 comprehensive unit & integration tests)
 pytest -v
 
-# Start FastAPI server on port 8000
+ Start FastAPI server on port 8000
 python -m uvicorn backend.app.main:app --port 8000 --reload
 API Documentation will be live at http://127.0.0.1:8000/docs.
 3. Frontend Setup & Run
-# In another terminal window:
+ In another terminal window:
 npm run dev --prefix frontend
-# or: cd frontend && npm run dev
+ or: cd frontend && npm run dev
 Open http://localhost:3000 in your browser to view the Live Emergency Command Center.
 Seed Data Summary (Mangaluru Region)
 - Hospitals (5):
