@@ -4,17 +4,28 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
-from backend.app.models.entities import Incident, Ambulance, Hospital, Dispatch
+from backend.app.models.entities import Incident, Ambulance, Hospital, Dispatch, HandoverPacket, User
 from backend.app.schemas.dispatch import (
     DispatchRequest,
     DispatchOut,
     ConfirmationDecision,
     SimulateDecisionRequest,
+    HandoverAcknowledgeRequest,
+    HandoverPacketOut,
 )
 from backend.app.services.allocation_engine import score_and_rank_ambulances
 from backend.app.services.hospital_engine import rank_suitable_hospitals
 from backend.app.services.routing_service import calculate_route
+from backend.app.services.timeline_service import log_incident_event
 from backend.app.core.ws import broadcast_sync
+from backend.app.core.auth import (
+    get_optional_current_user,
+    ROLE_CITIZEN,
+    ROLE_AMBULANCE_CREW,
+    ROLE_HOSPITAL_STAFF,
+    ROLE_DISPATCHER,
+    ROLE_SUPER_ADMIN,
+)
 
 router = APIRouter(prefix="/api/dispatch", tags=["dispatch"])
 
@@ -27,40 +38,228 @@ def is_postgres(db: Session) -> bool:
     except Exception:
         return False
 
+def begin_immediate_if_sqlite(db: Session):
+    if not is_postgres(db):
+        try:
+            db.execute(text("BEGIN IMMEDIATE"))
+        except Exception:
+            pass
+
+def generate_or_update_handover_packet(
+    dispatch: Dispatch,
+    db: Session,
+    force_status: Optional[str] = None,
+    commit: bool = True,
+) -> Optional[HandoverPacket]:
+    """
+    FEATURE 3 — EMERGENCY HANDOVER PACKET:
+    Creates or updates the persistent structured Handover Packet for the dispatch.
+    Only generated after dual confirmation (coordination_status == 'CONFIRMED').
+    Idempotent: updates existing packet fields if already generated.
+    """
+    if dispatch.coordination_status != "CONFIRMED" and not dispatch.handover_packet:
+        return None
+
+    incident = db.query(Incident).filter(Incident.id == dispatch.incident_id).first()
+    ambulance = db.query(Ambulance).filter(Ambulance.id == dispatch.ambulance_id).first()
+    hospital = None
+    if dispatch.destination_hospital_id:
+        hospital = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id).first()
+
+    now = get_utc_now()
+
+    # Collect clinical observations without inventing missing data
+    symptoms = []
+    if incident:
+        if incident.consciousness_level and incident.consciousness_level != "Alert":
+            symptoms.append(f"Consciousness: {incident.consciousness_level}")
+        elif incident.consciousness_level:
+            symptoms.append(f"Consciousness: {incident.consciousness_level}")
+
+        if incident.breathing_status and incident.breathing_status != "Normal":
+            symptoms.append(f"Breathing: {incident.breathing_status}")
+        elif incident.breathing_status:
+            symptoms.append(f"Breathing: {incident.breathing_status}")
+
+        if incident.severe_bleeding:
+            symptoms.append("Active severe hemorrhage / bleeding reported")
+        if incident.chest_pain:
+            symptoms.append("Acute chest pain / suspected ACS")
+        if incident.suspected_stroke:
+            symptoms.append("Suspected stroke / neurological deficit")
+        if incident.severe_trauma:
+            symptoms.append("Severe blunt / penetrating trauma")
+
+    existing_packet = db.query(HandoverPacket).filter(HandoverPacket.dispatch_id == dispatch.id).first()
+    if existing_packet:
+        # Update existing packet (preserves packet across reassignment and route updates)
+        if ambulance:
+            existing_packet.ambulance_call_sign = ambulance.call_sign
+            existing_packet.ambulance_vehicle_type = ambulance.vehicle_type
+            existing_packet.paramedic_level = ambulance.paramedic_level
+            existing_packet.required_equipment = ambulance.equipment
+        if hospital:
+            existing_packet.receiving_hospital_id = hospital.id
+            existing_packet.receiving_hospital_name = hospital.name
+        existing_packet.estimated_arrival_eta_seconds = dispatch.estimated_eta_seconds
+        existing_packet.route_distance_meters = dispatch.route_distance_meters
+        existing_packet.updated_at = now
+        if force_status:
+            existing_packet.status = force_status
+        if commit:
+            db.commit()
+            db.refresh(existing_packet)
+        else:
+            db.flush()
+        return existing_packet
+
+    # Create new packet
+    packet = HandoverPacket(
+        dispatch_id=dispatch.id,
+        incident_id=dispatch.incident_id,
+        status=force_status or "SENT",
+        patient_age=incident.patient_age if incident else None,
+        patient_gender=incident.patient_gender if incident and incident.patient_gender else "Unknown",
+        chief_complaint=incident.chief_complaint if incident else "Emergency medical assistance",
+        triage_priority=incident.triage_level if incident else "Priority 3",
+        triage_color=incident.triage_color if incident else "GREEN",
+        triage_score=incident.triage_score if incident else 30,
+        incident_latitude=incident.latitude if incident else 0.0,
+        incident_longitude=incident.longitude if incident else 0.0,
+        incident_address=incident.location_address if incident else None,
+        ambulance_call_sign=ambulance.call_sign if ambulance else "Unknown",
+        ambulance_vehicle_type=ambulance.vehicle_type if ambulance else "BLS",
+        paramedic_level=ambulance.paramedic_level if ambulance else "BASIC",
+        receiving_hospital_id=hospital.id if hospital else None,
+        receiving_hospital_name=hospital.name if hospital else "Receiving ER",
+        estimated_arrival_eta_seconds=dispatch.estimated_eta_seconds,
+        route_distance_meters=dispatch.route_distance_meters,
+        created_at=now,
+        updated_at=now,
+    )
+    packet.reported_symptoms = symptoms
+    packet.triage_justifications = incident.triage_justifications if incident else []
+    packet.required_equipment = ambulance.equipment if ambulance else []
+
+    db.add(packet)
+    if commit:
+        db.commit()
+        db.refresh(packet)
+    else:
+        db.flush()
+
+    broadcast_sync(
+        "HANDOVER_PACKET_GENERATED",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "packet_id": packet.id,
+            "status": packet.status,
+            "hospital_name": packet.receiving_hospital_name,
+        },
+        ambulance_id=dispatch.ambulance_id,
+        hospital_id=dispatch.destination_hospital_id,
+        entity_type="handover_packet",
+        entity_id=packet.id,
+    )
+
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="HANDOVER_PACKET_GENERATED",
+        event_title="Emergency Handover Packet Compiled",
+        event_description=f"Pre-arrival clinical handover packet generated and transmitted to {packet.receiving_hospital_name or 'ER'} triage.",
+        actor_type="SYSTEM",
+        actor_reference="Clinical Telemetry",
+        metadata={"packet_id": packet.id, "status": packet.status},
+        commit=commit,
+    )
+
+    return packet
+
 def auto_escalate_dispatch(
     dispatch: Dispatch,
     failure_source: str,
     failure_reason: str,
     db: Session,
+    expected_attempt: Optional[int] = None,
 ) -> Dispatch:
     """
-    FEATURE 2 — SMART EMERGENCY ESCALATION:
+    FEATURE 2 — SMART EMERGENCY ESCALATION (Hardened with Concurrency Guards):
     Automatically detects emergency coordination failures and reassigns an alternative resource:
-      1. Releases previous provisional ambulance and hospital bed reservations.
-      2. Excludes failed/rejected resources from the candidate pool across attempts.
-      3. Uses existing allocation and hospital matching engines to select the next suitable unit.
-      4. Creates a new provisional reservation with a fresh 90s confirmation TTL.
-      5. Resets dual confirmation states to PENDING.
-      6. Increments attempt_number and appends a detailed escalation audit record to history.
-      7. If no alternative exists, marks REASSIGNMENT_REQUIRED and preserves incident.
-      8. Broadcasts DISPATCH_ESCALATED and DISPATCH_CONFIRMATION_UPDATED events.
+      1. Acquires transactional lock (BEGIN IMMEDIATE on SQLite / with_for_update on Postgres).
+      2. Validates preconditions: aborts if already CONFIRMED, attempt mismatch, or REASSIGNMENT_REQUIRED.
+      3. Releases previous provisional ambulance and hospital bed reservations exactly once.
+      4. Excludes failed/rejected resources from the candidate pool across attempts.
+      5. Uses existing allocation and hospital matching engines to select the next suitable unit.
+      6. Creates a new provisional reservation with a fresh 90s confirmation TTL.
+      7. Resets dual confirmation states to PENDING.
+      8. Increments attempt_number and appends a detailed escalation audit record to history.
+      9. If no alternative exists, marks REASSIGNMENT_REQUIRED and preserves incident.
+      10. Atomically commits and broadcasts DISPATCH_ESCALATED and DISPATCH_CONFIRMATION_UPDATED events.
     """
+    begin_immediate_if_sqlite(db)
+    disp_query = db.query(Dispatch).filter(Dispatch.id == dispatch.id).execution_options(populate_existing=True)
+    if is_postgres(db):
+        disp_query = disp_query.with_for_update()
+    locked_disp = disp_query.first()
+    if locked_disp:
+        dispatch = locked_disp
+
     now = get_utc_now()
+
+    # Precondition checks under lock
+    if dispatch.coordination_status == "CONFIRMED" and failure_source != "DISPATCHER_OVERRIDE":
+        return dispatch
+
+    if expected_attempt is not None and dispatch.attempt_number != expected_attempt:
+        return dispatch
+
+    if failure_source == "TIMEOUT" and dispatch.reservation_expires_at and dispatch.reservation_expires_at > now:
+        return dispatch
+
+    if dispatch.coordination_status == "REASSIGNMENT_REQUIRED" and failure_source != "DISPATCHER_OVERRIDE":
+        return dispatch
+
     incident = db.query(Incident).filter(Incident.id == dispatch.incident_id).first()
 
-    # 1. Release previous reservations
-    old_amb = db.query(Ambulance).filter(Ambulance.id == dispatch.ambulance_id).first()
-    if old_amb and old_amb.status == "RESERVED" and old_amb.reservation_dispatch_id == dispatch.id:
-        old_amb.status = "AVAILABLE"
-        old_amb.reservation_dispatch_id = None
+    # 1. Release previous reservations safely (without committing prematurely)
+    old_amb = None
+    if dispatch.ambulance_id:
+        amb_q = db.query(Ambulance).filter(Ambulance.id == dispatch.ambulance_id)
+        if is_postgres(db):
+            amb_q = amb_q.with_for_update()
+        old_amb = amb_q.first()
+        if old_amb and old_amb.status == "RESERVED" and old_amb.reservation_dispatch_id == dispatch.id:
+            old_amb.status = "AVAILABLE"
+            old_amb.reservation_dispatch_id = None
 
     old_hosp = None
     if dispatch.destination_hospital_id:
-        old_hosp = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id).first()
+        hosp_q = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id)
+        if is_postgres(db):
+            hosp_q = hosp_q.with_for_update()
+        old_hosp = hosp_q.first()
         if old_hosp and (old_hosp.reserved_emergency_beds or 0) > 0 and dispatch.coordination_status != "CONFIRMED":
             old_hosp.reserved_emergency_beds = max(0, old_hosp.reserved_emergency_beds - 1)
 
-    db.commit()
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="ESCALATION_TRIGGERED",
+        event_title=f"Smart Escalation Triggered ({failure_source})",
+        event_description=f"Coordination failure detected: {failure_reason}. Releasing previous reservations.",
+        actor_type="SYSTEM",
+        actor_reference="Smart Escalation Engine",
+        metadata={
+            "failure_source": failure_source,
+            "failure_reason": failure_reason,
+            "attempt_number": dispatch.attempt_number,
+        },
+        commit=False,
+    )
 
     # 2. Gather excluded resources across all attempts
     history = list(dispatch.escalation_history or [])
@@ -152,7 +351,10 @@ def auto_escalate_dispatch(
         return dispatch
 
     best_amb_cand = ranking["ranked_ambulances"][0]
-    new_amb = db.query(Ambulance).filter(Ambulance.id == best_amb_cand["ambulance_id"]).first()
+    amb_new_q = db.query(Ambulance).filter(Ambulance.id == best_amb_cand["ambulance_id"])
+    if is_postgres(db):
+        amb_new_q = amb_new_q.with_for_update()
+    new_amb = amb_new_q.first()
 
     # 4. Find candidate hospitals: unreserved capacity > 0 and accepting emergencies
     all_hosps = db.query(Hospital).filter(Hospital.accepting_emergencies == True).all()
@@ -167,9 +369,15 @@ def auto_escalate_dispatch(
         hosp_ranking = rank_suitable_hospitals(incident=incident, hospitals=eligible_hosps)
         if hosp_ranking["ranked_hospitals"]:
             best_hosp_cand = hosp_ranking["ranked_hospitals"][0]
-            new_hosp = db.query(Hospital).filter(Hospital.id == best_hosp_cand["hospital_id"]).first()
+            hosp_new_q = db.query(Hospital).filter(Hospital.id == best_hosp_cand["hospital_id"])
+            if is_postgres(db):
+                hosp_new_q = hosp_new_q.with_for_update()
+            new_hosp = hosp_new_q.first()
     elif dispatch.destination_hospital_id and dispatch.destination_hospital_id not in failed_hosp_ids:
-        new_hosp = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id).first()
+        hosp_new_q = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id)
+        if is_postgres(db):
+            hosp_new_q = hosp_new_q.with_for_update()
+        new_hosp = hosp_new_q.first()
 
     # 5. Calculate new route
     route = calculate_route(
@@ -229,6 +437,28 @@ def auto_escalate_dispatch(
 
     incident.status = "ALLOCATED"
 
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="RESOURCE_REASSIGNED",
+        event_title=f"Emergency Reassigned (Attempt #{dispatch.attempt_number})",
+        event_description=f"Assigned replacement unit {new_amb.call_sign} ({new_amb.vehicle_type}) and hospital {new_hosp.name if new_hosp else 'ER'}. Fresh 90s dual confirmation window.",
+        actor_type="SYSTEM",
+        actor_reference="Allocation Engine",
+        metadata={
+            "attempt_number": dispatch.attempt_number,
+            "new_ambulance_id": new_amb.id,
+            "new_ambulance_call_sign": new_amb.call_sign,
+            "new_hospital_id": new_hosp.id if new_hosp else None,
+            "new_hospital_name": new_hosp.name if new_hosp else None,
+        },
+        commit=False,
+    )
+
+    if dispatch.handover_packet:
+        generate_or_update_handover_packet(dispatch, db, commit=False)
+
     db.commit()
     db.refresh(dispatch)
 
@@ -266,6 +496,7 @@ def check_and_escalate_expired_dispatches(db: Session) -> List[int]:
     Sweeps active dispatches in PENDING_CONFIRMATIONS whose reservation TTL has expired
     and automatically executes smart escalation.
     """
+    begin_immediate_if_sqlite(db)
     now = get_utc_now()
     pending = db.query(Dispatch).filter(
         Dispatch.coordination_status == "PENDING_CONFIRMATIONS",
@@ -275,13 +506,35 @@ def check_and_escalate_expired_dispatches(db: Session) -> List[int]:
 
     escalated_ids = []
     for d in pending:
-        auto_escalate_dispatch(
-            dispatch=d,
-            failure_source="TIMEOUT",
-            failure_reason="Provisional reservation expired (90s confirmation TTL elapsed without dual acceptance).",
-            db=db,
-        )
-        escalated_ids.append(d.id)
+        try:
+            db.refresh(d)
+        except Exception:
+            pass
+        if (
+            d.coordination_status == "PENDING_CONFIRMATIONS"
+            and d.reservation_expires_at
+            and d.reservation_expires_at < now
+        ):
+            log_incident_event(
+                db=db,
+                incident_id=d.incident_id,
+                dispatch_id=d.id,
+                event_type="RESERVATION_EXPIRED",
+                event_title="Provisional Reservation Expired",
+                event_description="Dual confirmation window (90s TTL) elapsed without both parties accepting. Auto-escalating.",
+                actor_type="SYSTEM",
+                actor_reference="Background Escalation Worker",
+                metadata={"attempt_number": d.attempt_number},
+                commit=False,
+            )
+            auto_escalate_dispatch(
+                dispatch=d,
+                failure_source="TIMEOUT",
+                failure_reason="Provisional reservation expired (90s confirmation TTL elapsed without dual acceptance).",
+                db=db,
+                expected_attempt=d.attempt_number,
+            )
+            escalated_ids.append(d.id)
     return escalated_ids
 
 def expire_single_dispatch_if_due(dispatch: Dispatch, db: Session) -> bool:
@@ -289,6 +542,20 @@ def expire_single_dispatch_if_due(dispatch: Dispatch, db: Session) -> bool:
     Checks if a dispatch in PENDING_CONFIRMATIONS has expired past its reservation TTL.
     If so, automatically triggers smart escalation.
     """
+    if (
+        dispatch.coordination_status == "PENDING_CONFIRMATIONS"
+        and dispatch.reservation_expires_at
+        and dispatch.reservation_expires_at < get_utc_now()
+    ):
+        auto_escalate_dispatch(
+            dispatch=dispatch,
+            failure_source="TIMEOUT",
+            failure_reason="Provisional reservation expired (90s confirmation TTL elapsed without dual acceptance).",
+            db=db,
+            expected_attempt=dispatch.attempt_number,
+        )
+        return True
+    return False
     if (
         dispatch.coordination_status == "PENDING_CONFIRMATIONS"
         and dispatch.reservation_expires_at
@@ -334,12 +601,19 @@ def get_dispatch_recommendation(incident_id: int, db: Session = Depends(get_db))
     }
 
 @router.post("", response_model=DispatchOut, status_code=status.HTTP_201_CREATED)
-def create_dispatch(payload: DispatchRequest, db: Session = Depends(get_db)):
-    if not is_postgres(db):
-        try:
-            db.execute(text("BEGIN IMMEDIATE"))
-        except Exception:
-            pass
+def create_dispatch(
+    payload: DispatchRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user and auth_user.role in (ROLE_CITIZEN, ROLE_HOSPITAL_STAFF):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: {auth_user.role} accounts cannot directly issue fleet dispatches. Dispatches are created by Regional Dispatchers or Automated System.",
+        )
+
+    begin_immediate_if_sqlite(db)
 
     incident = db.query(Incident).filter(Incident.id == payload.incident_id).first()
     if not incident:
@@ -369,7 +643,7 @@ def create_dispatch(payload: DispatchRequest, db: Session = Depends(get_db)):
 
     if ambulance.status != "AVAILABLE":
         raise HTTPException(
-            status_code=400,
+            status_code=409,
             detail=f"Ambulance {ambulance.call_sign} is currently '{ambulance.status}' and cannot be dispatched."
         )
 
@@ -436,59 +710,182 @@ def create_dispatch(payload: DispatchRequest, db: Session = Depends(get_db)):
     incident.status = "ALLOCATED"
 
     db.add(dispatch)
-    db.commit()
-    db.refresh(dispatch)
+    db.flush()
 
     ambulance.reservation_dispatch_id = dispatch.id
+
+    log_incident_event(
+        db=db,
+        incident_id=incident.id,
+        dispatch_id=dispatch.id,
+        event_type="RESOURCES_RESERVED",
+        event_title="Resources Provisionally Reserved",
+        event_description=f"Unit {ambulance.call_sign} ({ambulance.vehicle_type}) and hospital {hospital.name if hospital else 'ER'} provisionally reserved with 90s dual confirmation window.",
+        actor_type="DISPATCHER",
+        actor_reference="Emergency Coordinator",
+        metadata={
+            "ambulance_id": ambulance.id,
+            "ambulance_call_sign": ambulance.call_sign,
+            "hospital_id": hospital.id if hospital else None,
+            "hospital_name": hospital.name if hospital else None,
+            "ttl_seconds": 90,
+            "attempt_number": dispatch.attempt_number,
+        },
+        commit=False,
+    )
+
     db.commit()
     db.refresh(dispatch)
 
-    broadcast_sync("DISPATCH_CREATED", {
-        "dispatch_id": dispatch.id,
-        "incident_id": incident.id,
-        "ambulance_id": ambulance.id,
-        "status": dispatch.status,
-        "coordination_status": dispatch.coordination_status,
-    })
+    broadcast_sync(
+        "DISPATCH_CREATED",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": incident.id,
+            "ambulance_id": ambulance.id,
+            "destination_hospital_id": hospital.id if hospital else None,
+            "status": dispatch.status,
+            "coordination_status": dispatch.coordination_status,
+            "ambulance_call_sign": ambulance.call_sign,
+            "destination_hospital_name": hospital.name if hospital else "TBD",
+            "reservation_expires_at": reservation_expires.isoformat(),
+        },
+        ambulance_id=ambulance.id,
+        hospital_id=hospital.id if hospital else None,
+        reporter_user_id=incident.reporter_user_id,
+        entity_type="dispatch",
+        entity_id=dispatch.id,
+    )
 
-    broadcast_sync("DISPATCH_CONFIRMATION_UPDATED", {
-        "dispatch_id": dispatch.id,
-        "coordination_status": dispatch.coordination_status,
-        "ambulance_confirmation": dispatch.ambulance_confirmation_status,
-        "hospital_confirmation": dispatch.hospital_confirmation_status,
-        "reservation_expires_at": reservation_expires.isoformat(),
-        "attempt_number": dispatch.attempt_number,
-    })
+    broadcast_sync(
+        "DISPATCH_CONFIRMATION_UPDATED",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": incident.id,
+            "ambulance_id": ambulance.id,
+            "destination_hospital_id": hospital.id if hospital else None,
+            "coordination_status": dispatch.coordination_status,
+            "ambulance_confirmation": dispatch.ambulance_confirmation_status,
+            "hospital_confirmation": dispatch.hospital_confirmation_status,
+            "reservation_expires_at": reservation_expires.isoformat(),
+            "attempt_number": dispatch.attempt_number,
+        },
+        ambulance_id=ambulance.id,
+        hospital_id=hospital.id if hospital else None,
+        reporter_user_id=incident.reporter_user_id,
+        entity_type="dispatch",
+        entity_id=dispatch.id,
+    )
+
+    log_incident_event(
+        db=db,
+        incident_id=incident.id,
+        dispatch_id=dispatch.id,
+        event_type="RESOURCES_RESERVED",
+        event_title="Resources Provisionally Reserved",
+        event_description=f"Unit {ambulance.call_sign} ({ambulance.vehicle_type}) and hospital {hospital.name if hospital else 'ER'} provisionally reserved with 90s dual confirmation window.",
+        actor_type="DISPATCHER",
+        actor_reference="Emergency Coordinator",
+        metadata={
+            "ambulance_id": ambulance.id,
+            "ambulance_call_sign": ambulance.call_sign,
+            "hospital_id": hospital.id if hospital else None,
+            "hospital_name": hospital.name if hospital else None,
+            "ttl_seconds": 90,
+            "attempt_number": dispatch.attempt_number,
+        },
+    )
 
     return dispatch
 
 @router.get("", response_model=List[DispatchOut])
-def list_dispatches(db: Session = Depends(get_db)):
-    dispatches = db.query(Dispatch).order_by(Dispatch.created_at.desc()).all()
+def list_dispatches(
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    query = db.query(Dispatch)
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            query = query.join(Incident).filter(Incident.reporter_user_id == auth_user.id)
+        elif auth_user.role == ROLE_AMBULANCE_CREW and auth_user.ambulance_id:
+            query = query.filter(Dispatch.ambulance_id == auth_user.ambulance_id)
+        elif auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id:
+            query = query.filter(Dispatch.destination_hospital_id == auth_user.hospital_id)
+
+    dispatches = query.order_by(Dispatch.created_at.desc()).all()
     for d in dispatches:
         expire_single_dispatch_if_due(d, db)
     return dispatches
 
 @router.get("/{dispatch_id}", response_model=DispatchOut)
-def get_dispatch(dispatch_id: int, db: Session = Depends(get_db)):
+def get_dispatch(
+    dispatch_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
     dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
     if not dispatch:
         raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            if dispatch.incident and dispatch.incident.reporter_user_id != auth_user.id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot view another citizen's emergency dispatch")
+        elif auth_user.role == ROLE_AMBULANCE_CREW:
+            if auth_user.ambulance_id and dispatch.ambulance_id != auth_user.ambulance_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot view dispatches assigned to another ambulance unit")
+        elif auth_user.role == ROLE_HOSPITAL_STAFF:
+            if auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot view dispatches routed to another hospital")
+
     expire_single_dispatch_if_due(dispatch, db)
     return dispatch
 
 @router.post("/{dispatch_id}/confirm/ambulance", response_model=DispatchOut)
-def confirm_ambulance(dispatch_id: int, payload: ConfirmationDecision, db: Session = Depends(get_db)):
+def confirm_ambulance(
+    dispatch_id: int,
+    payload: ConfirmationDecision,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    begin_immediate_if_sqlite(db)
     decision = payload.decision.upper().strip()
     if decision not in ["ACCEPTED", "REJECTED"]:
         raise HTTPException(status_code=400, detail="Decision must be 'ACCEPTED' or 'REJECTED'")
 
-    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    disp_query = db.query(Dispatch).filter(Dispatch.id == dispatch_id).execution_options(populate_existing=True)
+    if is_postgres(db):
+        disp_query = disp_query.with_for_update()
+    dispatch = disp_query.first()
     if not dispatch:
         raise HTTPException(status_code=404, detail="Dispatch record not found")
 
-    if dispatch.coordination_status == "CONFIRMED" and decision == "ACCEPTED":
-        return dispatch
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot confirm or reject ambulance assignments")
+        if auth_user.role == ROLE_HOSPITAL_STAFF:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Hospital staff cannot confirm or reject ambulance assignments")
+        if auth_user.role == ROLE_AMBULANCE_CREW:
+            if auth_user.ambulance_id and dispatch.ambulance_id != auth_user.ambulance_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Paramedic crew can only confirm or reject assignments for their own ambulance unit")
+
+    if payload.attempt_number is not None and payload.attempt_number != dispatch.attempt_number:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Stale confirmation: dispatch has already escalated to attempt #{dispatch.attempt_number} (received attempt #{payload.attempt_number})."
+        )
+
+    if dispatch.coordination_status == "CONFIRMED":
+        if decision == "ACCEPTED":
+            return dispatch
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot reject: dispatch has already reached CONFIRMED coordination status."
+            )
 
     if dispatch.coordination_status in ["REJECTED", "EXPIRED", "REASSIGNMENT_REQUIRED"]:
         if decision == "ACCEPTED":
@@ -510,7 +907,24 @@ def confirm_ambulance(dispatch_id: int, payload: ConfirmationDecision, db: Sessi
         dispatch.ambulance_confirmation_status = "ACCEPTED"
         dispatch.ambulance_confirmed_at = now
 
-        if dispatch.destination_hospital_id is None or dispatch.hospital_confirmation_status == "ACCEPTED":
+        log_incident_event(
+            db=db,
+            incident_id=dispatch.incident_id,
+            dispatch_id=dispatch.id,
+            event_type="AMBULANCE_ACCEPTED",
+            event_title=f"Ambulance {ambulance.call_sign if ambulance else 'Crew'} Confirmed",
+            event_description=f"Ambulance crew {ambulance.call_sign if ambulance else 'unit'} accepted assignment.",
+            actor_type="AMBULANCE_CREW",
+            actor_reference=ambulance.call_sign if ambulance else "Ambulance Unit",
+            metadata={"ambulance_id": dispatch.ambulance_id, "attempt_number": dispatch.attempt_number},
+            commit=False,
+        )
+
+        both_accepted = (
+            dispatch.destination_hospital_id is None
+            or dispatch.hospital_confirmation_status == "ACCEPTED"
+        )
+        if both_accepted and dispatch.coordination_status != "CONFIRMED":
             dispatch.coordination_status = "CONFIRMED"
             dispatch.confirmed_at = now
             if ambulance:
@@ -518,39 +932,110 @@ def confirm_ambulance(dispatch_id: int, payload: ConfirmationDecision, db: Sessi
             if incident:
                 incident.status = "DISPATCHED"
 
+            log_incident_event(
+                db=db,
+                incident_id=dispatch.incident_id,
+                dispatch_id=dispatch.id,
+                event_type="DUAL_CONFIRMATION_COMPLETED",
+                event_title="Dual Confirmation Completed",
+                event_description="Both ambulance unit and receiving hospital confirmed. Unit dispatched to scene.",
+                actor_type="SYSTEM",
+                actor_reference="Dual Confirmation Machine",
+                metadata={"coordination_status": "CONFIRMED", "attempt_number": dispatch.attempt_number},
+                commit=False,
+            )
+            generate_or_update_handover_packet(dispatch, db, commit=False)
+
         db.commit()
         db.refresh(dispatch)
 
-        broadcast_sync("DISPATCH_CONFIRMATION_UPDATED", {
-            "dispatch_id": dispatch.id,
-            "coordination_status": dispatch.coordination_status,
-            "ambulance_confirmation": dispatch.ambulance_confirmation_status,
-            "hospital_confirmation": dispatch.hospital_confirmation_status,
-        })
+        inc = db.query(Incident).filter(Incident.id == dispatch.incident_id).first()
+        broadcast_sync(
+            "DISPATCH_CONFIRMATION_UPDATED",
+            {
+                "dispatch_id": dispatch.id,
+                "incident_id": dispatch.incident_id,
+                "ambulance_id": dispatch.ambulance_id,
+                "destination_hospital_id": dispatch.destination_hospital_id,
+                "coordination_status": dispatch.coordination_status,
+                "ambulance_confirmation": dispatch.ambulance_confirmation_status,
+                "hospital_confirmation": dispatch.hospital_confirmation_status,
+                "status": dispatch.status,
+            },
+            ambulance_id=dispatch.ambulance_id,
+            hospital_id=dispatch.destination_hospital_id,
+            reporter_user_id=inc.reporter_user_id if inc else None,
+            entity_type="dispatch",
+            entity_id=dispatch.id,
+        )
         return dispatch
 
     elif decision == "REJECTED":
         # AUTOMATIC EMERGENCY ESCALATION TRIGGER
         dispatch.ambulance_confirmation_status = "REJECTED"
+        log_incident_event(
+            db=db,
+            incident_id=dispatch.incident_id,
+            dispatch_id=dispatch.id,
+            event_type="AMBULANCE_REJECTED",
+            event_title=f"Ambulance {ambulance.call_sign if ambulance else 'Crew'} Rejected",
+            event_description=f"Ambulance crew rejected emergency assignment: {payload.reason or 'Declined by crew'}.",
+            actor_type="AMBULANCE_CREW",
+            actor_reference=ambulance.call_sign if ambulance else "Ambulance Unit",
+            metadata={"reason": payload.reason, "attempt_number": dispatch.attempt_number},
+            commit=False,
+        )
         return auto_escalate_dispatch(
             dispatch=dispatch,
             failure_source="AMBULANCE",
             failure_reason=payload.reason or "Ambulance crew rejected emergency assignment.",
             db=db,
+            expected_attempt=dispatch.attempt_number,
         )
 
 @router.post("/{dispatch_id}/confirm/hospital", response_model=DispatchOut)
-def confirm_hospital(dispatch_id: int, payload: ConfirmationDecision, db: Session = Depends(get_db)):
+def confirm_hospital(
+    dispatch_id: int,
+    payload: ConfirmationDecision,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    begin_immediate_if_sqlite(db)
     decision = payload.decision.upper().strip()
     if decision not in ["ACCEPTED", "REJECTED"]:
         raise HTTPException(status_code=400, detail="Decision must be 'ACCEPTED' or 'REJECTED'")
 
-    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    disp_query = db.query(Dispatch).filter(Dispatch.id == dispatch_id).execution_options(populate_existing=True)
+    if is_postgres(db):
+        disp_query = disp_query.with_for_update()
+    dispatch = disp_query.first()
     if not dispatch:
         raise HTTPException(status_code=404, detail="Dispatch record not found")
 
-    if dispatch.coordination_status == "CONFIRMED" and decision == "ACCEPTED":
-        return dispatch
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot confirm or reject hospital bed reservations")
+        if auth_user.role == ROLE_AMBULANCE_CREW:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ambulance crew cannot confirm or reject hospital bed reservations")
+        if auth_user.role == ROLE_HOSPITAL_STAFF:
+            if auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Hospital staff can only confirm or reject bed reservations for their own facility")
+
+    if payload.attempt_number is not None and payload.attempt_number != dispatch.attempt_number:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Stale confirmation: dispatch has already escalated to attempt #{dispatch.attempt_number} (received attempt #{payload.attempt_number})."
+        )
+
+    if dispatch.coordination_status == "CONFIRMED":
+        if decision == "ACCEPTED":
+            return dispatch
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot reject: dispatch has already reached CONFIRMED coordination status."
+            )
 
     if dispatch.coordination_status in ["REJECTED", "EXPIRED", "REASSIGNMENT_REQUIRED"]:
         if decision == "ACCEPTED":
@@ -571,7 +1056,21 @@ def confirm_hospital(dispatch_id: int, payload: ConfirmationDecision, db: Sessio
         dispatch.hospital_confirmation_status = "ACCEPTED"
         dispatch.hospital_confirmed_at = now
 
-        if dispatch.ambulance_confirmation_status == "ACCEPTED":
+        log_incident_event(
+            db=db,
+            incident_id=dispatch.incident_id,
+            dispatch_id=dispatch.id,
+            event_type="HOSPITAL_ACCEPTED",
+            event_title="Hospital ER Confirmed Intake",
+            event_description="Receiving hospital emergency unit confirmed capacity reservation.",
+            actor_type="HOSPITAL_ER",
+            actor_reference=f"Hospital #{dispatch.destination_hospital_id}",
+            metadata={"destination_hospital_id": dispatch.destination_hospital_id, "attempt_number": dispatch.attempt_number},
+            commit=False,
+        )
+
+        both_accepted = (dispatch.ambulance_confirmation_status == "ACCEPTED")
+        if both_accepted and dispatch.coordination_status != "CONFIRMED":
             dispatch.coordination_status = "CONFIRMED"
             dispatch.confirmed_at = now
             if ambulance:
@@ -579,25 +1078,65 @@ def confirm_hospital(dispatch_id: int, payload: ConfirmationDecision, db: Sessio
             if incident:
                 incident.status = "DISPATCHED"
 
+            log_incident_event(
+                db=db,
+                incident_id=dispatch.incident_id,
+                dispatch_id=dispatch.id,
+                event_type="DUAL_CONFIRMATION_COMPLETED",
+                event_title="Dual Confirmation Completed",
+                event_description="Both ambulance unit and receiving hospital confirmed. Unit dispatched to scene.",
+                actor_type="SYSTEM",
+                actor_reference="Dual Confirmation Machine",
+                metadata={"coordination_status": "CONFIRMED", "attempt_number": dispatch.attempt_number},
+                commit=False,
+            )
+            generate_or_update_handover_packet(dispatch, db, commit=False)
+
         db.commit()
         db.refresh(dispatch)
 
-        broadcast_sync("DISPATCH_CONFIRMATION_UPDATED", {
-            "dispatch_id": dispatch.id,
-            "coordination_status": dispatch.coordination_status,
-            "ambulance_confirmation": dispatch.ambulance_confirmation_status,
-            "hospital_confirmation": dispatch.hospital_confirmation_status,
-        })
+        inc = db.query(Incident).filter(Incident.id == dispatch.incident_id).first()
+        broadcast_sync(
+            "DISPATCH_CONFIRMATION_UPDATED",
+            {
+                "dispatch_id": dispatch.id,
+                "incident_id": dispatch.incident_id,
+                "ambulance_id": dispatch.ambulance_id,
+                "destination_hospital_id": dispatch.destination_hospital_id,
+                "coordination_status": dispatch.coordination_status,
+                "ambulance_confirmation": dispatch.ambulance_confirmation_status,
+                "hospital_confirmation": dispatch.hospital_confirmation_status,
+                "status": dispatch.status,
+            },
+            ambulance_id=dispatch.ambulance_id,
+            hospital_id=dispatch.destination_hospital_id,
+            reporter_user_id=inc.reporter_user_id if inc else None,
+            entity_type="dispatch",
+            entity_id=dispatch.id,
+        )
         return dispatch
 
     elif decision == "REJECTED":
         # AUTOMATIC EMERGENCY ESCALATION TRIGGER
         dispatch.hospital_confirmation_status = "REJECTED"
+        log_incident_event(
+            db=db,
+            incident_id=dispatch.incident_id,
+            dispatch_id=dispatch.id,
+            event_type="HOSPITAL_REJECTED",
+            event_title="Hospital ER Declined Intake",
+            event_description=f"Receiving hospital declined emergency admission: {payload.reason or 'Declined by ER'}.",
+            actor_type="HOSPITAL_ER",
+            actor_reference=f"Hospital #{dispatch.destination_hospital_id}",
+            metadata={"reason": payload.reason, "attempt_number": dispatch.attempt_number},
+            commit=False,
+        )
         return auto_escalate_dispatch(
             dispatch=dispatch,
             failure_source="HOSPITAL",
             failure_reason=payload.reason or "Hospital ER unit declined admission.",
             db=db,
+            expected_attempt=dispatch.attempt_number,
         )
 
 @router.post("/{dispatch_id}/simulate-decision", response_model=DispatchOut)
@@ -624,23 +1163,69 @@ def check_expirations(db: Session = Depends(get_db)):
     }
 
 @router.post("/{dispatch_id}/reassign", response_model=DispatchOut)
-def reassign_dispatch(dispatch_id: int, db: Session = Depends(get_db)):
-    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+def reassign_dispatch(
+    dispatch_id: int,
+    expected_attempt: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user and auth_user.role not in (ROLE_DISPATCHER, ROLE_SUPER_ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: role '{auth_user.role}' cannot manually reassign dispatches. Only dispatchers and super administrators are authorized.",
+        )
+
+    begin_immediate_if_sqlite(db)
+    disp_query = db.query(Dispatch).filter(Dispatch.id == dispatch_id).execution_options(populate_existing=True)
+    if is_postgres(db):
+        disp_query = disp_query.with_for_update()
+    dispatch = disp_query.first()
     if not dispatch:
         raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    if dispatch.status in ["COMPLETED", "CANCELLED"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot reassign: dispatch #{dispatch.id} is already in terminal stage '{dispatch.status}'."
+        )
+
+    if expected_attempt is not None and dispatch.attempt_number != expected_attempt:
+        return dispatch
 
     return auto_escalate_dispatch(
         dispatch=dispatch,
         failure_source="DISPATCHER_OVERRIDE",
         failure_reason="Manual dispatcher reassignment requested.",
         db=db,
+        expected_attempt=expected_attempt or dispatch.attempt_number,
     )
 
 @router.patch("/{dispatch_id}/step", response_model=DispatchOut)
-def advance_dispatch_lifecycle(dispatch_id: int, db: Session = Depends(get_db)):
-    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+def advance_dispatch_lifecycle(
+    dispatch_id: int,
+    expected_status: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    begin_immediate_if_sqlite(db)
+
+    disp_query = db.query(Dispatch).filter(Dispatch.id == dispatch_id).execution_options(populate_existing=True)
+    if is_postgres(db):
+        disp_query = disp_query.with_for_update()
+    dispatch = disp_query.first()
     if not dispatch:
         raise HTTPException(status_code=404, detail="Dispatch not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot advance ambulance mission lifecycle")
+        if auth_user.role == ROLE_HOSPITAL_STAFF:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Hospital staff cannot advance ambulance mission lifecycle")
+        if auth_user.role == ROLE_AMBULANCE_CREW:
+            if auth_user.ambulance_id and dispatch.ambulance_id != auth_user.ambulance_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ambulance crew can only advance lifecycle for their own assigned ambulance unit")
 
     if dispatch.coordination_status != "CONFIRMED":
         raise HTTPException(
@@ -648,11 +1233,27 @@ def advance_dispatch_lifecycle(dispatch_id: int, db: Session = Depends(get_db)):
             detail=f"Cannot advance dispatch lifecycle: Dual confirmation status is '{dispatch.coordination_status}' (Ambulance: {dispatch.ambulance_confirmation_status}, Hospital: {dispatch.hospital_confirmation_status}). Both must accept before unit can proceed."
         )
 
+    current_status = dispatch.status
+
+    if current_status in ["COMPLETED", "CANCELLED"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot advance dispatch lifecycle: Dispatch #{dispatch.id} is already in terminal stage '{current_status}'."
+        )
+
+    if expected_status is not None and current_status != expected_status:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Conflict: Expected current status '{expected_status}' but dispatch #{dispatch.id} is currently '{current_status}'."
+        )
+
     incident = db.query(Incident).filter(Incident.id == dispatch.incident_id).first()
-    ambulance = db.query(Ambulance).filter(Ambulance.id == dispatch.ambulance_id).first()
+    amb_query = db.query(Ambulance).filter(Ambulance.id == dispatch.ambulance_id)
+    if is_postgres(db):
+        amb_query = amb_query.with_for_update()
+    ambulance = amb_query.first()
 
     now = get_utc_now()
-    current_status = dispatch.status
 
     if current_status == "ASSIGNED":
         dispatch.status = "EN_ROUTE_INCIDENT"
@@ -678,7 +1279,10 @@ def advance_dispatch_lifecycle(dispatch_id: int, db: Session = Depends(get_db)):
         if ambulance: ambulance.status = "TRANSPORTING"
 
         if dispatch.destination_hospital_id:
-            hospital = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id).first()
+            hosp_query = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id)
+            if is_postgres(db):
+                hosp_query = hosp_query.with_for_update()
+            hospital = hosp_query.first()
             if hospital and incident:
                 h_route = calculate_route(
                     start_lat=incident.latitude,
@@ -699,27 +1303,200 @@ def advance_dispatch_lifecycle(dispatch_id: int, db: Session = Depends(get_db)):
             ambulance.status = "AVAILABLE"
             ambulance.reservation_dispatch_id = None
             if dispatch.destination_hospital_id:
-                hospital = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id).first()
+                hosp_query = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id)
+                if is_postgres(db):
+                    hosp_query = hosp_query.with_for_update()
+                hospital = hosp_query.first()
                 if hospital:
                     ambulance.current_latitude = hospital.latitude
                     ambulance.current_longitude = hospital.longitude
 
         if dispatch.destination_hospital_id:
-            hospital = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id).first()
+            hosp_query = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id)
+            if is_postgres(db):
+                hosp_query = hosp_query.with_for_update()
+            hospital = hosp_query.first()
             if hospital and (hospital.reserved_emergency_beds or 0) > 0:
                 hospital.reserved_emergency_beds = max(0, hospital.reserved_emergency_beds - 1)
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot advance dispatch lifecycle: Unsupported current status '{current_status}' for dispatch #{dispatch.id}."
+        )
+
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="EMERGENCY_COMPLETED" if dispatch.status == "COMPLETED" else "LIFECYCLE_STEPPED",
+        event_title="Emergency Case Completed" if dispatch.status == "COMPLETED" else f"Ambulance Lifecycle: {dispatch.status.replace('_', ' ').title()}",
+        event_description=f"Emergency coordination advanced to '{dispatch.status}'. Incident status: '{incident.status if incident else 'RESOLVED'}'.",
+        actor_type="AMBULANCE_CREW",
+        actor_reference=ambulance.call_sign if ambulance else "Unit Crew",
+        metadata={"status": dispatch.status, "incident_status": incident.status if incident else None},
+        commit=False,
+    )
+
+    if dispatch.handover_packet:
+        generate_or_update_handover_packet(dispatch, db, commit=False)
 
     db.commit()
     db.refresh(dispatch)
 
-    broadcast_sync("DISPATCH_STEPPED", {
-        "dispatch_id": dispatch.id,
-        "status": dispatch.status,
-        "incident_status": incident.status if incident else None,
-        "ambulance_status": ambulance.status if ambulance else None,
-    })
+    broadcast_sync(
+        "DISPATCH_STEPPED",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "ambulance_id": dispatch.ambulance_id,
+            "destination_hospital_id": dispatch.destination_hospital_id,
+            "status": dispatch.status,
+            "incident_status": incident.status if incident else None,
+            "ambulance_status": ambulance.status if ambulance else None,
+            "estimated_eta_seconds": dispatch.estimated_eta_seconds,
+        },
+        ambulance_id=dispatch.ambulance_id,
+        hospital_id=dispatch.destination_hospital_id,
+        reporter_user_id=incident.reporter_user_id if incident else None,
+        entity_type="dispatch",
+        entity_id=dispatch.id,
+    )
 
     return dispatch
+
+@router.get("/{dispatch_id}/handover", response_model=HandoverPacketOut)
+def get_handover_packet(
+    dispatch_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    FEATURE 3 — EMERGENCY HANDOVER PACKET:
+    Retrieves the persistent handover packet for a dispatch.
+    Returns 404 if dispatch does not exist or if dual confirmation has not yet occurred.
+    """
+    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Clinical SBAR handover packets are strictly confidential and restricted to paramedics, hospital ER staff, and regional dispatchers.",
+            )
+        elif auth_user.role == ROLE_HOSPITAL_STAFF:
+            if auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Hospital staff can only view handover packets routed to their own facility")
+        elif auth_user.role == ROLE_AMBULANCE_CREW:
+            if auth_user.ambulance_id and dispatch.ambulance_id != auth_user.ambulance_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ambulance crew can only view handover packets for their own assigned ambulance unit")
+
+    if dispatch.coordination_status != "CONFIRMED" and not dispatch.handover_packet:
+        raise HTTPException(
+            status_code=404,
+            detail="Emergency Handover Packet not found. Handover packets are generated only after dual confirmation (ambulance and hospital acceptance)."
+        )
+
+    packet = dispatch.handover_packet
+    if not packet and dispatch.coordination_status == "CONFIRMED":
+        packet = generate_or_update_handover_packet(dispatch, db)
+
+    return packet
+
+@router.post("/{dispatch_id}/handover/acknowledge", response_model=HandoverPacketOut)
+def acknowledge_handover_packet(
+    dispatch_id: int,
+    payload: Optional[HandoverAcknowledgeRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    FEATURE 3 — EMERGENCY HANDOVER PACKET (Strictly Idempotent & Concurrency Safe):
+    Receiving hospital ER acknowledges intake of the digital handover packet.
+    If already acknowledged, returns existing record immediately without updating timestamps.
+    First caller sets definitive timestamp and staff identity.
+    """
+    begin_immediate_if_sqlite(db)
+
+    disp_query = db.query(Dispatch).filter(Dispatch.id == dispatch_id).execution_options(populate_existing=True)
+    if is_postgres(db):
+        disp_query = disp_query.with_for_update()
+    dispatch = disp_query.first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot acknowledge hospital emergency handover packets")
+        if auth_user.role == ROLE_AMBULANCE_CREW:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ambulance crew cannot acknowledge hospital intake handover packets. This action is reserved for hospital ER staff.")
+        if auth_user.role == ROLE_HOSPITAL_STAFF:
+            if auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Hospital staff can only acknowledge handover packets for their own receiving facility")
+
+    packet_query = db.query(HandoverPacket).filter(HandoverPacket.dispatch_id == dispatch_id).execution_options(populate_existing=True)
+    if is_postgres(db):
+        packet_query = packet_query.with_for_update()
+    packet = packet_query.first()
+
+    if not packet:
+        if dispatch.coordination_status == "CONFIRMED":
+            packet = generate_or_update_handover_packet(dispatch, db, commit=False)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot acknowledge handover: packet not yet generated (requires dual confirmation)."
+            )
+
+    # Strictly Idempotent: If already acknowledged, return existing packet immediately
+    if packet.status == "ACKNOWLEDGED":
+        return packet
+
+    now = get_utc_now()
+    packet.status = "ACKNOWLEDGED"
+    packet.acknowledged_at = now
+    packet.acknowledged_by = (payload and payload.acknowledged_by) or "Receiving Hospital ER Intake (Staff)"
+    packet.updated_at = now
+
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="HANDOVER_ACKNOWLEDGED",
+        event_title="Hospital ER Acknowledged Handover",
+        event_description=f"Pre-arrival clinical handover packet acknowledged by {packet.acknowledged_by}.",
+        actor_type="HOSPITAL_ER",
+        actor_reference=packet.acknowledged_by,
+        metadata={"packet_id": packet.id, "acknowledged_by": packet.acknowledged_by},
+        commit=False,
+    )
+
+    db.commit()
+    db.refresh(packet)
+
+    inc = db.query(Incident).filter(Incident.id == dispatch.incident_id).first()
+    broadcast_sync(
+        "HANDOVER_ACKNOWLEDGED",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "packet_id": packet.id,
+            "status": packet.status,
+            "acknowledged_at": packet.acknowledged_at.isoformat() if packet.acknowledged_at else None,
+            "acknowledged_by": packet.acknowledged_by,
+        },
+        ambulance_id=dispatch.ambulance_id,
+        hospital_id=dispatch.destination_hospital_id,
+        reporter_user_id=inc.reporter_user_id if inc else None,
+        entity_type="handover_packet",
+        entity_id=packet.id,
+    )
+
+    return packet
 
 @router.get("/route/preview")
 def preview_route(

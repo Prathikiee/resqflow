@@ -1,4 +1,5 @@
 import pytest
+from fastapi import HTTPException
 from backend.app.core.database import SessionLocal, Base, engine
 from backend.app.models.entities import Incident, Ambulance, Hospital, Dispatch
 from backend.app.services.seed_service import seed_database
@@ -132,3 +133,9 @@ def test_full_emergency_response_lifecycle(db):
     hospital_rec = db.query(Hospital).filter(Hospital.id == top_hospital["hospital_id"]).first()
     assert assigned_amb.current_latitude == hospital_rec.latitude
     assert assigned_amb.current_longitude == hospital_rec.longitude
+
+    # 8. Step Lifecycle past COMPLETED: MUST reject with HTTP 400
+    with pytest.raises(HTTPException) as exc_info:
+        advance_dispatch_lifecycle(dispatch_id=dispatch.id, db=db)
+    assert exc_info.value.status_code == 400
+    assert "already in terminal stage" in exc_info.value.detail or "COMPLETED" in exc_info.value.detail

@@ -50,11 +50,17 @@ class Incident(Base):
     # REPORTED -> TRIAGED -> ALLOCATED -> DISPATCHED -> EN_ROUTE -> ON_SCENE -> TRANSPORTING -> AT_HOSPITAL -> RESOLVED
     status = Column(String(40), default="REPORTED", index=True)
 
+    # Citizen Reporter linkage (nullable for walk-ins / legacy / anonymous calls)
+    reporter_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+
     created_at = Column(DateTime, default=utc_now, nullable=False)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 
     # Relationships
+    reporter = relationship("User", back_populates="reported_incidents")
     dispatches = relationship("Dispatch", back_populates="incident", cascade="all, delete-orphan")
+    witness_reports = relationship("WitnessReport", foreign_keys="[WitnessReport.master_incident_id]", back_populates="master_incident")
+    events = relationship("IncidentEvent", back_populates="incident", order_by="IncidentEvent.created_at.asc()", cascade="all, delete-orphan")
 
     @property
     def triage_justifications(self) -> List[str]:
@@ -66,6 +72,13 @@ class Incident(Base):
     @triage_justifications.setter
     def triage_justifications(self, val: List[str]):
         self.triage_justifications_json = json.dumps(val or [])
+
+    @property
+    def witness_count(self) -> int:
+        try:
+            return len(self.witness_reports or [])
+        except Exception:
+            return 0
 
 
 class Ambulance(Base):
@@ -91,6 +104,7 @@ class Ambulance(Base):
 
     # Relationships
     dispatches = relationship("Dispatch", back_populates="ambulance")
+    crew_users = relationship("User", back_populates="ambulance")
 
     @property
     def equipment(self) -> List[str]:
@@ -109,6 +123,7 @@ class Hospital(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     name = Column(String(160), unique=True, index=True, nullable=False)
+    facility_code = Column(String(50), unique=True, index=True, nullable=True)
     address = Column(String(255), nullable=False)
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
@@ -129,6 +144,7 @@ class Hospital(Base):
 
     # Relationships
     dispatches = relationship("Dispatch", back_populates="destination_hospital")
+    staff_users = relationship("User", back_populates="hospital")
 
     @property
     def specialties(self) -> List[str]:
@@ -191,6 +207,7 @@ class Dispatch(Base):
     incident = relationship("Incident", back_populates="dispatches")
     ambulance = relationship("Ambulance", back_populates="dispatches")
     destination_hospital = relationship("Hospital", back_populates="dispatches")
+    handover_packet = relationship("HandoverPacket", back_populates="dispatch", uselist=False, cascade="all, delete-orphan")
 
     @property
     def allocation_breakdown(self) -> dict:
@@ -224,3 +241,179 @@ class Dispatch(Base):
     @route_geometry.setter
     def route_geometry(self, val: list):
         self.route_geometry_json = json.dumps(val or [])
+
+
+class HandoverPacket(Base):
+    __tablename__ = "handover_packets"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    dispatch_id = Column(Integer, ForeignKey("dispatches.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    incident_id = Column(Integer, ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    status = Column(String(30), default="SENT", nullable=False)  # PENDING, SENT, ACKNOWLEDGED
+    acknowledged_at = Column(DateTime, nullable=True)
+    acknowledged_by = Column(String(120), nullable=True)
+
+    patient_age = Column(Integer, nullable=True)
+    patient_gender = Column(String(30), nullable=True)
+    chief_complaint = Column(Text, nullable=False)
+    reported_symptoms_json = Column(Text, default="[]")
+
+    triage_priority = Column(String(40), nullable=False)
+    triage_color = Column(String(20), default="GREEN")
+    triage_score = Column(Integer, default=30)
+    triage_justifications_json = Column(Text, default="[]")
+
+    incident_latitude = Column(Float, nullable=False)
+    incident_longitude = Column(Float, nullable=False)
+    incident_address = Column(String(255), nullable=True)
+
+    ambulance_call_sign = Column(String(60), nullable=False)
+    ambulance_vehicle_type = Column(String(30), nullable=False)
+    paramedic_level = Column(String(30), default="BASIC")
+    required_equipment_json = Column(Text, default="[]")
+
+    receiving_hospital_id = Column(Integer, nullable=True)
+    receiving_hospital_name = Column(String(120), nullable=True)
+
+    estimated_arrival_eta_seconds = Column(Float, nullable=True)
+    route_distance_meters = Column(Float, nullable=True)
+
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    # Relationships
+    dispatch = relationship("Dispatch", back_populates="handover_packet")
+    incident = relationship("Incident")
+
+    @property
+    def reported_symptoms(self) -> List[str]:
+        try:
+            return json.loads(self.reported_symptoms_json or "[]")
+        except Exception:
+            return []
+
+    @reported_symptoms.setter
+    def reported_symptoms(self, val: List[str]):
+        self.reported_symptoms_json = json.dumps(val or [])
+
+    @property
+    def triage_justifications(self) -> List[str]:
+        try:
+            return json.loads(self.triage_justifications_json or "[]")
+        except Exception:
+            return []
+
+    @triage_justifications.setter
+    def triage_justifications(self, val: List[str]):
+        self.triage_justifications_json = json.dumps(val or [])
+
+    @property
+    def required_equipment(self) -> List[str]:
+        try:
+            return json.loads(self.required_equipment_json or "[]")
+        except Exception:
+            return []
+
+    @required_equipment.setter
+    def required_equipment(self, val: List[str]):
+        self.required_equipment_json = json.dumps(val or [])
+
+
+class WitnessReport(Base):
+    __tablename__ = "witness_reports"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    master_incident_id = Column(Integer, ForeignKey("incidents.id", ondelete="SET NULL"), nullable=True, index=True)
+    reporter_identifier = Column(String(100), nullable=False)  # e.g. "Witness A", "Anonymous Passerby"
+    incident_description = Column(Text, nullable=False)
+    incident_type = Column(String(60), default="Road Traffic Accident", nullable=False)
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+    reported_at = Column(DateTime, default=utc_now, nullable=False)
+
+    duplicate_probability = Column(Float, nullable=True)  # 0.0 - 1.0 (or percentage)
+    matching_incident_id = Column(Integer, ForeignKey("incidents.id", ondelete="SET NULL"), nullable=True)
+    matching_distance_meters = Column(Float, nullable=True)
+    matching_time_difference_seconds = Column(Float, nullable=True)
+    matching_explanation = Column(Text, nullable=True)
+
+    # Status: NEW, POSSIBLE_DUPLICATE, CONFIRMED_DUPLICATE, DISTINCT
+    review_status = Column(String(30), default="NEW", index=True, nullable=False)
+    audit_trail_json = Column(Text, default="[]")
+
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    # Relationships
+    master_incident = relationship("Incident", foreign_keys=[master_incident_id], back_populates="witness_reports")
+    suggested_incident = relationship("Incident", foreign_keys=[matching_incident_id])
+
+    @property
+    def audit_trail(self) -> list:
+        try:
+            return json.loads(self.audit_trail_json or "[]")
+        except Exception:
+            return []
+
+    @audit_trail.setter
+    def audit_trail(self, val: list):
+        self.audit_trail_json = json.dumps(val or [])
+
+
+class IncidentEvent(Base):
+    __tablename__ = "incident_events"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    incident_id = Column(Integer, ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True)
+    dispatch_id = Column(Integer, ForeignKey("dispatches.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    event_type = Column(String(60), nullable=False, index=True)
+    event_title = Column(String(120), nullable=False)
+    event_description = Column(Text, nullable=False)
+    actor_type = Column(String(40), default="SYSTEM", nullable=False)  # SYSTEM, DISPATCHER, AMBULANCE_CREW, HOSPITAL_ER, WITNESS, CALLER
+    actor_reference = Column(String(120), nullable=True)
+    event_metadata_json = Column(Text, default="{}")
+
+    created_at = Column(DateTime, default=utc_now, nullable=False, index=True)
+
+    # Relationships
+    incident = relationship("Incident", back_populates="events")
+    dispatch = relationship("Dispatch")
+
+    @property
+    def event_metadata(self) -> dict:
+        try:
+            return json.loads(self.event_metadata_json or "{}")
+        except Exception:
+            return {}
+
+    @event_metadata.setter
+    def event_metadata(self, val: dict):
+        self.event_metadata_json = json.dumps(val or {})
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    email = Column(String(160), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    full_name = Column(String(160), nullable=False)
+    # Role: CITIZEN, AMBULANCE_CREW, HOSPITAL_STAFF, DISPATCHER, SUPER_ADMIN
+    role = Column(String(40), index=True, nullable=False)
+
+    # Scoped affiliations
+    hospital_id = Column(Integer, ForeignKey("hospitals.id", ondelete="SET NULL"), nullable=True)
+    ambulance_id = Column(Integer, ForeignKey("ambulances.id", ondelete="SET NULL"), nullable=True)
+
+    phone_number = Column(String(40), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    # Relationships
+    hospital = relationship("Hospital", back_populates="staff_users")
+    ambulance = relationship("Ambulance", back_populates="crew_users")
+    reported_incidents = relationship("Incident", back_populates="reporter")

@@ -9,7 +9,8 @@ from backend.app.core.config import settings
 from backend.app.core.database import get_db, Base, engine, SessionLocal, upgrade_schema
 from backend.app.services.seed_service import seed_database
 from backend.app.core.ws import ws_manager
-from backend.app.api import incidents, ambulances, hospitals, seed, dispatch
+from backend.app.core.security import decode_access_token
+from backend.app.api import incidents, ambulances, hospitals, seed, dispatch, witness_reports, auth
 from backend.app.api.dispatch import check_and_escalate_expired_dispatches
 
 logging.basicConfig(level=logging.INFO)
@@ -80,21 +81,55 @@ app.add_middleware(
 )
 
 # Register Routers
+app.include_router(auth.router)
 app.include_router(incidents.router)
 app.include_router(ambulances.router)
 app.include_router(hospitals.router)
 app.include_router(dispatch.router)
+app.include_router(witness_reports.router)
 app.include_router(seed.router)
+
+def authenticate_websocket_connection(websocket: WebSocket):
+    """
+    Validates token from query parameter, cookie, or authorization header.
+    Returns decoded token payload dict if valid, or None if unauthenticated.
+    """
+    token = (
+        websocket.query_params.get("token")
+        or websocket.cookies.get("lifelink_token")
+    )
+    if not token:
+        auth_header = websocket.headers.get("authorization")
+        if auth_header and auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1].strip()
+
+    if not token:
+        return None
+
+    return decode_access_token(token)
 
 @app.websocket("/ws/live")
 async def websocket_endpoint(websocket: WebSocket):
-    await ws_manager.connect(websocket)
+    payload = authenticate_websocket_connection(websocket)
+    if not payload:
+        await websocket.close(code=4001, reason="Unauthorized: Valid authentication token required")
+        return
+
+    client = await ws_manager.connect(websocket, user_meta=payload)
     try:
         await websocket.send_json({
             "event": "HANDSHAKE",
             "status": "connected",
             "service": "ResQFlow Live Feed",
             "region": settings.DEFAULT_CITY,
+            "user": {
+                "id": payload.get("sub"),
+                "email": payload.get("email"),
+                "role": payload.get("role"),
+                "ambulance_id": payload.get("ambulance_id"),
+                "hospital_id": payload.get("hospital_id"),
+                "facility_code": payload.get("facility_code"),
+            },
         })
         while True:
             text_data = await websocket.receive_text()

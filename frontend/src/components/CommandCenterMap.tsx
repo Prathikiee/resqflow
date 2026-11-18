@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect } from "react";
+import "leaflet/dist/leaflet.css";
 import {
   MapContainer,
   TileLayer,
@@ -10,11 +11,6 @@ import {
   useMap,
 } from "react-leaflet";
 import L from "leaflet";
-
-interface Location {
-  latitude: number;
-  longitude: number;
-}
 
 interface IncidentItem {
   id: number;
@@ -29,7 +25,7 @@ interface IncidentItem {
   triage_score: number;
   required_ambulance_type: string;
   status: string;
-  triage_justifications: string[];
+  triage_justifications?: string[];
 }
 
 interface AmbulanceItem {
@@ -70,23 +66,23 @@ interface MapProps {
   zoom?: number;
 }
 
-// Custom Leaflet DivIcons to ensure reliable rendering without external marker images
+// Custom Leaflet DivIcons with crisp styling for light theme
 const createIncidentIcon = (color: string, isSelected: boolean) => {
   const bgClass =
     color === "RED"
-      ? "bg-red-600 border-red-300"
+      ? "bg-red-600 border-white text-white"
       : color === "YELLOW"
-      ? "bg-amber-500 border-amber-200"
-      : "bg-emerald-600 border-emerald-200";
+      ? "bg-amber-500 border-white text-white"
+      : "bg-emerald-600 border-white text-white";
 
-  const ringAnimation = isSelected ? "animate-ping opacity-75" : "animate-pulse";
+  const ringAnimation = isSelected ? "animate-ping opacity-80" : "animate-pulse opacity-40";
 
   return L.divIcon({
     className: "custom-incident-marker",
     html: `
       <div class="relative flex items-center justify-center w-8 h-8">
-        <span class="absolute w-8 h-8 rounded-full ${bgClass} ${ringAnimation} opacity-40"></span>
-        <div class="relative w-6 h-6 rounded-full ${bgClass} border-2 shadow-lg flex items-center justify-center text-white text-[10px] font-bold">
+        <span class="absolute w-8 h-8 rounded-full ${bgClass} ${ringAnimation}"></span>
+        <div class="relative w-6 h-6 rounded-full ${bgClass} border-2 shadow-md flex items-center justify-center text-[11px] font-black">
           !
         </div>
       </div>
@@ -100,14 +96,14 @@ const createAmbulanceIcon = (type: string, status: string) => {
   const isAvailable = status === "AVAILABLE";
   const bg = isAvailable
     ? type === "ALS"
-      ? "bg-blue-600 border-blue-300"
-      : "bg-cyan-600 border-cyan-300"
-    : "bg-slate-600 border-slate-400 opacity-60";
+      ? "bg-blue-600 border-white"
+      : "bg-cyan-600 border-white"
+    : "bg-slate-500 border-slate-200 opacity-75";
 
   return L.divIcon({
     className: "custom-amb-marker",
     html: `
-      <div class="w-7 h-7 rounded-lg ${bg} border-2 shadow-md flex items-center justify-center text-white font-mono text-[9px] font-bold">
+      <div class="w-7 h-7 rounded-lg ${bg} border-2 shadow-md flex items-center justify-center text-white font-mono text-[9px] font-black">
         ${type === "ALS" ? "ALS" : "BLS"}
       </div>
     `,
@@ -120,7 +116,7 @@ const createHospitalIcon = () => {
   return L.divIcon({
     className: "custom-hospital-marker",
     html: `
-      <div class="w-7 h-7 rounded-lg bg-emerald-700 border-2 border-emerald-300 shadow-md flex items-center justify-center text-white text-xs font-bold">
+      <div class="w-7 h-7 rounded-lg bg-emerald-600 border-2 border-white shadow-md flex items-center justify-center text-white text-xs font-black">
         +
       </div>
     `,
@@ -129,12 +125,29 @@ const createHospitalIcon = () => {
   });
 };
 
-// Component to recenter map when selected incident changes
-function ChangeView({ center, zoom }: { center: [number, number]; zoom: number }) {
+// Component to handle auto-resize and view centering
+function MapController({ center, zoom }: { center: [number, number]; zoom: number }) {
   const map = useMap();
+
+  useEffect(() => {
+    // Invalidate map size after mount or container layout changes
+    const timer = setTimeout(() => {
+      map.invalidateSize();
+    }, 150);
+
+    const handleResize = () => map.invalidateSize();
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [map]);
+
   useEffect(() => {
     map.setView(center, zoom, { animate: true });
   }, [center, zoom, map]);
+
   return null;
 }
 
@@ -149,19 +162,20 @@ export default function CommandCenterMap({
   zoom = 13,
 }: MapProps) {
   return (
-    <div className="w-full h-full relative rounded-xl overflow-hidden border border-slate-800 bg-slate-950">
+    <div className="w-full h-full min-h-[480px] relative rounded-xl overflow-hidden border border-slate-200 bg-slate-100 shadow-sm">
       <MapContainer
         center={center}
         zoom={zoom}
-        style={{ height: "100%", width: "100%", background: "#090d16" }}
+        style={{ height: "100%", width: "100%", minHeight: "480px", background: "#f8fafc" }}
         attributionControl={true}
       >
-        <ChangeView center={center} zoom={zoom} />
+        <MapController center={center} zoom={zoom} />
 
-        {/* Dark-styled OpenStreetMap tile layer (CartoDB Dark Matter) */}
+        {/* Light-styled High-Res CartoDB Voyager Tile Layer */}
         <TileLayer
           attribution='&copy; <a href="https://carto.com/">CARTO</a> | &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+          maxZoom={19}
         />
 
         {/* Hospital Markers */}
@@ -171,19 +185,19 @@ export default function CommandCenterMap({
             position={[h.latitude, h.longitude]}
             icon={createHospitalIcon()}
           >
-            <Popup className="resqflow-popup">
-              <div className="text-xs p-1 space-y-1">
-                <div className="font-bold text-emerald-400">{h.name}</div>
-                <div className="text-slate-300 text-[11px]">{h.address}</div>
+            <Popup>
+              <div className="text-xs p-1 space-y-1 max-w-[210px]">
+                <div className="font-bold text-emerald-700 text-[12px]">{h.name}</div>
+                <div className="text-slate-600 text-[11px] leading-tight">{h.address}</div>
                 <div className="flex gap-2 text-[10px] pt-1">
-                  <span className="bg-emerald-950 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-800 font-mono">
+                  <span className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded border border-emerald-200 font-mono font-semibold">
                     ICU: {h.available_icu_beds}/{h.total_icu_beds}
                   </span>
-                  <span className="bg-blue-950 text-blue-300 px-1.5 py-0.5 rounded border border-blue-800 font-mono">
+                  <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200 font-mono font-semibold">
                     ER: {h.available_emergency_beds}/{h.total_emergency_beds}
                   </span>
                 </div>
-                <div className="text-[10px] text-slate-400 pt-0.5">
+                <div className="text-[10px] text-slate-500 pt-0.5">
                   Dept: {h.specialties.slice(0, 2).join(", ")}
                 </div>
               </div>
@@ -198,22 +212,22 @@ export default function CommandCenterMap({
             position={[amb.current_latitude, amb.current_longitude]}
             icon={createAmbulanceIcon(amb.vehicle_type, amb.status)}
           >
-            <Popup className="resqflow-popup">
-              <div className="text-xs p-1 space-y-1">
+            <Popup>
+              <div className="text-xs p-1 space-y-1 max-w-[200px]">
                 <div className="font-bold flex items-center justify-between gap-2">
-                  <span className="text-blue-400">{amb.call_sign}</span>
+                  <span className="text-blue-700 font-mono text-[12px]">{amb.call_sign}</span>
                   <span
-                    className={`text-[9px] px-1 py-0.2 rounded font-mono ${
+                    className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold ${
                       amb.status === "AVAILABLE"
-                        ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                        : "bg-slate-800 text-slate-400"
+                        ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                        : "bg-slate-100 text-slate-600 border border-slate-200"
                     }`}
                   >
                     {amb.status}
                   </span>
                 </div>
-                <div className="text-[11px] text-slate-300">Base: {amb.base_station}</div>
-                <div className="flex gap-2 text-[10px] font-mono">
+                <div className="text-[11px] text-slate-600">Base: {amb.base_station}</div>
+                <div className="flex gap-2 text-[10px] font-mono text-slate-700 pt-0.5">
                   <span>Type: {amb.vehicle_type}</span>
                   <span>Fuel: {amb.fuel_level_percent}%</span>
                   <span>Crew: {amb.paramedic_level}</span>
@@ -236,27 +250,27 @@ export default function CommandCenterMap({
               click: () => onSelectIncident && onSelectIncident(inc),
             }}
           >
-            <Popup className="resqflow-popup">
+            <Popup>
               <div className="text-xs p-1 space-y-1 max-w-[220px]">
                 <div className="flex items-center justify-between gap-1">
                   <span
-                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase font-mono ${
+                    className={`text-[10px] font-black px-1.5 py-0.5 rounded uppercase font-mono ${
                       inc.triage_color === "RED"
-                        ? "bg-red-950 text-red-400 border border-red-800"
+                        ? "bg-red-50 text-red-700 border border-red-200"
                         : inc.triage_color === "YELLOW"
-                        ? "bg-amber-950 text-amber-400 border border-amber-800"
-                        : "bg-emerald-950 text-emerald-400 border border-emerald-800"
+                        ? "bg-amber-50 text-amber-700 border border-amber-200"
+                        : "bg-emerald-50 text-emerald-700 border border-emerald-200"
                     }`}
                   >
                     {inc.triage_level}
                   </span>
-                  <span className="text-[10px] text-slate-400 font-mono">#{inc.id}</span>
+                  <span className="text-[10px] text-slate-500 font-mono font-semibold">#{inc.id}</span>
                 </div>
-                <div className="font-semibold text-slate-100 text-[11px]">
+                <div className="font-bold text-slate-900 text-[11px] leading-snug">
                   {inc.chief_complaint}
                 </div>
-                <div className="text-slate-400 text-[10px]">{inc.location_address}</div>
-                <div className="text-[10px] font-mono text-blue-400 pt-1">
+                <div className="text-slate-600 text-[10px]">{inc.location_address}</div>
+                <div className="text-[10px] font-mono text-blue-700 pt-0.5 font-semibold">
                   Status: {inc.status} • Need: {inc.required_ambulance_type}
                 </div>
               </div>
@@ -264,15 +278,15 @@ export default function CommandCenterMap({
           </Marker>
         ))}
 
-        {/* Dispatched Route Polyline */}
+        {/* Active Emergency Dispatched Route Polyline */}
         {activeRouteGeometry && activeRouteGeometry.length > 0 && (
           <Polyline
             positions={activeRouteGeometry as [number, number][]}
             pathOptions={{
-              color: "#3b82f6",
+              color: "#2563eb",
               weight: 5,
               opacity: 0.85,
-              dashArray: "1, 8",
+              dashArray: "2, 8",
               dashOffset: "0",
             }}
           />
@@ -280,35 +294,35 @@ export default function CommandCenterMap({
       </MapContainer>
 
       {/* Floating Map Legend */}
-      <div className="absolute bottom-3 left-3 z-[1000] bg-slate-900/90 backdrop-blur border border-slate-800 rounded-lg p-2.5 text-[10px] space-y-1.5 shadow-xl pointer-events-auto">
-        <div className="font-bold uppercase tracking-wider text-slate-400 text-[9px] border-b border-slate-800 pb-1">
+      <div className="absolute bottom-3 left-3 z-[1000] bg-white/95 backdrop-blur border border-slate-200 rounded-lg p-2.5 text-[10px] space-y-1.5 shadow-md pointer-events-auto">
+        <div className="font-bold uppercase tracking-wider text-slate-500 text-[9px] border-b border-slate-200 pb-1">
           Command Map Legend (Mangaluru)
         </div>
-        <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-pulse" />
+        <div className="flex items-center gap-2 text-slate-700">
+          <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-pulse border border-white shadow-xs" />
           <span>Priority 1 Incident (Red / Critical)</span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+        <div className="flex items-center gap-2 text-slate-700">
+          <span className="w-2.5 h-2.5 rounded-full bg-amber-500 border border-white shadow-xs" />
           <span>Priority 2 Incident (Yellow / Urgent)</span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-md bg-blue-600" />
-          <span>ALS Ambulance (ICU Equipped)</span>
+        <div className="flex items-center gap-2 text-slate-700">
+          <span className="w-2.5 h-2.5 rounded-md bg-blue-600 text-white font-mono text-[7px] flex items-center justify-center font-bold">ALS</span>
+          <span>ALS Ambulance (ICU Advanced)</span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-md bg-cyan-600" />
+        <div className="flex items-center gap-2 text-slate-700">
+          <span className="w-2.5 h-2.5 rounded-md bg-cyan-600 text-white font-mono text-[7px] flex items-center justify-center font-bold">BLS</span>
           <span>BLS Ambulance (Basic Life Support)</span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-md bg-emerald-700 text-white flex items-center justify-center font-bold text-[8px]">
+        <div className="flex items-center gap-2 text-slate-700">
+          <span className="w-2.5 h-2.5 rounded-md bg-emerald-600 text-white flex items-center justify-center font-black text-[9px]">
             +
           </span>
           <span>Emergency Receiving Hospital</span>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="w-4 h-0.5 bg-blue-500" />
-          <span>OSRM Emergency Route (Lights & Siren)</span>
+        <div className="flex items-center gap-2 text-slate-700">
+          <span className="w-4 h-0.5 bg-blue-600" />
+          <span>OSRM Emergency Route</span>
         </div>
       </div>
     </div>

@@ -90,29 +90,29 @@ export default function AllocationModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md overflow-y-auto">
-      <div className="w-full max-w-5xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col my-6 max-h-[92vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm overflow-y-auto">
+      <div className="w-full max-w-5xl bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden flex flex-col my-6 max-h-[92vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-950/60">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
+            <div className="w-9 h-9 rounded-lg bg-blue-50 border border-blue-200 flex items-center justify-center text-blue-600">
               <Sliders className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-lg font-bold text-white">Intelligent Ambulance & Hospital Allocation</h2>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                <h2 className="text-lg font-bold text-slate-900">Intelligent Ambulance & Hospital Allocation</h2>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 font-semibold">
                   Multi-Factor Engine
                 </span>
               </div>
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-slate-500">
                 Incident #{incident.id}: {incident.chief_complaint?.slice(0, 75)}...
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -121,26 +121,26 @@ export default function AllocationModal({
         {/* Modal Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {/* Incident Context Strip */}
-          <div className="p-3.5 rounded-xl border border-slate-800 bg-slate-950 flex flex-wrap items-center justify-between gap-4 text-xs">
+          <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-4 text-xs">
             <div className="flex items-center gap-3">
               <span
                 className={`font-bold px-2 py-0.5 rounded uppercase font-mono text-[11px] ${
                   incident.triage_color === "RED"
-                    ? "bg-red-950 text-red-400 border border-red-800"
+                    ? "bg-red-50 text-red-700 border border-red-200"
                     : incident.triage_color === "YELLOW"
-                    ? "bg-amber-950 text-amber-400 border border-amber-800"
-                    : "bg-emerald-950 text-emerald-400 border border-emerald-800"
+                    ? "bg-amber-50 text-amber-700 border border-amber-200"
+                    : "bg-emerald-50 text-emerald-700 border border-emerald-200"
                 }`}
               >
                 {incident.triage_level}
               </span>
-              <span className="text-slate-300">
-                Mandatory Tier: <strong className="text-blue-400">{incident.required_ambulance_type}</strong>
+              <span className="text-slate-700">
+                Mandatory Tier: <strong className="text-blue-600">{incident.required_ambulance_type}</strong>
               </span>
             </div>
 
-            <div className="flex items-center gap-2 text-slate-400">
-              <MapPin className="w-3.5 h-3.5 text-red-400" />
+            <div className="flex items-center gap-2 text-slate-500">
+              <MapPin className="w-3.5 h-3.5 text-red-500" />
               <span>{incident.location_address}</span>
             </div>
           </div>
@@ -148,11 +148,11 @@ export default function AllocationModal({
           {/* Section 1: Ambulance Ranking & Explainability */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                <Ambulance className="w-4 h-4 text-blue-400" />
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Ambulance className="w-4 h-4 text-blue-600" />
                 Ambulance Fleet Allocation (Multi-Factor Scoring)
               </h3>
-              <span className="text-[11px] text-slate-400 font-mono">
+              <span className="text-[11px] text-slate-500 font-mono">
                 Weights: ETA 40% • Capability 25% • Equip 20% • Readiness 15%
               </span>
             </div>
@@ -166,74 +166,74 @@ export default function AllocationModal({
                     onClick={() => setSelectedAmbId(amb.ambulance_id)}
                     className={`p-4 rounded-xl border transition cursor-pointer flex flex-col justify-between space-y-3 ${
                       isSelected
-                        ? "bg-blue-950/40 border-blue-500 shadow-lg shadow-blue-500/10"
-                        : "bg-slate-950/50 border-slate-800 hover:border-slate-700"
+                        ? "bg-blue-50/70 border-blue-500 shadow-sm ring-1 ring-blue-500"
+                        : "bg-white border-slate-200 hover:border-slate-300 shadow-2xs"
                     }`}
                   >
                     <div>
                       {/* Top Bar: Rank & Score */}
-                      <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-100">
                         <div className="flex items-center gap-1.5">
                           <span
                             className={`w-5 h-5 rounded-full flex items-center justify-center font-bold text-[10px] ${
                               amb.rank === 1
                                 ? "bg-amber-400 text-black font-extrabold"
-                                : "bg-slate-800 text-slate-300"
+                                : "bg-slate-100 text-slate-700 border border-slate-200"
                             }`}
                           >
                             #{amb.rank}
                           </span>
-                          <span className="font-bold text-slate-100 text-xs">{amb.call_sign}</span>
+                          <span className="font-bold text-slate-800 text-xs">{amb.call_sign}</span>
                         </div>
                         <div className="text-right">
-                          <div className="text-sm font-extrabold text-blue-400 font-mono">
-                            {amb.total_score} <span className="text-[10px] text-slate-500">/100</span>
+                          <div className="text-sm font-black text-blue-600 font-mono">
+                            {amb.total_score} <span className="text-[10px] text-slate-400 font-normal">/100</span>
                           </div>
                         </div>
                       </div>
 
                       {/* Specs */}
-                      <div className="pt-2 text-[11px] space-y-1 text-slate-300">
+                      <div className="pt-2 text-[11px] space-y-1 text-slate-600">
                         <div className="flex justify-between">
-                          <span className="text-slate-500">Type / Paramedic:</span>
-                          <span className="font-semibold text-slate-200">
+                          <span className="text-slate-400">Type / Paramedic:</span>
+                          <span className="font-semibold text-slate-800">
                             {amb.vehicle_type} ({amb.paramedic_level})
                           </span>
                         </div>
                         <div className="flex justify-between">
-                          <span className="text-slate-500">Base Station:</span>
-                          <span className="text-slate-300">{amb.base_station}</span>
+                          <span className="text-slate-400">Base Station:</span>
+                          <span className="text-slate-700">{amb.base_station}</span>
                         </div>
                         <div className="flex justify-between font-mono">
-                          <span className="text-slate-500">ETA / Distance:</span>
-                          <span className="text-emerald-400 font-bold">
+                          <span className="text-slate-400">ETA / Distance:</span>
+                          <span className="text-emerald-600 font-bold">
                             {amb.eta_minutes} mins ({(amb.distance_meters / 1000).toFixed(1)} km)
                           </span>
                         </div>
-                        <div className="flex justify-between text-[10px] text-slate-500 pt-0.5">
+                        <div className="flex justify-between text-[10px] text-slate-400 pt-0.5">
                           <span>Routing Mode:</span>
-                          <span>{amb.routing_mode}</span>
+                          <span className="font-medium text-slate-600">{amb.routing_mode}</span>
                         </div>
                       </div>
 
                       {/* Factor Breakdown Bars */}
                       <div className="pt-2 space-y-1 text-[10px]">
-                        <div className="flex justify-between text-slate-400">
+                        <div className="flex justify-between text-slate-500">
                           <span>ETA Proximity (40%):</span>
-                          <span className="font-mono text-slate-200">{amb.score_breakdown.proximity_eta_score}</span>
+                          <span className="font-mono font-medium text-slate-800">{amb.score_breakdown.proximity_eta_score}</span>
                         </div>
-                        <div className="w-full bg-slate-800 h-1 rounded-full overflow-hidden">
+                        <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
                           <div
-                            className="bg-blue-500 h-full rounded-full"
+                            className="bg-blue-600 h-full rounded-full"
                             style={{ width: `${amb.score_breakdown.proximity_eta_score}%` }}
                           />
                         </div>
 
-                        <div className="flex justify-between text-slate-400 pt-1">
+                        <div className="flex justify-between text-slate-500 pt-1">
                           <span>Capability Fit (25%):</span>
-                          <span className="font-mono text-slate-200">{amb.score_breakdown.capability_match_score}</span>
+                          <span className="font-mono font-medium text-slate-800">{amb.score_breakdown.capability_match_score}</span>
                         </div>
-                        <div className="w-full bg-slate-800 h-1 rounded-full overflow-hidden">
+                        <div className="w-full bg-slate-100 h-1 rounded-full overflow-hidden">
                           <div
                             className="bg-emerald-500 h-full rounded-full"
                             style={{ width: `${amb.score_breakdown.capability_match_score}%` }}
@@ -243,13 +243,13 @@ export default function AllocationModal({
                     </div>
 
                     {/* Radio Select Button */}
-                    <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
+                    <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
                       <span className="text-[10px] text-slate-400 font-mono">Fuel: {amb.fuel_level_percent}%</span>
                       <span
                         className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
                           isSelected
-                            ? "bg-blue-600 text-white"
-                            : "bg-slate-800 text-slate-400"
+                            ? "bg-blue-600 text-white font-bold"
+                            : "bg-slate-100 text-slate-600 hover:bg-slate-200"
                         }`}
                       >
                         {isSelected ? "Selected for Dispatch" : "Select Unit"}
@@ -263,20 +263,20 @@ export default function AllocationModal({
 
           {/* Excluded Ambulances Transparency Panel */}
           {excludedAmbulances.length > 0 && (
-            <div className="p-3.5 rounded-xl border border-red-950/40 bg-red-950/10 space-y-2">
-              <div className="flex items-center gap-2 text-xs font-bold text-red-400">
-                <XCircle className="w-4 h-4" />
+            <div className="p-3.5 rounded-xl border border-red-200 bg-red-50/50 space-y-2">
+              <div className="flex items-center gap-2 text-xs font-bold text-red-700">
+                <XCircle className="w-4 h-4 text-red-600" />
                 <span>Pre-Filtered Excluded Units ({excludedAmbulances.length})</span>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
                 {excludedAmbulances.map((ex: any) => (
-                  <div key={ex.ambulance_id} className="p-2 rounded bg-slate-950/60 border border-slate-800 flex justify-between gap-2">
+                  <div key={ex.ambulance_id} className="p-2 rounded-lg bg-white border border-red-200 flex justify-between gap-2 shadow-2xs">
                     <div>
-                      <span className="font-bold text-slate-200">{ex.call_sign}</span>{" "}
+                      <span className="font-bold text-slate-800">{ex.call_sign}</span>{" "}
                       <span className="text-[10px] text-slate-500">({ex.vehicle_type})</span>
-                      <p className="text-[10px] text-slate-400 mt-0.5">{ex.reasons.join(" • ")}</p>
+                      <p className="text-[10px] text-slate-600 mt-0.5">{ex.reasons.join(" • ")}</p>
                     </div>
-                    <span className="text-[9px] uppercase px-1.5 py-0.5 rounded bg-slate-800 text-red-400 font-mono h-fit">
+                    <span className="text-[9px] uppercase px-1.5 py-0.5 rounded bg-slate-100 text-red-700 font-mono h-fit font-bold border border-slate-200">
                       {ex.status}
                     </span>
                   </div>
@@ -288,11 +288,11 @@ export default function AllocationModal({
           {/* Section 2: Hospital Suitability Matching */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                <Building2 className="w-4 h-4 text-emerald-400" />
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-emerald-600" />
                 Receiving Hospital Suitability Matching
               </h3>
-              <span className="text-[11px] text-slate-400 font-mono">
+              <span className="text-[11px] text-slate-500 font-mono">
                 Weights: Specialty 35% • Proximity 30% • ICU 20% • ER 15%
               </span>
             </div>
@@ -306,58 +306,58 @@ export default function AllocationModal({
                     onClick={() => setSelectedHospId(hosp.hospital_id)}
                     className={`p-4 rounded-xl border transition cursor-pointer flex flex-col justify-between space-y-2 ${
                       isSelected
-                        ? "bg-emerald-950/30 border-emerald-500 shadow-lg shadow-emerald-500/10"
-                        : "bg-slate-950/50 border-slate-800 hover:border-slate-700"
+                        ? "bg-emerald-50/70 border-emerald-500 shadow-sm ring-1 ring-emerald-500"
+                        : "bg-white border-slate-200 hover:border-slate-300 shadow-2xs"
                     }`}
                   >
                     <div>
-                      <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-100">
                         <div className="flex items-center gap-2">
                           <span
                             className={`w-5 h-5 rounded-full flex items-center justify-center font-bold text-[10px] ${
                               hosp.rank === 1
-                                ? "bg-emerald-400 text-black font-extrabold"
-                                : "bg-slate-800 text-slate-300"
+                                ? "bg-emerald-500 text-white font-black"
+                                : "bg-slate-100 text-slate-700 border border-slate-200"
                             }`}
                           >
                             #{hosp.rank}
                           </span>
-                          <span className="font-bold text-slate-100 text-xs">{hosp.name}</span>
+                          <span className="font-bold text-slate-900 text-xs">{hosp.name}</span>
                         </div>
-                        <div className="text-xs font-mono font-bold text-emerald-400">
-                          {hosp.total_suitability_score} <span className="text-[9px] text-slate-500">/100</span>
+                        <div className="text-xs font-mono font-black text-emerald-600">
+                          {hosp.total_suitability_score} <span className="text-[9px] text-slate-400 font-normal">/100</span>
                         </div>
                       </div>
 
-                      <div className="pt-2 text-[11px] space-y-1 text-slate-300">
+                      <div className="pt-2 text-[11px] space-y-1 text-slate-600">
                         <div className="flex justify-between">
-                          <span className="text-slate-500">Transit ETA:</span>
-                          <span className="font-mono text-emerald-400 font-bold">
+                          <span className="text-slate-400">Transit ETA:</span>
+                          <span className="font-mono text-emerald-600 font-bold">
                             ~{hosp.transit_minutes} mins ({(hosp.distance_meters / 1000).toFixed(1)} km)
                           </span>
                         </div>
                         <div className="flex justify-between">
-                          <span className="text-slate-500">Beds Vacancy:</span>
-                          <span className="font-mono text-slate-200">
+                          <span className="text-slate-400">Beds Vacancy:</span>
+                          <span className="font-mono text-slate-800">
                             ICU: {hosp.available_icu_beds}/{hosp.total_icu_beds} • ER: {hosp.available_emergency_beds}/{hosp.total_emergency_beds}
                           </span>
                         </div>
-                        <div className="text-[10px] text-slate-400 pt-1">
+                        <div className="text-[10px] text-slate-500 pt-1">
                           Matched Specialties:{" "}
-                          <strong className="text-blue-400">
+                          <strong className="text-blue-600">
                             {hosp.matched_specialties.length > 0 ? hosp.matched_specialties.join(", ") : "General Emergency"}
                           </strong>
                         </div>
                       </div>
                     </div>
 
-                    <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
-                      <span className="text-[10px] text-slate-500">{hosp.contact_number}</span>
+                    <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                      <span className="text-[10px] text-slate-400 font-mono">{hosp.contact_number}</span>
                       <span
                         className={`text-[10px] font-semibold px-2 py-0.5 rounded ${
                           isSelected
-                            ? "bg-emerald-600 text-white"
-                            : "bg-slate-800 text-slate-400"
+                            ? "bg-emerald-600 text-white font-bold"
+                            : "bg-slate-100 text-slate-600 hover:bg-slate-200"
                         }`}
                       >
                         {isSelected ? "Destination Set" : "Select Hospital"}
@@ -371,11 +371,11 @@ export default function AllocationModal({
         </div>
 
         {/* Modal Footer / Dispatch Action */}
-        <div className="px-6 py-4 border-t border-slate-800 bg-slate-950/70 flex flex-wrap items-center justify-between gap-4">
-          <div className="text-xs text-slate-400">
-            Assigned: <strong className="text-blue-400">{selectedAmbulance?.call_sign}</strong> → Destination:{" "}
-            <strong className="text-emerald-400">{selectedHospital?.name}</strong>
-            <span className="block text-[10px] text-slate-500 font-mono mt-0.5">
+        <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-4">
+          <div className="text-xs text-slate-600">
+            Assigned: <strong className="text-blue-600 font-bold">{selectedAmbulance?.call_sign}</strong> → Destination:{" "}
+            <strong className="text-emerald-600 font-bold">{selectedHospital?.name}</strong>
+            <span className="block text-[10px] text-slate-400 font-mono mt-0.5">
               Provisional reservation holds ambulance & ER bay for 90s until dual confirmation
             </span>
           </div>
@@ -384,7 +384,7 @@ export default function AllocationModal({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 rounded-lg border border-slate-800 text-slate-400 hover:text-white text-xs font-semibold"
+              className="px-4 py-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 text-xs font-semibold cursor-pointer transition"
             >
               Cancel
             </button>
@@ -392,7 +392,7 @@ export default function AllocationModal({
               type="button"
               onClick={handleConfirmDispatch}
               disabled={submitting || !selectedAmbulance}
-              className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold shadow-lg shadow-blue-600/30 transition flex items-center gap-2"
+              className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md shadow-blue-600/20 transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
             >
               {submitting ? "Initiating Dual-Reservation..." : "Confirm & Reserve Unit (Dual Confirmation)"}
             </button>

@@ -13,11 +13,53 @@ class IncidentStatusUpdate(BaseModel):
 class ConfirmationDecision(BaseModel):
     decision: str = Field(..., description="ACCEPTED or REJECTED")
     reason: Optional[str] = None
+    attempt_number: Optional[int] = None
 
 class SimulateDecisionRequest(BaseModel):
     party: str = Field(..., description="AMBULANCE, HOSPITAL, or BOTH")
     decision: str = Field(..., description="ACCEPTED or REJECTED")
     reason: Optional[str] = None
+
+class HandoverAcknowledgeRequest(BaseModel):
+    acknowledged_by: Optional[str] = None
+
+class HandoverPacketOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    dispatch_id: int
+    incident_id: int
+    status: str
+    acknowledged_at: Optional[datetime] = None
+    acknowledged_by: Optional[str] = None
+
+    patient_age: Optional[int] = None
+    patient_gender: Optional[str] = "Unknown"
+    chief_complaint: str
+    reported_symptoms: List[str] = []
+
+    triage_priority: str
+    triage_color: str
+    triage_score: int
+    triage_justifications: List[str] = []
+
+    incident_latitude: float
+    incident_longitude: float
+    incident_address: Optional[str] = None
+
+    ambulance_call_sign: str
+    ambulance_vehicle_type: str
+    paramedic_level: Optional[str] = "BASIC"
+    required_equipment: List[str] = []
+
+    receiving_hospital_id: Optional[int] = None
+    receiving_hospital_name: Optional[str] = None
+
+    estimated_arrival_eta_seconds: Optional[float] = None
+    route_distance_meters: Optional[float] = None
+
+    created_at: datetime
+    updated_at: datetime
 
 class DispatchOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -40,6 +82,9 @@ class DispatchOut(BaseModel):
     rejection_reason: Optional[str] = None
     attempt_number: int = 1
     escalation_history: Optional[List[Dict[str, Any]]] = None
+
+    # Emergency Handover Packet
+    handover_packet: Optional[HandoverPacketOut] = None
 
     dispatched_at: datetime
     arrived_incident_at: Optional[datetime] = None

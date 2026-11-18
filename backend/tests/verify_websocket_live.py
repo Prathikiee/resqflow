@@ -6,15 +6,17 @@ import asyncio
 from fastapi.testclient import TestClient
 from backend.app.main import app
 from backend.app.core.ws import ws_manager
+from backend.app.core.security import create_access_token
 
 def test_websocket_functionality():
     print("=== REAL-TIME WEBSOCKET VERIFICATION ===")
 
     client = TestClient(app)
+    token = create_access_token({"sub": "1", "email": "dispatcher@lifelink.demo", "role": "DISPATCHER"})
 
     # 1. Test Connection & Initial Handshake
     print("Connecting to /ws/live...")
-    with client.websocket_connect("/ws/live") as websocket:
+    with client.websocket_connect(f"/ws/live?token={token}") as websocket:
         initial_msg = websocket.receive_json()
         print(f"Received from WebSocket: {initial_msg}")
         assert initial_msg["event"] == "HANDSHAKE"
@@ -45,7 +47,7 @@ def test_websocket_functionality():
 
     # 5. Test Reconnection
     print("Testing client reconnection...")
-    with client.websocket_connect("/ws/live") as websocket2:
+    with client.websocket_connect(f"/ws/live?token={token}") as websocket2:
         reconnect_msg = websocket2.receive_json()
         assert reconnect_msg["event"] == "HANDSHAKE"
         print("✓ Reconnection handshake verified.")

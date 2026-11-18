@@ -1,17 +1,27 @@
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
-from backend.app.models.entities import Incident
+from backend.app.models.entities import Incident, IncidentEvent, User, Dispatch, Ambulance, Hospital
 from backend.app.schemas.incident import (
     IncidentCreate,
     IncidentOut,
+    IncidentEventOut,
     TriagePreviewRequest,
     TriageAssessmentOut,
 )
 from backend.app.schemas.dispatch import IncidentStatusUpdate
 from backend.app.services.triage_engine import assess_incident_severity
+from backend.app.services.timeline_service import log_incident_event
 from backend.app.core.ws import broadcast_sync
+from backend.app.core.auth import (
+    get_optional_current_user,
+    ROLE_CITIZEN,
+    ROLE_DISPATCHER,
+    ROLE_SUPER_ADMIN,
+    ROLE_AMBULANCE_CREW,
+    ROLE_HOSPITAL_STAFF,
+)
 
 router = APIRouter(prefix="/api/incidents", tags=["incidents"])
 
@@ -33,12 +43,18 @@ def preview_triage(payload: TriagePreviewRequest):
     return result.to_dict()
 
 @router.post("", response_model=IncidentOut, status_code=status.HTTP_201_CREATED)
-def create_incident(payload: IncidentCreate, db: Session = Depends(get_db)):
+def create_incident(
+    payload: IncidentCreate,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
     """
     Emergency Registration & Triage:
     Registers incoming incident, executes transparent rule-based triage,
     attaches clinical justification tags, and persists to database.
     """
+    auth_user = current_user if isinstance(current_user, User) else None
+
     triage = assess_incident_severity(
         chief_complaint=payload.chief_complaint,
         consciousness_level=payload.consciousness_level,
@@ -70,6 +86,7 @@ def create_incident(payload: IncidentCreate, db: Session = Depends(get_db)):
         triage_score=triage.triage_score,
         required_ambulance_type=triage.required_ambulance_type,
         status="TRIAGED",
+        reporter_user_id=auth_user.id if auth_user else None,
     )
     incident.triage_justifications = triage.justifications
 
@@ -77,35 +94,113 @@ def create_incident(payload: IncidentCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(incident)
 
-    broadcast_sync("INCIDENT_CREATED", {
-        "incident_id": incident.id,
-        "caller_name": incident.caller_name,
-        "triage_level": incident.triage_level,
-        "triage_color": incident.triage_color,
-        "status": incident.status,
-    })
+    # FEATURE 5 — Log incident registration and triage events
+    log_incident_event(
+        db=db,
+        incident_id=incident.id,
+        event_type="EMERGENCY_REGISTERED",
+        event_title="Emergency Incident Reported",
+        event_description=f"Reported by {incident.caller_name}: '{incident.chief_complaint}' at {incident.location_address}.",
+        actor_type="CALLER",
+        actor_reference=incident.caller_name,
+        metadata={
+            "caller_name": incident.caller_name,
+            "location_address": incident.location_address,
+            "coordinates": [incident.latitude, incident.longitude],
+        },
+    )
+    log_incident_event(
+        db=db,
+        incident_id=incident.id,
+        event_type="TRIAGE_COMPLETED",
+        event_title=f"Clinical Triage: {incident.triage_level}",
+        event_description=f"Rule-based triage assigned score {incident.triage_score}/100 ({incident.triage_color}). Required tier: {incident.required_ambulance_type}.",
+        actor_type="SYSTEM",
+        actor_reference="Rule-Based Triage Engine",
+        metadata={
+            "triage_level": incident.triage_level,
+            "triage_color": incident.triage_color,
+            "triage_score": incident.triage_score,
+            "required_ambulance_type": incident.required_ambulance_type,
+            "justifications": incident.triage_justifications,
+        },
+    )
+
+    broadcast_sync(
+        "INCIDENT_CREATED",
+        {
+            "incident_id": incident.id,
+            "caller_name": incident.caller_name,
+            "triage_level": incident.triage_level,
+            "triage_color": incident.triage_color,
+            "status": incident.status,
+            "reporter_user_id": incident.reporter_user_id,
+            "chief_complaint": incident.chief_complaint,
+            "location_address": incident.location_address,
+        },
+        reporter_user_id=incident.reporter_user_id,
+        target_roles=[ROLE_DISPATCHER, ROLE_SUPER_ADMIN],
+        entity_type="incident",
+        entity_id=incident.id,
+    )
 
     return incident
 
 @router.get("", response_model=List[IncidentOut])
-def list_incidents(db: Session = Depends(get_db)):
+def list_incidents(
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
     """
-    Returns all registered emergency incidents, ordered by priority score and recency.
+    Returns registered emergency incidents.
+    Role-based filtering:
+      - CITIZEN: Only sees incidents they personally reported.
+      - DISPATCHER / SUPER_ADMIN / CREW / HOSPITAL: Regional emergency list.
     """
-    return db.query(Incident).order_by(Incident.triage_score.desc(), Incident.created_at.desc()).all()
+    query = db.query(Incident)
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user and auth_user.role == ROLE_CITIZEN:
+        query = query.filter(Incident.reporter_user_id == auth_user.id)
+
+    return query.order_by(Incident.triage_score.desc(), Incident.created_at.desc()).all()
 
 @router.get("/{incident_id}", response_model=IncidentOut)
-def get_incident(incident_id: int, db: Session = Depends(get_db)):
+def get_incident(
+    incident_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
     incident = db.query(Incident).filter(Incident.id == incident_id).first()
     if not incident:
         raise HTTPException(status_code=404, detail="Emergency incident not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user and auth_user.role == ROLE_CITIZEN:
+        if incident.reporter_user_id != auth_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Citizens can only inspect their own reported emergency incidents",
+            )
+
     return incident
 
 @router.patch("/{incident_id}/status", response_model=IncidentOut)
-def update_incident_status(incident_id: int, payload: IncidentStatusUpdate, db: Session = Depends(get_db)):
+def update_incident_status(
+    incident_id: int,
+    payload: IncidentStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
     incident = db.query(Incident).filter(Incident.id == incident_id).first()
     if not incident:
         raise HTTPException(status_code=404, detail="Emergency incident not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user and auth_user.role == ROLE_CITIZEN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Citizens cannot modify incident lifecycle status directly",
+        )
 
     valid_statuses = [
         "REPORTED", "TRIAGED", "ALLOCATED", "DISPATCHED",
@@ -116,12 +211,101 @@ def update_incident_status(incident_id: int, payload: IncidentStatusUpdate, db: 
         raise HTTPException(status_code=400, detail=f"Invalid status '{payload.status}'. Valid: {valid_statuses}")
 
     incident.status = new_status
+
+    # If the incident is closed (RESOLVED or CANCELLED), release all associated active fleet resources
+    if new_status in ["RESOLVED", "CANCELLED"]:
+        active_dispatches = db.query(Dispatch).filter(
+            Dispatch.incident_id == incident.id,
+            Dispatch.status.notin_(["COMPLETED", "CANCELLED"]),
+        ).all()
+
+        for disp in active_dispatches:
+            disp.status = "COMPLETED" if new_status == "RESOLVED" else "CANCELLED"
+            if disp.coordination_status == "PENDING_CONFIRMATIONS":
+                disp.coordination_status = "EXPIRED" if new_status == "CANCELLED" else "CONFIRMED"
+
+            if disp.ambulance_id:
+                amb = db.query(Ambulance).filter(Ambulance.id == disp.ambulance_id).first()
+                if amb:
+                    amb.status = "AVAILABLE"
+                    amb.reservation_dispatch_id = None
+
+            if disp.destination_hospital_id:
+                hosp = db.query(Hospital).filter(Hospital.id == disp.destination_hospital_id).first()
+                if hosp and (hosp.reserved_emergency_beds or 0) > 0:
+                    hosp.reserved_emergency_beds = max(0, hosp.reserved_emergency_beds - 1)
+
+            broadcast_sync(
+                "DISPATCH_CONFIRMATION_UPDATED",
+                {
+                    "dispatch_id": disp.id,
+                    "incident_id": disp.incident_id,
+                    "ambulance_id": disp.ambulance_id,
+                    "destination_hospital_id": disp.destination_hospital_id,
+                    "status": disp.status,
+                    "coordination_status": disp.coordination_status,
+                },
+                ambulance_id=disp.ambulance_id,
+                hospital_id=disp.destination_hospital_id,
+                reporter_user_id=incident.reporter_user_id,
+                entity_type="dispatch",
+                entity_id=disp.id,
+            )
+
+    log_incident_event(
+        db=db,
+        incident_id=incident.id,
+        event_type="INCIDENT_STATUS_CHANGED",
+        event_title=f"Incident Status: {incident.status}",
+        event_description=f"Incident status changed to '{incident.status}'. Resources coordinated accordingly.",
+        actor_type="DISPATCHER" if auth_user and auth_user.role in [ROLE_DISPATCHER, ROLE_SUPER_ADMIN] else "SYSTEM",
+        actor_reference=auth_user.full_name if auth_user else "Operations Desk",
+        metadata={"status": incident.status},
+        commit=False,
+    )
+
     db.commit()
     db.refresh(incident)
 
-    broadcast_sync("INCIDENT_STATUS_UPDATED", {
-        "incident_id": incident.id,
-        "status": incident.status,
-    })
+    broadcast_sync(
+        "INCIDENT_STATUS_UPDATED",
+        {
+            "incident_id": incident.id,
+            "status": incident.status,
+            "reporter_user_id": incident.reporter_user_id,
+        },
+        reporter_user_id=incident.reporter_user_id,
+        target_roles=[ROLE_DISPATCHER, ROLE_SUPER_ADMIN],
+        entity_type="incident",
+        entity_id=incident.id,
+    )
 
     return incident
+
+@router.get("/{incident_id}/timeline", response_model=List[IncidentEventOut])
+def get_incident_timeline(
+    incident_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    FEATURE 5 — UNIFIED EMERGENCY COORDINATION TIMELINE:
+    Returns the complete persistent chronological history for the incident.
+    """
+    incident = db.query(Incident).filter(Incident.id == incident_id).first()
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user and auth_user.role == ROLE_CITIZEN:
+        if incident.reporter_user_id != auth_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Citizens can only inspect timelines for their own reported incidents",
+            )
+
+    events = db.query(IncidentEvent).filter(
+        IncidentEvent.incident_id == incident_id
+    ).order_by(IncidentEvent.created_at.asc()).all()
+
+    return events

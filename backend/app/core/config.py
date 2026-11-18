@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     DEFAULT_LONGITUDE: float = 74.8560
     DEFAULT_CITY: str = "Mangaluru, Karnataka"
 
+    # Authentication & Session Security (JWT)
+    JWT_SECRET_KEY: str = "lifelink-emergency-command-jwt-secret-key-mangaluru-2026-secure-token"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    DEMO_ACCOUNTS_ENABLED: bool = True
+
     @property
     def cors_origin_list(self) -> List[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]

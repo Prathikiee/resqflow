@@ -67,5 +67,20 @@ class IncidentOut(BaseModel):
     triage_justifications: List[str]
     required_ambulance_type: str
     status: str
+    witness_count: int = 0
     created_at: datetime
     updated_at: datetime
+
+class IncidentEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    incident_id: int
+    dispatch_id: Optional[int] = None
+    event_type: str
+    event_title: str
+    event_description: str
+    actor_type: str
+    actor_reference: Optional[str] = None
+    event_metadata: Optional[dict] = None
+    created_at: datetime
