@@ -161,6 +161,32 @@ export default function CommandCenterMap({
   center = [12.891, 74.856], // Centered over Mangaluru
   zoom = 13,
 }: MapProps) {
+  // Tile provider configuration:
+  // 1. If custom tile URL specified, use it.
+  // 2. If Carto API key is provided, use CartoDB Voyager with authorized key.
+  // 3. Otherwise default to OpenStreetMap standard tiles (reliable, zero watermark, no key required).
+  const cartoApiKey = process.env.NEXT_PUBLIC_CARTO_API_KEY;
+  const customTileUrl = process.env.NEXT_PUBLIC_MAP_TILE_URL;
+  const customAttribution = process.env.NEXT_PUBLIC_MAP_ATTRIBUTION;
+
+  let tileUrl: string;
+  let tileAttribution: string;
+
+  if (customTileUrl) {
+    tileUrl = customTileUrl;
+    tileAttribution =
+      customAttribution ||
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+  } else if (cartoApiKey) {
+    tileUrl = `https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?api_key=${cartoApiKey}`;
+    tileAttribution =
+      '&copy; <a href="https://carto.com/">CARTO</a> | &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
+  } else {
+    tileUrl = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+    tileAttribution =
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+  }
+
   return (
     <div className="w-full h-full min-h-[480px] relative rounded-xl overflow-hidden border border-slate-200 bg-slate-100 shadow-sm">
       <MapContainer
@@ -171,10 +197,10 @@ export default function CommandCenterMap({
       >
         <MapController center={center} zoom={zoom} />
 
-        {/* Light-styled High-Res CartoDB Voyager Tile Layer */}
+        {/* Dynamic Tile Layer (Configured with API key or OpenStreetMap fallback) */}
         <TileLayer
-          attribution='&copy; <a href="https://carto.com/">CARTO</a> | &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+          attribution={tileAttribution}
+          url={tileUrl}
           maxZoom={19}
         />
 

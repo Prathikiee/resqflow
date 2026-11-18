@@ -100,14 +100,12 @@ export default function LoginPage() {
       const token = data.access_token;
       const user = data.user;
 
-      // Persist auth token and user profile
       if (typeof window !== "undefined") {
         localStorage.setItem("lifelink_token", token);
         localStorage.setItem("lifelink_user", JSON.stringify(user));
         document.cookie = `lifelink_token=${token}; path=/; max-age=3600; SameSite=Lax`;
       }
 
-      // Route to role-specific dashboard
       if (user.role === "CITIZEN") {
         router.push("/citizen");
       } else if (user.role === "AMBULANCE_CREW") {
@@ -142,7 +140,7 @@ export default function LoginPage() {
       </div>
 
       {/* Main Login Card */}
-      <div className="w-full max-w-xl bg-white border border-slate-200 rounded-2xl shadow-md p-6 sm:p-8 space-y-6">
+      <div className="w-full max-w-xl bg-white border border-slate-200 rounded-2xl shadow-sm p-6 sm:p-8 space-y-6">
         {/* Quick Demo Selector */}
         <div>
           <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider font-mono mb-2.5">
@@ -157,7 +155,7 @@ export default function LoginPage() {
                 className={`text-left p-3 rounded-xl border transition-all text-xs flex flex-col justify-between cursor-pointer ${
                   email === acc.email
                     ? "bg-blue-50/70 border-blue-400 shadow-2xs ring-1 ring-blue-400"
-                    : "bg-slate-50 border-slate-200 hover:border-slate-300 hover:bg-slate-100"
+                    : "bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50"
                 }`}
               >
                 <div className="flex items-center justify-between w-full mb-1">
@@ -192,7 +190,7 @@ export default function LoginPage() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="user@lifelink.demo"
-              className="w-full px-3.5 py-2.5 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 transition"
+              className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 transition"
             />
           </div>
 
@@ -206,14 +204,14 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••••••"
-              className="w-full px-3.5 py-2.5 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 transition"
+              className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 transition"
             />
           </div>
 
           <button
             type="submit"
             disabled={isLoading}
-            className={`w-full py-3 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-2 shadow-md cursor-pointer ${
+            className={`w-full py-3 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer ${
               isLoading
                 ? "bg-slate-300 text-slate-500 cursor-not-allowed"
                 : "bg-red-600 hover:bg-red-700 text-white shadow-red-600/20 active:scale-[0.99]"

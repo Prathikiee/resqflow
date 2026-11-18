@@ -21,7 +21,7 @@ export default function RootLayout({
           crossOrigin=""
         />
       </head>
-      <body className="bg-slate-50 text-slate-900 min-h-screen antialiased">
+      <body className="bg-white text-slate-900 min-h-screen antialiased">
         {children}
       </body>
     </html>

@@ -6,26 +6,35 @@ import {
   Activity,
   AlertTriangle,
   Ambulance,
-  CheckCircle2,
-  Clock,
-  MapPin,
-  Phone,
-  Radio,
-  Shield,
-  RefreshCw,
-  LogOut,
-  ChevronRight,
-  User,
-  Eye,
-  FileText,
+  ArrowRight,
   Building2,
-  Navigation,
   Check,
-  X,
-  ShieldAlert,
+  CheckCircle2,
+  ChevronRight,
+  Clock,
   Compass,
   ExternalLink,
+  Eye,
+  FileText,
+  Fuel,
+  History,
+  LayoutDashboard,
+  LogOut,
+  MapPin,
+  Navigation,
+  Phone,
+  Radio,
+  RefreshCw,
+  Shield,
+  ShieldAlert,
+  Sliders,
+  User,
+  Wrench,
+  X,
 } from "lucide-react";
+import Sidebar, { NavItem } from "@/components/layout/Sidebar";
+import TopNav from "@/components/layout/TopNav";
+import { formatDistance, formatDuration } from "@/lib/utils";
 
 interface DispatchRecord {
   id: number;
@@ -63,11 +72,11 @@ interface DispatchRecord {
   handover_packet?: any;
 }
 
-const NEXT_LIFECYCLE_ACTION: Record<string, { nextStatus: string; label: string; icon: string }> = {
-  ASSIGNED: { nextStatus: "EN_ROUTE_INCIDENT", label: "Confirm En Route to Incident Scene", icon: "Navigation" },
-  EN_ROUTE_INCIDENT: { nextStatus: "ON_SCENE", label: "Confirm Arrived on Scene with Patient", icon: "MapPin" },
-  ON_SCENE: { nextStatus: "EN_ROUTE_HOSPITAL", label: "Patient Onboard • Departing Scene towards Hospital ER", icon: "Building2" },
-  EN_ROUTE_HOSPITAL: { nextStatus: "COMPLETED", label: "Confirm Arrived at ER & Safe Handover", icon: "CheckCircle2" },
+const NEXT_LIFECYCLE_ACTION: Record<string, { nextStatus: string; label: string; icon: React.ElementType }> = {
+  ASSIGNED: { nextStatus: "EN_ROUTE_INCIDENT", label: "Confirm En Route to Incident Scene", icon: Navigation },
+  EN_ROUTE_INCIDENT: { nextStatus: "ON_SCENE", label: "Confirm Arrived on Scene with Patient", icon: MapPin },
+  ON_SCENE: { nextStatus: "EN_ROUTE_HOSPITAL", label: "Patient Onboard • Departing Scene towards Hospital ER", icon: Building2 },
+  EN_ROUTE_HOSPITAL: { nextStatus: "COMPLETED", label: "Confirm Arrived at ER & Safe Handover", icon: CheckCircle2 },
 };
 
 export default function AmbulancePortalPage() {
@@ -75,6 +84,8 @@ export default function AmbulancePortalPage() {
   const [user, setUser] = useState<any>(null);
   const [ambulance, setAmbulance] = useState<any>(null);
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([]);
+  const [currentNav, setCurrentNav] = useState<string>("overview");
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
@@ -95,7 +106,6 @@ export default function AmbulancePortalPage() {
     }
 
     try {
-      // 1. Verify user session & assigned unit
       const meResp = await fetch(`${backendUrl}/api/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -103,7 +113,6 @@ export default function AmbulancePortalPage() {
       const userData = await meResp.json();
       setUser(userData);
 
-      // 2. Fetch assigned ambulance telemetry & status
       if (userData.ambulance_id) {
         const ambResp = await fetch(`${backendUrl}/api/ambulances/${userData.ambulance_id}`, {
           headers: { Authorization: `Bearer ${token}` },
@@ -113,13 +122,11 @@ export default function AmbulancePortalPage() {
         }
       }
 
-      // 3. Fetch unit's assigned dispatches
       const dispResp = await fetch(`${backendUrl}/api/dispatch`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (dispResp.ok) {
         const allDispatches: DispatchRecord[] = await dispResp.json();
-        // Filter strictly to this unit's assignments
         const myDispatches = allDispatches.filter((d) => d.ambulance_id === userData.ambulance_id);
         setDispatches(myDispatches);
       }
@@ -130,7 +137,7 @@ export default function AmbulancePortalPage() {
     }
   }, [backendUrl, router]);
 
-  // Connect WebSocket with JWT & targeted event subscription
+  // WebSocket Subscription
   useEffect(() => {
     fetchAmbulanceData();
 
@@ -301,113 +308,86 @@ export default function AmbulancePortalPage() {
     router.push("/login");
   };
 
+  const completedMissions = dispatches.filter((d) => d.status === "COMPLETED");
+
+  const sidebarNavItems: NavItem[] = [
+    { id: "overview", label: "Current Mission", icon: LayoutDashboard },
+    { id: "history", label: "Mission History", icon: History, count: completedMissions.length },
+    { id: "fleet", label: "Vehicle Status", icon: Ambulance },
+    { id: "profile", label: "Crew Profile", icon: User },
+  ];
+
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="flex items-center gap-3 bg-white px-5 py-3 rounded-xl border border-slate-200 shadow-sm">
-          <Ambulance className="w-5 h-5 text-blue-600 animate-pulse" />
-          <span className="text-xs font-semibold text-slate-700">Connecting to In-Vehicle Terminal...</span>
+      <div className="min-h-screen bg-white flex items-center justify-center p-4">
+        <div className="flex flex-col items-center gap-3">
+          <RefreshCw className="w-8 h-8 animate-spin text-blue-600" />
+          <span className="text-xs font-bold text-slate-700">Connecting to Ambulance Telemetry...</span>
         </div>
       </div>
     );
   }
 
-  const nextAction = activeMission ? NEXT_LIFECYCLE_ACTION[activeMission.status] : null;
+  // Navigation URLs
+  const patientLat = activeMission?.incident_latitude ?? activeMission?.incident?.latitude ?? 12.8700;
+  const patientLng = activeMission?.incident_longitude ?? activeMission?.incident?.longitude ?? 74.8400;
+  const hospLat = activeMission?.destination_hospital_latitude ?? 12.8710;
+  const hospLng = activeMission?.destination_hospital_longitude ?? 74.8450;
+
+  const gmapsSceneUrl = `https://www.google.com/maps/dir/?api=1&destination=${patientLat},${patientLng}&travelmode=driving`;
+  const osmSceneUrl = `https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=${ambulance?.current_latitude || 12.9815},${ambulance?.current_longitude || 74.7950};${patientLat},${patientLng}`;
+
+  const gmapsHospUrl = `https://www.google.com/maps/dir/?api=1&destination=${hospLat},${hospLng}&travelmode=driving`;
+
+  const nextActionConfig = activeMission ? NEXT_LIFECYCLE_ACTION[activeMission.status] : null;
+  const NextActionIcon = nextActionConfig ? nextActionConfig.icon : CheckCircle2;
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans selection:bg-blue-100 selection:text-blue-900">
-      {/* Top Application Bar */}
-      <header className="border-b border-slate-200 bg-white/95 backdrop-blur px-5 py-3 flex flex-wrap items-center justify-between gap-4 sticky top-0 z-40 shadow-2xs">
-        <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-md shadow-blue-600/20">
-            <Ambulance className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-base font-black tracking-tight text-slate-900">LIFELINK</h1>
-              <span className="text-xs font-semibold text-slate-400">/ Paramedic Terminal</span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 font-bold uppercase">
-                {ambulance?.call_sign || "ALS Unit"} • {ambulance?.vehicle_type || "ALS"}
-              </span>
-            </div>
-            <p className="text-xs text-slate-500">
-              Paramedic Crew: <strong className="text-slate-800">{user?.full_name}</strong> | Base Station: {ambulance?.base_station || "Mangaluru Central"}
-            </p>
-          </div>
-        </div>
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex font-sans">
+      {/* 1. LEFT SIDEBAR */}
+      <Sidebar
+        role="AMBULANCE"
+        roleLabel="Ambulance Paramedic"
+        user={user}
+        currentNav={currentNav}
+        onNavChange={setCurrentNav}
+        navItems={sidebarNavItems}
+        isOpenMobile={isMobileMenuOpen}
+        onCloseMobile={() => setIsMobileMenuOpen(false)}
+        onLogout={handleLogout}
+        entityName={ambulance?.call_sign ? `Unit ${ambulance.call_sign}` : "ALS Paramedic Crew"}
+      />
 
-        {/* Readiness Switcher, WebSocket Badge & Quick Portals */}
-        <div className="flex items-center gap-3">
-          {/* Unit Status Selector */}
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs font-semibold">
-            {(["AVAILABLE", "MAINTENANCE", "OFF_DUTY"] as const).map((st) => (
+      {/* 2. MAIN APPLICATION CONTENT AREA */}
+      <div className="flex-1 md:pl-64 flex flex-col min-w-0">
+        {/* Top Minimal Navigation */}
+        <TopNav
+          title={ambulance?.call_sign ? `Unit ${ambulance.call_sign}` : "Ambulance Console"}
+          subtitle={`${ambulance?.base_station || "Mangaluru Sector"} • ${ambulance?.vehicle_type || "ALS"}`}
+          wsConnected={wsConnected}
+          onMenuToggle={() => setIsMobileMenuOpen(true)}
+          actions={
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-semibold text-slate-500 hidden sm:inline">Duty:</span>
               <button
-                key={st}
-                onClick={() => handleToggleUnitStatus(st)}
-                className={`px-2.5 py-1 rounded-md text-[11px] font-mono transition ${
-                  ambulance?.status === st
-                    ? st === "AVAILABLE"
-                      ? "bg-emerald-600 text-white shadow-2xs"
-                      : "bg-slate-700 text-white shadow-2xs"
-                    : "text-slate-600 hover:text-slate-900 hover:bg-white"
+                type="button"
+                onClick={() => handleToggleUnitStatus(ambulance?.status === "AVAILABLE" ? "MAINTENANCE" : "AVAILABLE")}
+                className={`px-2.5 py-1 rounded-md text-xs font-bold border transition ${
+                  ambulance?.status === "AVAILABLE"
+                    ? "bg-emerald-50 text-emerald-700 border-emerald-300"
+                    : "bg-amber-50 text-amber-700 border-amber-300"
                 }`}
               >
-                {st}
+                {ambulance?.status || "AVAILABLE"}
               </button>
-            ))}
-          </div>
+            </div>
+          }
+        />
 
-          <div
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-mono font-medium ${
-              wsConnected
-                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                : "bg-amber-50 text-amber-700 border-amber-200"
-            }`}
-          >
-            <span className={`w-2 h-2 rounded-full ${wsConnected ? "bg-emerald-500 animate-ping" : "bg-amber-500"}`} />
-            <span>{wsConnected ? "Radio Feed Online" : "Reconnecting..."}</span>
-          </div>
-
-          <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs font-semibold">
-            <button
-              onClick={() => router.push("/dispatcher")}
-              className="px-2.5 py-1 rounded-md text-slate-600 hover:text-slate-900 hover:bg-white transition"
-              title="Regional Dispatcher Command HQ"
-            >
-              Dispatcher HQ
-            </button>
-            <button
-              onClick={() => router.push("/hospital")}
-              className="px-2.5 py-1 rounded-md text-slate-600 hover:text-slate-900 hover:bg-white transition"
-              title="Hospital ER Intake Console"
-            >
-              Hospital ER
-            </button>
-            <button
-              onClick={() => router.push("/citizen")}
-              className="px-2.5 py-1 rounded-md text-slate-600 hover:text-slate-900 hover:bg-white transition"
-              title="Citizen SOS Portal"
-            >
-              Citizen SOS
-            </button>
-          </div>
-
-          <button
-            onClick={handleLogout}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-bold transition cursor-pointer"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Sign Out</span>
-          </button>
-        </div>
-      </header>
-
-      {/* Main Mission Workspace */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 space-y-6">
         {/* Feedback message banner */}
         {feedbackMsg && (
           <div
-            className={`p-3.5 rounded-xl border text-xs font-medium flex items-center justify-between ${
+            className={`px-4 py-2 text-xs font-semibold flex items-center justify-between border-b ${
               feedbackMsg.type === "success"
                 ? "bg-emerald-50 border-emerald-200 text-emerald-800"
                 : feedbackMsg.type === "error"
@@ -420,345 +400,350 @@ export default function AmbulancePortalPage() {
           </div>
         )}
 
-        {/* ============================================================== */}
-        {/* 1. INCOMING PROVISIONAL RESERVATION BANNER WITH 90s COUNTDOWN  */}
-        {/* ============================================================== */}
-        {pendingDispatch && (
-          <div className="bg-amber-500/10 border-2 border-amber-500 rounded-2xl p-6 shadow-md space-y-4 animate-pulse-slow">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-xl bg-amber-500 text-white flex items-center justify-center shadow-md">
-                  <AlertTriangle className="w-6 h-6 animate-bounce" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-900">
-                      DISPATCH #{pendingDispatch.id} • ATTEMPT #{pendingDispatch.attempt_number}
-                    </span>
-                    <span className="text-xs font-bold text-amber-800 uppercase tracking-wide">
-                      Provisional Reservation Pending
-                    </span>
+        {/* MAIN BODY WORKSPACE */}
+        <main className="flex-1 p-4 sm:p-6 overflow-x-hidden space-y-6">
+          {/* ============================================================== */}
+          {/* VIEW: OVERVIEW / CURRENT MISSION                               */}
+          {/* ============================================================== */}
+          {currentNav === "overview" && (
+            <div className="space-y-6">
+              {/* CASE 1: PROVISIONAL MISSION REQUEST REQUIRING CONFIRMATION */}
+              {pendingDispatch && (
+                <div className="bg-amber-50/60 border-2 border-amber-400 rounded-xl p-5 shadow-sm space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-amber-500 text-white flex items-center justify-center shadow-xs">
+                        <AlertTriangle className="w-5 h-5 animate-pulse" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-200 text-amber-900">
+                            DISPATCH #{pendingDispatch.id} • ATTEMPT #{pendingDispatch.attempt_number}
+                          </span>
+                          <span className="text-xs font-bold text-amber-900 uppercase">
+                            Provisional Assignment Offered
+                          </span>
+                        </div>
+                        <h2 className="text-base font-bold text-slate-900 mt-0.5">
+                          Emergency Response Request for Unit {ambulance?.call_sign}
+                        </h2>
+                      </div>
+                    </div>
+
+                    {/* 90-Second Countdown */}
+                    {remainingSeconds !== null && (
+                      <div className="text-right">
+                        <span className="text-[10px] font-mono text-slate-500 block uppercase">Dual Confirmation TTL</span>
+                        <span className="text-xl font-black font-mono text-amber-900">
+                          {remainingSeconds}s remaining
+                        </span>
+                      </div>
+                    )}
                   </div>
-                  <h2 className="text-lg font-black text-slate-900 mt-1">
-                    Emergency Mission Assigned to Unit {ambulance?.call_sign}
-                  </h2>
+
+                  {/* Incident Details Card */}
+                  <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-900">Chief Medical Complaint:</span>
+                      <span className="font-mono text-slate-500">Incident #{pendingDispatch.incident_id}</span>
+                    </div>
+                    <p className="text-sm font-semibold text-slate-900 bg-slate-50 p-2.5 rounded border border-slate-200">
+                      {pendingDispatch.incident?.chief_complaint || "Acute medical crisis requiring immediate ALS response"}
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 text-slate-600">
+                      <div className="flex items-center gap-1.5">
+                        <MapPin className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                        <span className="truncate">Scene: <strong>{pendingDispatch.incident?.location_address}</strong></span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <Building2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span className="truncate">Assigned ER: <strong>{pendingDispatch.destination_hospital_name}</strong></span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Accept / Decline Action Buttons */}
+                  <div className="flex items-center justify-end gap-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => handleConfirmMission(pendingDispatch.id, "REJECTED")}
+                      disabled={actionLoading}
+                      className="px-4 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs transition"
+                    >
+                      Decline Mission
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleConfirmMission(pendingDispatch.id, "ACCEPTED")}
+                      disabled={actionLoading}
+                      className="px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs transition flex items-center gap-1.5"
+                    >
+                      <Check className="w-4 h-4" />
+                      <span>Accept Mission</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
-              {/* Countdown Pill */}
-              <div className="text-right">
-                <span className="text-[11px] font-mono text-slate-500 block">Dual Confirmation TTL Window</span>
-                <div className="flex items-center gap-1.5 text-2xl font-black font-mono text-amber-900">
-                  <Clock className="w-6 h-6 text-amber-600 animate-spin" />
-                  <span>{remainingSeconds !== null ? `${remainingSeconds}s` : "90s"}</span>
+              {/* CASE 2: ACTIVE MISSION IN PROGRESS */}
+              {activeMission ? (
+                <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-blue-600 text-white flex items-center justify-center">
+                        <Radio className="w-5 h-5 animate-pulse" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            DUAL CONFIRMED
+                          </span>
+                          <span className="text-xs font-bold text-slate-900">Dispatch #{activeMission.id}</span>
+                        </div>
+                        <h2 className="text-base font-bold text-slate-900 mt-0.5">
+                          Active Operational Mission in Progress
+                        </h2>
+                      </div>
+                    </div>
+
+                    {/* External Navigation Links */}
+                    <div className="flex items-center gap-2">
+                      <a
+                        href={gmapsSceneUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-blue-600 text-xs font-bold flex items-center gap-1 transition"
+                      >
+                        <Compass className="w-3.5 h-3.5" />
+                        <span>Google Maps</span>
+                        <ExternalLink className="w-3 h-3 text-slate-400" />
+                      </a>
+                      <a
+                        href={osmSceneUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center gap-1 transition"
+                      >
+                        <Navigation className="w-3.5 h-3.5 text-slate-500" />
+                        <span>OpenStreetMap</span>
+                      </a>
+                    </div>
+                  </div>
+
+                  {/* Patient & Incident Info */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                    <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1.5">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                        Patient / Pickup Waypoint
+                      </span>
+                      <p className="text-sm font-bold text-slate-900">
+                        {activeMission.incident?.caller_name || "Emergency Caller"} ({activeMission.incident?.caller_phone})
+                      </p>
+                      <p className="text-slate-600 flex items-center gap-1">
+                        <MapPin className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                        <span>{activeMission.incident_address || activeMission.incident?.location_address}</span>
+                      </p>
+                      <p className="text-slate-800 bg-white p-2 rounded border border-slate-200 mt-2">
+                        {activeMission.incident?.chief_complaint}
+                      </p>
+                    </div>
+
+                    <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1.5">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                        Destination Hospital ER
+                      </span>
+                      <p className="text-sm font-bold text-slate-900">{activeMission.destination_hospital_name}</p>
+                      <p className="text-slate-600 flex items-center gap-1">
+                        <Building2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span>Trauma Emergency Ward Intake Reserved</span>
+                      </p>
+                      <a
+                        href={gmapsHospUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:text-blue-800 mt-2"
+                      >
+                        <Navigation className="w-3 h-3" />
+                        <span>Navigate to Hospital ER</span>
+                      </a>
+                    </div>
+                  </div>
+
+                  {/* 4-STAGE LIFECYCLE STEPPER & CONTROL BUTTON */}
+                  <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-3">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-900">
+                      <span>Operational Mission Lifecycle</span>
+                      <span className="font-mono text-blue-700">Stage: {activeMission.status}</span>
+                    </div>
+
+                    {/* Progress Track */}
+                    <div className="grid grid-cols-4 gap-2 text-center text-xs">
+                      {[
+                        { id: "ASSIGNED", label: "1. Assigned" },
+                        { id: "EN_ROUTE_INCIDENT", label: "2. En Route Scene" },
+                        { id: "ON_SCENE", label: "3. On Scene" },
+                        { id: "EN_ROUTE_HOSPITAL", label: "4. En Route ER" },
+                      ].map((step, idx) => {
+                        const isCurrent = activeMission.status === step.id;
+                        return (
+                          <div
+                            key={step.id}
+                            className={`p-2 rounded-lg border text-xs font-semibold ${
+                              isCurrent
+                                ? "bg-blue-600 text-white border-blue-600 shadow-xs"
+                                : "bg-white text-slate-600 border-slate-200"
+                            }`}
+                          >
+                            {step.label}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Prominent Next Action Button */}
+                    {nextActionConfig && (
+                      <div className="pt-2">
+                        <button
+                          type="button"
+                          onClick={() => handleStepLifecycle(activeMission.id)}
+                          disabled={actionLoading}
+                          className="w-full py-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.99]"
+                        >
+                          <NextActionIcon className="w-5 h-5" />
+                          <span>{nextActionConfig.label}</span>
+                          <ArrowRight className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            </div>
+              ) : null}
 
-            {/* Mission Details Preview */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 p-4 rounded-xl bg-white border border-amber-200 text-xs font-mono">
-              <div>
-                <span className="text-slate-400 block text-[10px]">Patient Scene:</span>
-                <strong className="text-slate-900 text-xs truncate block">
-                  {pendingDispatch.incident?.location_address || pendingDispatch.incident_address || "Mangaluru Scene"}
-                </strong>
-              </div>
-              <div>
-                <span className="text-slate-400 block text-[10px]">Destination ER:</span>
-                <strong className="text-slate-900 text-xs truncate block">{pendingDispatch.destination_hospital_name}</strong>
-              </div>
-              <div>
-                <span className="text-slate-400 block text-[10px]">Hospital Bed Status:</span>
-                <strong className="text-slate-800">{pendingDispatch.hospital_confirmation_status}</strong>
-              </div>
-              <div>
-                <span className="text-slate-400 block text-[10px]">Estimated Transit:</span>
-                <strong className="text-slate-800">
-                  {pendingDispatch.estimated_eta_seconds
-                    ? `~${Math.ceil(pendingDispatch.estimated_eta_seconds / 60)} mins`
-                    : "Routing..."}
-                </strong>
-              </div>
-            </div>
+              {/* CASE 3: NO ACTIVE MISSION — STANDBY / READINESS STATE */}
+              {!pendingDispatch && !activeMission && (
+                <div className="bg-white border border-slate-200 rounded-xl p-8 shadow-2xs text-center space-y-4 max-w-xl mx-auto">
+                  <div className="w-14 h-14 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 mx-auto">
+                    <Ambulance className="w-7 h-7" />
+                  </div>
+                  <div className="space-y-1">
+                    <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 uppercase">
+                      Duty Status: {ambulance?.status || "AVAILABLE"}
+                    </span>
+                    <h2 className="text-lg font-bold text-slate-900 mt-2">
+                      Ambulance {ambulance?.call_sign} on Standby
+                    </h2>
+                    <p className="text-xs text-slate-500 max-w-md mx-auto">
+                      Connected to Mangaluru Emergency Coordination Network. The console will alert immediately when a high-priority incident is assigned to this unit.
+                    </p>
+                  </div>
 
-            {/* Accept / Decline CTAs */}
-            <div className="flex items-center justify-end gap-3 pt-2">
-              <button
-                onClick={() => handleConfirmMission(pendingDispatch.id, "REJECTED")}
-                disabled={actionLoading}
-                className="px-5 py-2.5 rounded-xl bg-white hover:bg-red-50 text-red-700 border border-red-300 font-bold text-xs transition cursor-pointer"
-              >
-                Decline / Divert Mission
-              </button>
-              <button
-                onClick={() => handleConfirmMission(pendingDispatch.id, "ACCEPTED")}
-                disabled={actionLoading}
-                className="px-7 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-md shadow-emerald-600/30 transition cursor-pointer flex items-center gap-2"
-              >
-                <Check className="w-4 h-4" />
-                <span>Accept Mission Assignment ({remainingSeconds || 90}s)</span>
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ============================================================== */}
-        {/* 2. ACTIVE MISSION CONTROL CONSOLE                             */}
-        {/* ============================================================== */}
-        {activeMission ? (
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-6">
-            <div className="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-100">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-xs font-bold px-2 py-0.5 rounded-md bg-blue-100 text-blue-800">
-                    Active Mission #DSP-{activeMission.id}
-                  </span>
-                  <span className="font-mono text-xs font-bold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700">
-                    Incident #{activeMission.incident_id}
-                  </span>
-                  <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                    Dual Confirmed
-                  </span>
+                  <div className="grid grid-cols-2 gap-3 max-w-xs mx-auto text-left pt-2 text-xs">
+                    <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
+                      <span className="text-[10px] text-slate-500 font-medium">Base Station</span>
+                      <p className="font-bold text-slate-900 truncate">{ambulance?.base_station || "Surathkal Sector"}</p>
+                    </div>
+                    <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
+                      <span className="text-[10px] text-slate-500 font-medium">Fuel Level</span>
+                      <p className="font-bold text-slate-900">{ambulance?.fuel_level_percent || 90}%</p>
+                    </div>
+                  </div>
                 </div>
-                <h3 className="text-xl font-black text-slate-900 mt-2">
-                  Current Operational Stage: <span className="text-blue-700">{activeMission.status.replace(/_/g, " ")}</span>
-                </h3>
-                <p className="text-xs text-slate-500 mt-1 flex items-center gap-2">
-                  <Building2 className="w-4 h-4 text-emerald-600" />
-                  <span>Receiving Trauma Facility: <strong>{activeMission.destination_hospital_name}</strong></span>
-                </p>
-              </div>
-
-              {/* Primary Next-Stage Stepper Button */}
-              {nextAction && (
-                <button
-                  onClick={() => handleStepLifecycle(activeMission.id)}
-                  disabled={actionLoading}
-                  className="px-6 py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-md shadow-blue-600/20 transition cursor-pointer flex items-center gap-2"
-                >
-                  <Navigation className="w-4 h-4" />
-                  <span>{actionLoading ? "Updating..." : nextAction.label} &rarr;</span>
-                </button>
               )}
             </div>
+          )}
 
-            {/* Turn-by-Turn GPS Tactical Navigation Panel */}
-            <div className="p-4 rounded-xl bg-slate-900 text-white space-y-3 shadow-md">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Compass className="w-4 h-4 text-emerald-400" />
-                  <h4 className="text-xs font-mono font-bold tracking-wider uppercase text-slate-200">
-                    Tactical Turn-by-Turn GPS Navigation
-                  </h4>
-                </div>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold">
-                  LIVE GIS ROUTING
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                {/* 1. Patient Scene Destination */}
-                <div className={`p-3.5 rounded-lg border flex flex-col justify-between space-y-2 ${
-                  activeMission.status === "ASSIGNED" || activeMission.status === "EN_ROUTE_INCIDENT"
-                    ? "bg-slate-800 border-emerald-500 ring-2 ring-emerald-500/20"
-                    : "bg-slate-800/60 border-slate-700"
-                }`}>
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] font-mono font-bold text-emerald-400 uppercase">
-                        Waypoint 1: Patient Scene
-                      </span>
-                      {(activeMission.status === "ASSIGNED" || activeMission.status === "EN_ROUTE_INCIDENT") && (
-                        <span className="text-[9px] font-mono bg-emerald-500 text-slate-950 px-1.5 py-0.5 rounded font-black">
-                          ACTIVE LEG
-                        </span>
-                      )}
-                    </div>
-                    <strong className="block text-slate-100 mt-1 text-sm font-semibold">
-                      {activeMission.incident?.location_address || activeMission.incident_address || "Patient Scene Location"}
-                    </strong>
-                    <span className="text-[10px] font-mono text-slate-400 block mt-0.5">
-                      Coordinates: {activeMission.incident?.latitude || activeMission.incident_latitude || 12.8770}° N, {activeMission.incident?.longitude || activeMission.incident_longitude || 74.8580}° E
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2 pt-1">
-                    <a
-                      href={`https://www.google.com/maps/dir/?api=1&destination=${activeMission.incident?.latitude || activeMission.incident_latitude || 12.8770},${activeMission.incident?.longitude || activeMission.incident_longitude || 74.8580}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex-1 py-2 px-3 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-center text-[11px] transition flex items-center justify-center gap-1.5 shadow-xs"
-                    >
-                      <Navigation className="w-3.5 h-3.5" />
-                      <span>Navigate via Google Maps</span>
-                      <ExternalLink className="w-3 h-3 ml-0.5 opacity-80" />
-                    </a>
-                    <a
-                      href={`https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=;${activeMission.incident?.latitude || activeMission.incident_latitude || 12.8770},${activeMission.incident?.longitude || activeMission.incident_longitude || 74.8580}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="py-2 px-2.5 rounded-md bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px] font-mono transition"
-                      title="Open in OpenStreetMap"
-                    >
-                      OSM
-                    </a>
-                  </div>
-                </div>
-
-                {/* 2. Destination Hospital ER */}
-                <div className={`p-3.5 rounded-lg border flex flex-col justify-between space-y-2 ${
-                  activeMission.status === "ON_SCENE" || activeMission.status === "EN_ROUTE_HOSPITAL"
-                    ? "bg-slate-800 border-blue-500 ring-2 ring-blue-500/20"
-                    : "bg-slate-800/60 border-slate-700"
-                }`}>
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] font-mono font-bold text-blue-400 uppercase">
-                        Waypoint 2: Destination Hospital ER
-                      </span>
-                      {(activeMission.status === "ON_SCENE" || activeMission.status === "EN_ROUTE_HOSPITAL") && (
-                        <span className="text-[9px] font-mono bg-blue-500 text-white px-1.5 py-0.5 rounded font-black">
-                          ACTIVE LEG
-                        </span>
-                      )}
-                    </div>
-                    <strong className="block text-slate-100 mt-1 text-sm font-semibold">
-                      {activeMission.destination_hospital_name || "Assigned Hospital Facility"}
-                    </strong>
-                    <span className="text-[10px] font-mono text-slate-400 block mt-0.5">
-                      Coordinates: {activeMission.destination_hospital_latitude || 12.8718}° N, {activeMission.destination_hospital_longitude || 74.8458}° E
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2 pt-1">
-                    <a
-                      href={`https://www.google.com/maps/dir/?api=1&destination=${activeMission.destination_hospital_latitude || 12.8718},${activeMission.destination_hospital_longitude || 74.8458}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex-1 py-2 px-3 rounded-md bg-blue-600 hover:bg-blue-500 text-white font-bold text-center text-[11px] transition flex items-center justify-center gap-1.5 shadow-xs"
-                    >
-                      <Building2 className="w-3.5 h-3.5" />
-                      <span>Navigate to ER Dept</span>
-                      <ExternalLink className="w-3 h-3 ml-0.5 opacity-80" />
-                    </a>
-                    <a
-                      href={`https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=;${activeMission.destination_hospital_latitude || 12.8718},${activeMission.destination_hospital_longitude || 74.8458}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="py-2 px-2.5 rounded-md bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px] font-mono transition"
-                      title="Open in OpenStreetMap"
-                    >
-                      OSM
-                    </a>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* SBAR Pre-Arrival Handover Packet Preview */}
-            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <FileText className="w-4 h-4 text-blue-600" />
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 font-mono">
-                    Pre-Arrival Digital Handover Packet
-                  </h4>
-                </div>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 font-bold">
-                  SBAR PROTOCOL
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div className="p-3 bg-white rounded-lg border border-slate-200">
-                  <span className="text-slate-400 block text-[10px] font-mono">Chief Complaint:</span>
-                  <strong className="text-slate-900 text-xs">
-                    {activeMission.incident?.chief_complaint || "Emergency Patient Intake"}
-                  </strong>
-                </div>
-                <div className="p-3 bg-white rounded-lg border border-slate-200">
-                  <span className="text-slate-400 block text-[10px] font-mono">Hospital Intake Acknowledgment:</span>
-                  <strong className="text-emerald-700 text-xs">
-                    {activeMission.handover_packet?.status === "ACKNOWLEDGED"
-                      ? `Acknowledged (${activeMission.handover_packet?.acknowledged_by || "ER Desk"})`
-                      : "Pending ER Triage Acknowledgment"}
-                  </strong>
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : (
-          !pendingDispatch && (
-            <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center space-y-3">
-              <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto" />
-              <h3 className="font-bold text-slate-800 text-sm">Unit {ambulance?.call_sign} on Standby</h3>
-              <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                No active dispatches assigned to this vehicle. Radio telemetry is connected to Regional HQ. You will be alerted immediately upon provisional mission reservation.
-              </p>
-            </div>
-          )
-        )}
-
-        {/* ============================================================== */}
-        {/* 3. UNIT RECENT DISPATCH HISTORY                                */}
-        {/* ============================================================== */}
-        <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900">Unit Mission Log ({ambulance?.call_sign})</h3>
-              <p className="text-xs text-slate-500">Record of dispatches and emergency transports for this vehicle</p>
-            </div>
-            <button
-              onClick={fetchAmbulanceData}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Refresh</span>
-            </button>
-          </div>
-
-          {dispatches.length === 0 ? (
-            <p className="text-center py-6 text-xs text-slate-400 font-mono">No previous missions recorded for this unit.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs text-left">
-                <thead className="bg-slate-50 text-slate-500 font-mono uppercase text-[10px] border-b border-slate-200">
-                  <tr>
-                    <th className="py-2.5 px-3">Dispatch ID</th>
-                    <th className="py-2.5 px-3">Incident</th>
-                    <th className="py-2.5 px-3">Destination Hospital</th>
-                    <th className="py-2.5 px-3">Coordination</th>
-                    <th className="py-2.5 px-3">Stage</th>
-                    <th className="py-2.5 px-3">Attempt</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {dispatches.map((disp) => (
-                    <tr key={disp.id} className="hover:bg-slate-50/80 transition">
-                      <td className="py-3 px-3 font-mono font-bold text-slate-700">#DSP-{disp.id}</td>
-                      <td className="py-3 px-3 font-mono font-bold text-blue-700">#{disp.incident_id}</td>
-                      <td className="py-3 px-3 font-semibold text-slate-800">{disp.destination_hospital_name}</td>
-                      <td className="py-3 px-3">
-                        <span
-                          className={`font-mono text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                            disp.coordination_status === "CONFIRMED"
-                              ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                              : "bg-amber-50 text-amber-700 border border-amber-200"
-                          }`}
-                        >
-                          {disp.coordination_status}
-                        </span>
-                      </td>
-                      <td className="py-3 px-3 font-mono font-bold text-slate-800">{disp.status}</td>
-                      <td className="py-3 px-3 font-mono text-slate-600">#{disp.attempt_number}</td>
+          {/* ============================================================== */}
+          {/* VIEW: MISSION HISTORY                                          */}
+          {/* ============================================================== */}
+          {currentNav === "history" && (
+            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4">
+              <h2 className="text-base font-bold text-slate-900">Unit Mission History</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-y border-slate-200 text-slate-600 uppercase font-mono text-[10px]">
+                    <tr>
+                      <th className="py-2.5 px-3">Dispatch #</th>
+                      <th className="py-2.5 px-3">Incident #</th>
+                      <th className="py-2.5 px-3">Hospital Destination</th>
+                      <th className="py-2.5 px-3">Confirmation Status</th>
+                      <th className="py-2.5 px-3">Mission Status</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {dispatches.map((disp) => (
+                      <tr key={disp.id} className="hover:bg-slate-50 transition">
+                        <td className="py-3 px-3 font-mono font-bold text-slate-900">#{disp.id}</td>
+                        <td className="py-3 px-3 font-mono text-slate-600">#{disp.incident_id}</td>
+                        <td className="py-3 px-3 font-semibold text-slate-800">{disp.destination_hospital_name}</td>
+                        <td className="py-3 px-3">
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            {disp.coordination_status}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span className="font-mono text-slate-700">{disp.status}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
-        </div>
-      </main>
+
+          {/* ============================================================== */}
+          {/* VIEW: FLEET / VEHICLE STATUS                                   */}
+          {/* ============================================================== */}
+          {currentNav === "fleet" && (
+            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4 max-w-2xl">
+              <h2 className="text-base font-bold text-slate-900">Vehicle Specifications & Telemetry</h2>
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase font-medium">Call Sign</span>
+                  <p className="text-sm font-bold text-slate-900">{ambulance?.call_sign}</p>
+                </div>
+                <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase font-medium">Vehicle Tier</span>
+                  <p className="text-sm font-bold text-blue-700">{ambulance?.vehicle_type || "ALS"}</p>
+                </div>
+                <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase font-medium">GPS Coordinates</span>
+                  <p className="text-xs font-mono font-bold text-slate-800">
+                    {ambulance?.current_latitude?.toFixed(4)}°N, {ambulance?.current_longitude?.toFixed(4)}°E
+                  </p>
+                </div>
+                <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase font-medium">Paramedic Level</span>
+                  <p className="text-sm font-bold text-slate-900">{ambulance?.paramedic_level || "ADVANCED"}</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ============================================================== */}
+          {/* VIEW: PROFILE                                                  */}
+          {/* ============================================================== */}
+          {currentNav === "profile" && (
+            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4 max-w-md">
+              <h2 className="text-base font-bold text-slate-900">Crew Account Profile</h2>
+              <div className="space-y-2 text-xs">
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
+                  <span className="text-[10px] text-slate-500 block">Name</span>
+                  <p className="font-bold text-slate-900">{user?.full_name}</p>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
+                  <span className="text-[10px] text-slate-500 block">Email</span>
+                  <p className="font-mono text-slate-800">{user?.email}</p>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
+                  <span className="text-[10px] text-slate-500 block">Assigned Unit ID</span>
+                  <p className="font-mono font-bold text-blue-700">Ambulance #{user?.ambulance_id}</p>
+                </div>
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
     </div>
   );
 }

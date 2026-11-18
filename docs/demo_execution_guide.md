@@ -26,6 +26,21 @@ npm --prefix frontend run dev
 ```
 - Frontend Gateway: `http://localhost:3000`
 
+### 1.4 Map Tile Provider & Zero-Watermark Configuration
+The Dispatcher interactive Leaflet map automatically defaults to standard **OpenStreetMap** tiles (`https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png`).
+- **Zero Watermark:** Street-level maps of Mangaluru render cleanly without any "API KEY REQUIRED" watermark.
+- **Zero Configuration Needed:** No API keys are required for local demonstration.
+- **CartoDB Voyager Integration (Optional):** If you wish to use Carto tiles, add your free key to `frontend/.env.local`:
+  ```bash
+  NEXT_PUBLIC_CARTO_API_KEY=your_carto_api_key_here
+  ```
+- **Custom Tile Provider (Optional):**
+  ```bash
+  NEXT_PUBLIC_MAP_TILE_URL=https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
+  NEXT_PUBLIC_MAP_ATTRIBUTION=&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors
+  ```
+
+
 ---
 
 ## 2. Seed Data & Demo Accounts Credentials

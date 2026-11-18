@@ -8,41 +8,44 @@ import {
   Ambulance,
   ArrowRight,
   Building2,
+  Check,
   CheckCircle2,
+  ChevronRight,
   Clock,
   Compass,
+  ExternalLink,
   FilePlus2,
+  FileText,
   Filter,
+  History,
   Layers,
+  LayoutDashboard,
+  Link2,
+  LogOut,
   MapPin,
+  Navigation,
   Phone,
   Radio,
+  RefreshCw,
   RotateCcw,
+  Search,
   Server,
+  Shield,
   ShieldAlert,
   Sliders,
   Sparkles,
-  User,
-  Zap,
-  Users,
-  Link2,
   Split,
-  ChevronRight,
-  Shield,
-  History,
-  LayoutDashboard,
-  Search,
-  Check,
+  User,
+  Users,
   X,
-  LogOut,
-  RefreshCw,
-  ExternalLink,
-  Navigation,
+  Zap,
 } from "lucide-react";
 import DynamicCommandCenterMap from "@/components/MapWrapper";
 import IncidentRegistrationModal from "@/components/IncidentRegistrationModal";
 import AllocationModal from "@/components/AllocationModal";
 import UnifiedTimelinePanel from "@/components/UnifiedTimelinePanel";
+import Sidebar, { NavItem } from "@/components/layout/Sidebar";
+import TopNav from "@/components/layout/TopNav";
 import { formatDistance, formatDuration } from "@/lib/utils";
 
 type InspectorTab = "overview" | "dispatch" | "escalation" | "witness" | "timeline";
@@ -50,6 +53,8 @@ type InspectorTab = "overview" | "dispatch" | "escalation" | "witness" | "timeli
 export default function DispatcherCommandCenterPage() {
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
+  const [currentNav, setCurrentNav] = useState<string>("overview");
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
 
   // Core Operational State
@@ -128,7 +133,6 @@ export default function DispatcherCommandCenterPage() {
     const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
 
     try {
-      // 1. Verify user profile & role
       if (!user) {
         const meRes = await fetch(`${backendUrl}/api/auth/me`, { headers });
         if (meRes.ok) {
@@ -150,7 +154,6 @@ export default function DispatcherCommandCenterPage() {
         }
       }
 
-      // 2. Fetch active operational collections
       const [incRes, ambRes, hospRes, dispRes, witRes] = await Promise.all([
         fetch(`${backendUrl}/api/incidents`, { headers }),
         fetch(`${backendUrl}/api/ambulances`, { headers }),
@@ -186,7 +189,7 @@ export default function DispatcherCommandCenterPage() {
     }
   }, [backendUrl, router, user, selectedIncident]);
 
-  // Initial mount & WebSocket subscription
+  // WebSocket Subscription
   useEffect(() => {
     fetchData();
     const interval = setInterval(fetchData, 6000);
@@ -242,7 +245,7 @@ export default function DispatcherCommandCenterPage() {
     };
   }, [backendUrl, fetchData]);
 
-  // Fetch allocation recommendations when selected incident changes
+  // Fetch allocation recommendations
   useEffect(() => {
     if (!selectedIncident?.id) {
       setRecommendations(null);
@@ -269,12 +272,11 @@ export default function DispatcherCommandCenterPage() {
       });
   }, [selectedIncident, backendUrl]);
 
-  // Match active dispatch for selected incident
   const currentDispatch = selectedIncident
     ? dispatches.find((d) => d.incident_id === selectedIncident.id && d.status !== "CANCELLED")
     : null;
 
-  // Manage reservation countdown timer
+  // Reservation countdown
   useEffect(() => {
     if (
       !currentDispatch ||
@@ -296,7 +298,7 @@ export default function DispatcherCommandCenterPage() {
     return () => clearInterval(timer);
   }, [currentDispatch, calculateRemainingSeconds]);
 
-  // Advance lifecycle stage handler
+  // Handlers
   const handleStepLifecycle = async (dispatchId: number) => {
     if (isSteppingLifecycleRef.current) return;
     isSteppingLifecycleRef.current = true;
@@ -323,7 +325,6 @@ export default function DispatcherCommandCenterPage() {
     }
   };
 
-  // Reassignment trigger handler
   const handleTriggerReassignment = async (dispatchId: number) => {
     const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
     const headers: Record<string, string> = {
@@ -347,7 +348,6 @@ export default function DispatcherCommandCenterPage() {
     }
   };
 
-  // Auto-allocate handler
   const handleAutoAllocate = async () => {
     if (!selectedIncident?.id) return;
     const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
@@ -370,7 +370,6 @@ export default function DispatcherCommandCenterPage() {
     }
   };
 
-  // Witness link/reject actions
   const handleLinkWitness = async (witnessReportId: number) => {
     if (!selectedIncident?.id) return;
     const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
@@ -389,6 +388,26 @@ export default function DispatcherCommandCenterPage() {
         await fetchData();
       }
     } catch (_) {}
+  };
+
+  const handleSeedReset = async () => {
+    if (!confirm("Reset database to clean Mangaluru demonstration state?")) return;
+    try {
+      const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+      const res = await fetch(`${backendUrl}/api/seed`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (res.ok) {
+        alert("Database successfully reset and seeded!");
+        await fetchData();
+      }
+    } catch (e) {
+      alert("Reset error: " + e);
+    }
   };
 
   const handleLogout = () => {
@@ -414,615 +433,661 @@ export default function DispatcherCommandCenterPage() {
     return true;
   });
 
-  // Resource aggregates
+  const activeIncidentsCount = incidents.filter((i) => i.status !== "RESOLVED" && i.status !== "CLOSED").length;
   const availableAmbulances = ambulances.filter((a) => a.status === "AVAILABLE");
-  const availableBeds = hospitals.reduce((sum, h) => sum + (h.available_emergency_beds || 0), 0);
-  const reservedBeds = hospitals.reduce((sum, h) => sum + (h.reserved_emergency_beds || 0), 0);
-  const pendingWitnessCount = witnessReports.filter((w) => !w.is_duplicate_verified && !w.linked_incident_id).length;
+
+  // Sidebar navigation items
+  const sidebarNavItems: NavItem[] = [
+    { id: "overview", label: "Overview", icon: LayoutDashboard },
+    { id: "queue", label: "Emergency Queue", icon: Radio, count: activeIncidentsCount },
+    { id: "map", label: "Live Tactical Map", icon: MapPin },
+    { id: "ambulances", label: "Ambulances", icon: Ambulance, count: availableAmbulances.length },
+    { id: "hospitals", label: "Hospitals", icon: Building2, count: hospitals.length },
+    { id: "history", label: "Incident History", icon: History },
+  ];
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="flex items-center gap-3 bg-white px-5 py-3 rounded-xl border border-slate-200 shadow-sm">
-          <Activity className="w-5 h-5 text-red-600 animate-pulse" />
-          <span className="text-xs font-semibold text-slate-700">Connecting to Regional Command HQ...</span>
+      <div className="min-h-screen bg-white flex items-center justify-center p-4">
+        <div className="flex flex-col items-center gap-3">
+          <RefreshCw className="w-8 h-8 animate-spin text-red-600" />
+          <span className="text-xs font-bold text-slate-700">Connecting to Regional Command HQ...</span>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col font-sans selection:bg-red-100 selection:text-red-900">
-      {/* ============================================================== */}
-      {/* 1. TOP OPERATIONAL COMMAND HEADER                              */}
-      {/* ============================================================== */}
-      <header className="border-b border-slate-200 bg-white/95 backdrop-blur px-5 py-2.5 flex flex-wrap items-center justify-between gap-3 sticky top-0 z-40 shadow-2xs">
-        <div className="flex items-center space-x-3">
-          <div className="w-9 h-9 rounded-xl bg-red-600 flex items-center justify-center text-white shadow-md shadow-red-600/20">
-            <Radio className="w-5 h-5 animate-pulse" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-base font-black tracking-tight text-slate-900">LIFELINK</h1>
-              <span className="text-xs font-semibold text-slate-400">/ Regional Command HQ</span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200 font-bold uppercase">
-                Dispatcher Console
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-500 font-mono">
-              Officer: <strong className="text-slate-800">{user?.full_name || "Regional Dispatcher"}</strong> • Corridor: Mangaluru Metro
-            </p>
-          </div>
-        </div>
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex font-sans">
+      {/* 1. LEFT SIDEBAR */}
+      <Sidebar
+        role="DISPATCHER"
+        roleLabel="Regional Dispatcher"
+        user={user}
+        currentNav={currentNav}
+        onNavChange={setCurrentNav}
+        navItems={sidebarNavItems}
+        isOpenMobile={isMobileMenuOpen}
+        onCloseMobile={() => setIsMobileMenuOpen(false)}
+        onLogout={handleLogout}
+        entityName="Mangaluru Command HQ"
+      />
 
-        {/* Live Resource Counters & System Actions */}
-        <div className="flex items-center gap-2.5">
-          {/* Active ALS Available Pill */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-blue-50 border border-blue-200 text-xs font-mono">
-            <Ambulance className="w-3.5 h-3.5 text-blue-600" />
-            <span className="text-slate-500 text-[11px]">ALS Ready:</span>
-            <strong className="text-blue-900 font-bold">{availableAmbulances.length}</strong>
-          </div>
-
-          {/* Emergency Beds Pill */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs font-mono">
-            <Building2 className="w-3.5 h-3.5 text-emerald-600" />
-            <span className="text-slate-500 text-[11px]">Vacant ER Bays:</span>
-            <strong className="text-emerald-900 font-bold">{availableBeds}</strong>
-            <span className="text-slate-400 text-[10px]">({reservedBeds} res)</span>
-          </div>
-
-          {/* Pending Witness Alert */}
-          {pendingWitnessCount > 0 && (
-            <button
-              onClick={() => setInspectorTab("witness")}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-mono font-bold animate-pulse cursor-pointer shadow-2xs"
-              title="Unreviewed witness reports detected"
-            >
-              <Users className="w-3.5 h-3.5 text-amber-600" />
-              <span>{pendingWitnessCount} Witness Alert{pendingWitnessCount > 1 ? "s" : ""}</span>
-            </button>
-          )}
-
-          {/* WebSocket Feed Pill */}
-          <div
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-mono font-medium ${
-              wsConnected ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-amber-50 text-amber-700 border-amber-200"
-            }`}
-          >
-            <span className={`w-2 h-2 rounded-full ${wsConnected ? "bg-emerald-500 animate-ping" : "bg-amber-500"}`} />
-            <span className="text-[11px]">{wsConnected ? "GIS Feed Online" : "Reconnecting..."}</span>
-          </div>
-
-          {/* New Emergency Manual Intake Button */}
-          <button
-            onClick={() => setIsRegistrationOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-md shadow-red-600/20 transition cursor-pointer"
-          >
-            <FilePlus2 className="w-3.5 h-3.5" />
-            <span>+ Manual SOS</span>
-          </button>
-
-          {/* Role Navigation Switcher */}
-          <div className="hidden xl:flex items-center gap-1 bg-slate-100 p-1 rounded-lg border border-slate-200 text-xs font-semibold">
-            <button
-              onClick={() => router.push("/ambulance")}
-              className="px-2 py-0.5 rounded-md text-slate-600 hover:text-slate-900 hover:bg-white transition"
-            >
-              Ambulance
-            </button>
-            <button
-              onClick={() => router.push("/hospital")}
-              className="px-2 py-0.5 rounded-md text-slate-600 hover:text-slate-900 hover:bg-white transition"
-            >
-              Hospital
-            </button>
-            <button
-              onClick={() => router.push("/citizen")}
-              className="px-2 py-0.5 rounded-md text-slate-600 hover:text-slate-900 hover:bg-white transition"
-            >
-              Citizen
-            </button>
-          </div>
-
-          <button
-            onClick={handleLogout}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-bold transition cursor-pointer"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Sign Out</span>
-          </button>
-        </div>
-      </header>
-
-      {/* Real-Time Notification Ticker */}
-      {notifications.length > 0 && (
-        <div className="bg-slate-900 text-slate-200 px-5 py-1.5 text-xs font-mono flex items-center justify-between border-b border-slate-800">
-          <div className="flex items-center gap-2 truncate">
-            <Activity className="w-3.5 h-3.5 text-emerald-400 animate-pulse shrink-0" />
-            <span className="text-slate-400 font-bold uppercase text-[10px]">Real-time Telemetry:</span>
-            <span className="truncate text-slate-100">{notifications[0]}</span>
-          </div>
-          <button onClick={() => setNotifications([])} className="text-slate-400 hover:text-white ml-2 text-[10px]">
-            Dismiss
-          </button>
-        </div>
-      )}
-
-      {/* ============================================================== */}
-      {/* 2. MAIN 3-COLUMN DISPATCHER COMMAND WORKSPACE                  */}
-      {/* ============================================================== */}
-      <div className="flex-1 p-3 grid grid-cols-1 lg:grid-cols-12 gap-3 overflow-hidden">
-        {/* LEFT COLUMN: ACTIVE EMERGENCY QUEUE (3 Cols) */}
-        <section className="lg:col-span-3 flex flex-col rounded-xl border border-slate-200 bg-white overflow-hidden shadow-2xs">
-          {/* Queue Header & Filters */}
-          <div className="p-3 border-b border-slate-200 bg-slate-50 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
-                <Radio className="w-4 h-4 text-red-600" />
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800 font-mono">
-                  Emergency Queue ({filteredIncidents.length})
-                </h3>
-              </div>
-              <button
-                onClick={fetchData}
-                className="text-slate-400 hover:text-slate-700 transition"
-                title="Refresh emergency data"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-              </button>
-            </div>
-
-            {/* Filter Pills */}
-            <div className="flex items-center gap-1 text-[11px] font-mono">
-              {(["ALL", "P1", "ACTIVE", "UNASSIGNED"] as const).map((filterKey) => (
-                <button
-                  key={filterKey}
-                  onClick={() => setStatusFilter(filterKey)}
-                  className={`px-2 py-0.5 rounded transition ${
-                    statusFilter === filterKey
-                      ? "bg-slate-900 text-white font-bold"
-                      : "bg-slate-200/70 text-slate-600 hover:bg-slate-200"
-                  }`}
-                >
-                  {filterKey}
-                </button>
-              ))}
-            </div>
-
-            {/* Search Input */}
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
-              <input
-                type="text"
-                placeholder="Search complaint, address..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-white border border-slate-200 rounded-lg pl-8 pr-2.5 py-1 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:border-blue-500"
-              />
-            </div>
-          </div>
-
-          {/* Scrollable Incident List */}
-          <div className="flex-1 overflow-y-auto p-2 space-y-2 max-h-[calc(100vh-180px)]">
-            {filteredIncidents.length === 0 ? (
-              <div className="text-center py-8 text-xs text-slate-400 font-mono">
-                No emergencies match criteria.
-              </div>
-            ) : (
-              filteredIncidents.map((inc) => {
-                const isSelected = selectedIncident?.id === inc.id;
-                const incDispatch = dispatches.find((d) => d.incident_id === inc.id && d.status !== "CANCELLED");
-
-                return (
-                  <div
-                    key={inc.id}
-                    onClick={() => setSelectedIncident(inc)}
-                    className={`p-3 rounded-xl border transition cursor-pointer space-y-1.5 ${
-                      isSelected
-                        ? "bg-red-50/60 border-red-500 shadow-sm ring-1 ring-red-500"
-                        : "bg-white border-slate-200 hover:border-slate-300 shadow-2xs"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-mono text-xs font-bold text-slate-900">#{inc.id}</span>
-                        <span
-                          className={`text-[9px] font-black uppercase px-1.5 py-0.2 rounded font-mono ${
-                            inc.triage_color === "RED"
-                              ? "bg-red-100 text-red-800"
-                              : inc.triage_color === "YELLOW"
-                              ? "bg-amber-100 text-amber-800"
-                              : "bg-emerald-100 text-emerald-800"
-                          }`}
-                        >
-                          {inc.triage_level}
-                        </span>
-                      </div>
-                      <span className="text-[10px] font-mono font-bold text-blue-700 bg-blue-50 px-1.5 py-0.2 rounded">
-                        {inc.status}
-                      </span>
-                    </div>
-
-                    <p className="text-xs font-semibold text-slate-800 line-clamp-2 leading-snug">
-                      {inc.chief_complaint}
-                    </p>
-
-                    <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono pt-1 border-t border-slate-100">
-                      <span className="truncate max-w-[160px]">{inc.location_address}</span>
-                      {incDispatch && (
-                        <span className="text-blue-600 font-bold">
-                          {incDispatch.ambulance_call_sign || "Dispatched"}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </section>
-
-        {/* CENTER COLUMN: INTERACTIVE GIS MAP (5 Cols) */}
-        <section className="lg:col-span-5 flex flex-col rounded-xl overflow-hidden border border-slate-200 bg-white shadow-2xs min-h-[450px]">
-          <DynamicCommandCenterMap
-            incidents={incidents}
-            ambulances={ambulances}
-            hospitals={hospitals}
-            activeRouteGeometry={activeRouteGeometry}
-            selectedIncident={selectedIncident}
-            onSelectIncident={(inc) => setSelectedIncident(inc)}
-            center={
-              selectedIncident
-                ? [selectedIncident.latitude, selectedIncident.longitude]
-                : [12.891, 74.856]
-            }
-            zoom={selectedIncident ? 14 : 13}
-          />
-        </section>
-
-        {/* RIGHT COLUMN: SELECTED INCIDENT DETAILS & DUAL CONFIRMATION CONTROLS (4 Cols) */}
-        <section className="lg:col-span-4 flex flex-col rounded-xl border border-slate-200 bg-white overflow-hidden shadow-2xs max-h-[calc(100vh-120px)]">
-          {selectedIncident ? (
+      {/* 2. MAIN APPLICATION CONTENT AREA */}
+      <div className="flex-1 md:pl-64 flex flex-col min-w-0">
+        {/* Top Minimal Navigation */}
+        <TopNav
+          title="Emergency Dispatch Console"
+          subtitle="Real-time multi-agency coordination • Mangaluru District"
+          wsConnected={wsConnected}
+          onMenuToggle={() => setIsMobileMenuOpen(true)}
+          actions={
             <>
-              {/* Incident Header Banner */}
-              <div className="p-3.5 border-b border-slate-200 bg-slate-50 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-bold text-slate-800 uppercase font-mono">
-                      Incident #{selectedIncident.id}
-                    </span>
-                    <span
-                      className={`text-[9px] font-black px-2 py-0.5 rounded font-mono ${
-                        selectedIncident.triage_color === "RED"
-                          ? "bg-red-100 text-red-800"
-                          : selectedIncident.triage_color === "YELLOW"
-                          ? "bg-amber-100 text-amber-800"
-                          : "bg-emerald-100 text-emerald-800"
-                      }`}
-                    >
-                      {selectedIncident.triage_level}
-                    </span>
+              <button
+                onClick={() => setIsRegistrationOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition shadow-2xs"
+              >
+                <FilePlus2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">New Incident</span>
+              </button>
+              <button
+                onClick={handleSeedReset}
+                className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-900 hover:bg-slate-50 transition"
+                title="Reset Database to Demonstration State"
+              >
+                <RotateCcw className="w-4 h-4" />
+              </button>
+            </>
+          }
+        />
+
+        {/* Notifications Bar */}
+        {notifications.length > 0 && (
+          <div className="bg-blue-50 border-b border-blue-100 px-4 py-2 flex items-center justify-between text-xs text-blue-900">
+            <div className="flex items-center gap-2 truncate">
+              <Sparkles className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+              <span className="font-semibold">{notifications[0]}</span>
+            </div>
+            <button
+              onClick={() => setNotifications([])}
+              className="text-blue-600 hover:text-blue-800 text-[11px] font-bold shrink-0 ml-2"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+
+        {/* PAGE CONTENT SWITCHER */}
+        <main className="flex-1 p-4 sm:p-6 overflow-x-hidden">
+          {/* ============================================================== */}
+          {/* VIEW: OVERVIEW (Default Two-Column Workspace)                   */}
+          {/* ============================================================== */}
+          {currentNav === "overview" && (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+              {/* LEFT COLUMN: ACTIVE EMERGENCY QUEUE & SELECTED INSPECTOR (5 cols) */}
+              <div className="lg:col-span-5 space-y-4 flex flex-col">
+                {/* Search & Filter Bar */}
+                <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-2xs space-y-2.5">
+                  <div className="relative">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Search by ID, complaint, or location..."
+                      className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-200 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
                   </div>
-                  <span className="text-xs font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded">
-                    {selectedIncident.status}
-                  </span>
+                  <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+                    {[
+                      { id: "ALL", label: "All" },
+                      { id: "P1", label: "Critical P1" },
+                      { id: "ACTIVE", label: "Active Only" },
+                      { id: "UNASSIGNED", label: "Unassigned" },
+                    ].map((tab) => (
+                      <button
+                        key={tab.id}
+                        onClick={() => setStatusFilter(tab.id)}
+                        className={`px-2.5 py-1 rounded-md text-xs font-semibold whitespace-nowrap transition ${
+                          statusFilter === tab.id
+                            ? "bg-slate-900 text-white"
+                            : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
-                <h4 className="text-xs font-bold text-slate-900 leading-snug">
-                  {selectedIncident.chief_complaint}
-                </h4>
+                {/* Compact Incident Queue List */}
+                <div className="bg-white border border-slate-200 rounded-xl shadow-2xs divide-y divide-slate-100 max-h-[380px] overflow-y-auto">
+                  {filteredIncidents.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-slate-400">
+                      No active emergency incidents match filter.
+                    </div>
+                  ) : (
+                    filteredIncidents.map((inc) => {
+                      const isSelected = selectedIncident?.id === inc.id;
+                      const isCritical = inc.triage_color === "RED";
+                      return (
+                        <div
+                          key={inc.id}
+                          onClick={() => setSelectedIncident(inc)}
+                          className={`p-3.5 transition cursor-pointer flex items-start justify-between gap-3 ${
+                            isSelected
+                              ? "bg-blue-50/70 border-l-4 border-l-blue-600"
+                              : "hover:bg-slate-50"
+                          }`}
+                        >
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                                  isCritical
+                                    ? "bg-red-50 text-red-700 border border-red-200"
+                                    : "bg-amber-50 text-amber-700 border border-amber-200"
+                                }`}
+                              >
+                                {inc.triage_level || "P1"}
+                              </span>
+                              <span className="text-xs font-bold text-slate-900">Incident #{inc.id}</span>
+                              <span className="text-[10px] text-slate-400 font-mono">
+                                {new Date(inc.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                              </span>
+                            </div>
+                            <p className="text-xs text-slate-800 font-medium truncate">{inc.chief_complaint}</p>
+                            <p className="text-[11px] text-slate-500 truncate flex items-center gap-1">
+                              <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
+                              <span>{inc.location_address}</span>
+                            </p>
+                          </div>
 
-                <div className="flex items-center gap-1.5 text-[11px] text-slate-500 font-mono">
-                  <MapPin className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                  <span className="truncate">{selectedIncident.location_address}</span>
+                          <div className="text-right shrink-0">
+                            <span
+                              className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${
+                                inc.status === "TRIAGED"
+                                  ? "bg-red-50 text-red-700"
+                                  : inc.status === "ALLOCATED"
+                                  ? "bg-amber-50 text-amber-700"
+                                  : "bg-emerald-50 text-emerald-700"
+                              }`}
+                            >
+                              {inc.status}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
-              </div>
 
-              {/* Inspector Tab Switcher */}
-              <div className="flex items-center border-b border-slate-200 bg-white px-2 overflow-x-auto text-xs font-semibold text-slate-600">
-                {(["overview", "dispatch", "escalation", "witness", "timeline"] as const).map((tab) => (
-                  <button
-                    key={tab}
-                    onClick={() => setInspectorTab(tab)}
-                    className={`px-3 py-2 border-b-2 transition capitalize whitespace-nowrap cursor-pointer ${
-                      inspectorTab === tab
-                        ? "border-red-600 text-red-600 font-bold"
-                        : "border-transparent hover:text-slate-900"
-                    }`}
-                  >
-                    {tab}
-                  </button>
-                ))}
-              </div>
-
-              {/* Tab Contents Scrollable Body */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
-                {/* 1. OVERVIEW TAB */}
-                {inspectorTab === "overview" && (
-                  <div className="space-y-4">
-                    <div className="grid grid-cols-2 gap-2 text-slate-700">
-                      <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200">
-                        <span className="text-[10px] text-slate-400 block font-mono">Caller Name</span>
-                        <strong className="text-slate-900 font-medium">{selectedIncident.caller_name}</strong>
+                {/* SELECTED INCIDENT DETAIL INSPECTOR PANEL */}
+                {selectedIncident && (
+                  <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs space-y-4">
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                      <div>
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                          Selected Incident Inspector
+                        </span>
+                        <h3 className="text-sm font-bold text-slate-900">
+                          #{selectedIncident.id} • {selectedIncident.caller_name} ({selectedIncident.caller_phone})
+                        </h3>
                       </div>
-                      <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200">
-                        <span className="text-[10px] text-slate-400 block font-mono">Callback Phone</span>
-                        <strong className="text-slate-900 font-mono">{selectedIncident.caller_phone}</strong>
-                      </div>
-                      <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200">
-                        <span className="text-[10px] text-slate-400 block font-mono">Patient Demographics</span>
-                        <strong className="text-slate-900">
-                          {selectedIncident.patient_age ? `${selectedIncident.patient_age}y` : "Age N/A"} •{" "}
-                          {selectedIncident.patient_gender || "Unknown"}
-                        </strong>
-                      </div>
-                      <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200">
-                        <span className="text-[10px] text-slate-400 block font-mono">Required Vehicle</span>
-                        <strong className="text-red-700 font-mono font-bold">
-                          {selectedIncident.required_ambulance_type || "ALS"}
-                        </strong>
+                      <div className="flex items-center gap-1.5">
+                        {/* Auto-Allocate Trigger */}
+                        <button
+                          type="button"
+                          onClick={handleAutoAllocate}
+                          className="px-2.5 py-1 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1 shadow-2xs transition"
+                          title="Automatically reserve best ambulance and hospital"
+                        >
+                          <Zap className="w-3.5 h-3.5" />
+                          <span>⚡ Auto-Allocate</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setIsAllocationOpen(true)}
+                          className="px-2.5 py-1 rounded-md border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1 transition"
+                        >
+                          <Sliders className="w-3.5 h-3.5 text-slate-500" />
+                          <span>Manual</span>
+                        </button>
                       </div>
                     </div>
 
-                    {/* Triage Justifications */}
-                    {selectedIncident.triage_justifications && selectedIncident.triage_justifications.length > 0 && (
-                      <div className="p-3 bg-red-50/50 rounded-xl border border-red-200 space-y-1.5">
-                        <span className="text-[10px] font-mono font-bold text-red-800 uppercase block">
-                          Triage Assessment Rationale
-                        </span>
-                        <ul className="space-y-1 text-slate-700 text-[11px]">
-                          {selectedIncident.triage_justifications.map((j: string, idx: number) => (
-                            <li key={idx} className="flex items-start gap-1.5">
-                              <span className="text-red-600 font-bold">•</span>
-                              <span>{j}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* 2. DISPATCH & DUAL CONFIRMATION TAB */}
-                {inspectorTab === "dispatch" && (
-                  <div className="space-y-4">
+                    {/* Active Dispatch & Dual-Confirmation Status */}
                     {currentDispatch ? (
-                      <div className="space-y-3.5">
-                        {/* Dual Confirmation Status Banner */}
-                        <div
-                          className={`p-3.5 rounded-xl border space-y-2 ${
-                            currentDispatch.coordination_status === "CONFIRMED"
-                              ? "bg-emerald-50 border-emerald-300 text-emerald-950"
-                              : "bg-amber-50 border-amber-300 text-amber-950"
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] font-mono font-bold uppercase tracking-wider">
-                              Dispatch #{currentDispatch.id} (Attempt #{currentDispatch.attempt_number})
-                            </span>
+                      <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-bold text-slate-900">
+                            Dispatch #{currentDispatch.id} (Attempt #{currentDispatch.attempt_number})
+                          </span>
+                          <span
+                            className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${
+                              currentDispatch.coordination_status === "CONFIRMED"
+                                ? "bg-emerald-100 text-emerald-800"
+                                : "bg-amber-100 text-amber-800"
+                            }`}
+                          >
+                            {currentDispatch.coordination_status}
+                          </span>
+                        </div>
+
+                        {/* Dual Acceptance Badges */}
+                        <div className="grid grid-cols-2 gap-2 text-xs pt-1">
+                          <div className="p-2 rounded bg-white border border-slate-200 flex items-center justify-between">
+                            <span className="text-slate-500 text-[11px]">Ambulance:</span>
                             <span
-                              className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
-                                currentDispatch.coordination_status === "CONFIRMED"
-                                  ? "bg-emerald-200 text-emerald-900"
-                                  : "bg-amber-200 text-amber-900"
+                              className={`font-bold ${
+                                currentDispatch.ambulance_confirmation_status === "ACCEPTED"
+                                  ? "text-emerald-700"
+                                  : currentDispatch.ambulance_confirmation_status === "REJECTED"
+                                  ? "text-red-700"
+                                  : "text-amber-700"
                               }`}
                             >
-                              {currentDispatch.coordination_status}
+                              {currentDispatch.ambulance_confirmation_status}
                             </span>
                           </div>
-
-                          {/* Dual Accept / Reject Progress */}
-                          <div className="grid grid-cols-2 gap-2 text-xs pt-1">
-                            <div className="p-2 bg-white rounded-lg border border-slate-200 space-y-1">
-                              <span className="text-[10px] text-slate-400 block font-mono">Ambulance Crew:</span>
-                              <strong className="text-slate-900 block truncate">
-                                {currentDispatch.ambulance_call_sign || "Assigned Unit"}
-                              </strong>
-                              <span
-                                className={`text-[10px] font-mono font-bold ${
-                                  currentDispatch.ambulance_confirmation_status === "ACCEPTED"
-                                    ? "text-emerald-700"
-                                    : currentDispatch.ambulance_confirmation_status === "REJECTED"
-                                    ? "text-red-700"
-                                    : "text-amber-700"
-                                }`}
-                              >
-                                {currentDispatch.ambulance_confirmation_status}
-                              </span>
-                            </div>
-
-                            <div className="p-2 bg-white rounded-lg border border-slate-200 space-y-1">
-                              <span className="text-[10px] text-slate-400 block font-mono">Hospital ER:</span>
-                              <strong className="text-slate-900 block truncate">
-                                {currentDispatch.destination_hospital_name}
-                              </strong>
-                              <span
-                                className={`text-[10px] font-mono font-bold ${
-                                  currentDispatch.hospital_confirmation_status === "ACCEPTED"
-                                    ? "text-emerald-700"
-                                    : currentDispatch.hospital_confirmation_status === "REJECTED"
-                                    ? "text-red-700"
-                                    : "text-amber-700"
-                                }`}
-                              >
-                                {currentDispatch.hospital_confirmation_status}
-                              </span>
-                            </div>
-                          </div>
-
-                          {/* 90s Reservation TTL Countdown */}
-                          {reservationRemainingSeconds !== null && (
-                            <div className="flex items-center justify-between pt-1 text-xs font-mono">
-                              <span className="text-slate-600">Dual Confirmation TTL Window:</span>
-                              <strong className="text-amber-900 font-bold">
-                                {reservationRemainingSeconds}s remaining
-                              </strong>
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Lifecycle Stepper for Dispatcher Oversight */}
-                        <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] font-mono font-bold text-slate-700 uppercase">
-                              Mission Operational Stage:
-                            </span>
-                            <span className="font-mono text-xs font-bold text-blue-700">
-                              {currentDispatch.status}
-                            </span>
-                          </div>
-
-                          {currentDispatch.status !== "COMPLETED" && (
-                            <button
-                              onClick={() => handleStepLifecycle(currentDispatch.id)}
-                              disabled={isSteppingLifecycle}
-                              className="w-full py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                          <div className="p-2 rounded bg-white border border-slate-200 flex items-center justify-between">
+                            <span className="text-slate-500 text-[11px]">Hospital:</span>
+                            <span
+                              className={`font-bold ${
+                                currentDispatch.hospital_confirmation_status === "ACCEPTED"
+                                  ? "text-emerald-700"
+                                  : currentDispatch.hospital_confirmation_status === "REJECTED"
+                                  ? "text-red-700"
+                                  : "text-amber-700"
+                              }`}
                             >
-                              <Navigation className="w-3.5 h-3.5" />
-                              <span>{isSteppingLifecycle ? "Advancing..." : `Advance Mission Stage &rarr;`}</span>
-                            </button>
-                          )}
+                              {currentDispatch.hospital_confirmation_status}
+                            </span>
+                          </div>
                         </div>
+
+                        {/* 90-Second Reservation Timer */}
+                        {reservationRemainingSeconds !== null && currentDispatch.coordination_status === "PENDING_CONFIRMATIONS" && (
+                          <div className="flex items-center justify-between text-xs font-mono pt-1 text-amber-800">
+                            <span className="flex items-center gap-1">
+                              <Clock className="w-3.5 h-3.5 animate-spin" />
+                              <span>Dual Confirmation TTL:</span>
+                            </span>
+                            <span className="font-bold">{reservationRemainingSeconds}s remaining</span>
+                          </div>
+                        )}
+
+                        {/* Lifecycle Stepping Controls for Testing */}
+                        {currentDispatch.coordination_status === "CONFIRMED" && (
+                          <div className="pt-2 flex items-center justify-between">
+                            <span className="text-xs text-slate-500">
+                              Mission Status: <strong className="text-slate-900">{currentDispatch.status}</strong>
+                            </span>
+                            {currentDispatch.status !== "COMPLETED" && (
+                              <button
+                                type="button"
+                                onClick={() => handleStepLifecycle(currentDispatch.id)}
+                                disabled={isSteppingLifecycle}
+                                className="px-2 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold flex items-center gap-1 transition"
+                              >
+                                <ChevronRight className="w-3.5 h-3.5" />
+                                <span>Advance Lifecycle</span>
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     ) : (
-                      <div className="text-center py-6 space-y-3">
-                        <p className="text-xs text-slate-500">
-                          No active resource allocation. Click below to auto-assign optimal resources or open manual allocation.
-                        </p>
-                        <div className="flex flex-wrap items-center justify-center gap-2">
-                          <button
-                            onClick={handleAutoAllocate}
-                            className="px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-md transition cursor-pointer flex items-center gap-1.5"
-                          >
-                            <Zap className="w-4 h-4" />
-                            <span>⚡ Auto-Allocate Best Resources</span>
-                          </button>
-                          <button
-                            onClick={() => setIsAllocationOpen(true)}
-                            className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-md shadow-red-600/20 transition cursor-pointer flex items-center gap-2"
-                          >
-                            <Sliders className="w-4 h-4" />
-                            <span>Manual Allocation</span>
-                          </button>
-                        </div>
+                      <div className="p-3 rounded-lg bg-amber-50/60 border border-amber-200 text-xs text-amber-900 flex items-center justify-between">
+                        <span>No fleet allocated yet. Tap <strong>⚡ Auto-Allocate</strong> to initiate dual confirmation.</span>
                       </div>
                     )}
-                  </div>
-                )}
 
-                {/* 3. ESCALATION TAB */}
-                {inspectorTab === "escalation" && (
-                  <div className="space-y-3.5">
-                    <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-                      <span className="text-[10px] font-mono font-bold text-slate-700 uppercase block">
-                        Smart Escalation & Failover State
-                      </span>
-                      <p className="text-slate-600 text-[11px] leading-relaxed">
-                        Automatic timeout sweeps occur every 90 seconds. If an assigned paramedic unit or hospital declines or fails to confirm, ResQFlow releases the reservation and promotes the next optimal candidate.
-                      </p>
+                    {/* Inspector Sub-Tabs: Timeline / Witness / Recommendations */}
+                    <div className="space-y-2 pt-1">
+                      <div className="flex items-center gap-1 border-b border-slate-200 pb-1">
+                        <button
+                          type="button"
+                          onClick={() => setInspectorTab("overview")}
+                          className={`px-2.5 py-1 rounded text-xs font-bold transition ${
+                            inspectorTab === "overview"
+                              ? "bg-slate-900 text-white"
+                              : "text-slate-500 hover:text-slate-900"
+                          }`}
+                        >
+                          Recommendation Reasoning
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setInspectorTab("timeline")}
+                          className={`px-2.5 py-1 rounded text-xs font-bold transition ${
+                            inspectorTab === "timeline"
+                              ? "bg-slate-900 text-white"
+                              : "text-slate-500 hover:text-slate-900"
+                          }`}
+                        >
+                          Audit Timeline
+                        </button>
+                      </div>
 
-                      {currentDispatch && (
-                        <div className="pt-2">
-                          <button
-                            onClick={() => handleTriggerReassignment(currentDispatch.id)}
-                            className="w-full py-2 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
-                          >
-                            <RotateCcw className="w-3.5 h-3.5" />
-                            <span>Trigger Immediate Smart Reassignment</span>
-                          </button>
+                      {inspectorTab === "overview" && recommendations && (
+                        <div className="space-y-2 text-xs">
+                          {recommendations.recommended_ambulance && (
+                            <div className="p-2 rounded bg-slate-50 border border-slate-200 flex items-center justify-between">
+                              <span>Recommended Unit:</span>
+                              <strong className="text-blue-700">
+                                {recommendations.recommended_ambulance.call_sign} ({recommendations.recommended_ambulance.vehicle_type})
+                              </strong>
+                            </div>
+                          )}
+                          {recommendations.recommended_hospital && (
+                            <div className="p-2 rounded bg-slate-50 border border-slate-200 flex items-center justify-between">
+                              <span>Recommended Facility:</span>
+                              <strong className="text-emerald-700">
+                                {recommendations.recommended_hospital.name}
+                              </strong>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {inspectorTab === "timeline" && (
+                        <div className="max-h-[220px] overflow-y-auto">
+                          <UnifiedTimelinePanel incidentId={selectedIncident.id} backendUrl={backendUrl} />
                         </div>
                       )}
                     </div>
                   </div>
                 )}
-
-                {/* 4. WITNESS REPORT LINKING TAB */}
-                {inspectorTab === "witness" && (
-                  <div className="space-y-3">
-                    <span className="text-[10px] font-mono font-bold text-slate-700 uppercase block">
-                      Eyewitness Deduplication Feed
-                    </span>
-
-                    {witnessReports.length === 0 ? (
-                      <p className="text-center py-6 text-slate-400 font-mono">No witness reports registered.</p>
-                    ) : (
-                      <div className="space-y-2">
-                        {witnessReports.map((wit) => {
-                          const isLinked = wit.linked_incident_id === selectedIncident.id;
-
-                          return (
-                            <div
-                              key={wit.id}
-                              className={`p-3 rounded-lg border text-xs space-y-1.5 ${
-                                isLinked ? "bg-emerald-50 border-emerald-300" : "bg-slate-50 border-slate-200"
-                              }`}
-                            >
-                              <div className="flex items-center justify-between">
-                                <span className="font-mono text-[10px] font-bold text-slate-800">
-                                  Witness #{wit.id} • {wit.reporter_identifier}
-                                </span>
-                                {isLinked ? (
-                                  <span className="text-[9px] font-mono bg-emerald-200 text-emerald-900 px-1.5 py-0.2 rounded font-bold">
-                                    LINKED
-                                  </span>
-                                ) : (
-                                  <button
-                                    onClick={() => handleLinkWitness(wit.id)}
-                                    className="text-[10px] font-bold text-blue-600 hover:text-blue-800"
-                                  >
-                                    Link to #{selectedIncident.id} &rarr;
-                                  </button>
-                                )}
-                              </div>
-                              <p className="text-slate-700 text-[11px]">{wit.incident_description}</p>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* 5. UNIFIED TIMELINE TAB */}
-                {inspectorTab === "timeline" && (
-                  <div className="space-y-2">
-                    <UnifiedTimelinePanel incidentId={selectedIncident.id} backendUrl={backendUrl} />
-                  </div>
-                )}
               </div>
-            </>
-          ) : (
-            <div className="p-8 text-center text-xs text-slate-400 font-mono">
-              Select an incident from the queue or map to inspect operational controls.
+
+              {/* RIGHT COLUMN: LARGE INTERACTIVE MAP (7 cols) */}
+              <div className="lg:col-span-7 flex flex-col space-y-4">
+                <div className="bg-white border border-slate-200 rounded-xl p-3 shadow-2xs flex-1 min-h-[540px] flex flex-col">
+                  <div className="flex items-center justify-between pb-3 mb-2 border-b border-slate-100">
+                    <div className="flex items-center gap-2">
+                      <MapPin className="w-4 h-4 text-red-600" />
+                      <h3 className="text-sm font-bold text-slate-900">Mangaluru Regional Tactical GIS Map</h3>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-slate-500">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-red-600" /> Incidents ({incidents.length})
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-blue-600" /> Ambulances ({ambulances.length})
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-600" /> Hospitals ({hospitals.length})
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Map Component */}
+                  <div className="flex-1 w-full rounded-lg overflow-hidden border border-slate-200 min-h-[460px]">
+                    <DynamicCommandCenterMap
+                      incidents={incidents}
+                      ambulances={ambulances}
+                      hospitals={hospitals}
+                      selectedIncident={selectedIncident}
+                      onSelectIncident={(inc: any) => setSelectedIncident(inc)}
+                      activeRouteGeometry={activeRouteGeometry}
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
           )}
-        </section>
+
+          {/* ============================================================== */}
+          {/* VIEW: EMERGENCY QUEUE FULL TABLE                               */}
+          {/* ============================================================== */}
+          {currentNav === "queue" && (
+            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900">Regional Emergency Queue</h2>
+                  <p className="text-xs text-slate-500">Live triage queue with multi-witness clustering and allocation tracking</p>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-y border-slate-200 text-slate-600 uppercase font-mono text-[10px]">
+                    <tr>
+                      <th className="py-2.5 px-3">ID</th>
+                      <th className="py-2.5 px-3">Priority</th>
+                      <th className="py-2.5 px-3">Caller & Location</th>
+                      <th className="py-2.5 px-3">Complaint</th>
+                      <th className="py-2.5 px-3">Status</th>
+                      <th className="py-2.5 px-3 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {incidents.map((inc) => (
+                      <tr key={inc.id} className="hover:bg-slate-50 transition">
+                        <td className="py-3 px-3 font-mono font-bold text-slate-900">#{inc.id}</td>
+                        <td className="py-3 px-3">
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded font-mono ${
+                              inc.triage_color === "RED"
+                                ? "bg-red-50 text-red-700 border border-red-200"
+                                : "bg-amber-50 text-amber-700 border border-amber-200"
+                            }`}
+                          >
+                            {inc.triage_level}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3">
+                          <p className="font-bold text-slate-900">{inc.caller_name}</p>
+                          <p className="text-slate-500 text-[11px] truncate max-w-xs">{inc.location_address}</p>
+                        </td>
+                        <td className="py-3 px-3 max-w-xs truncate text-slate-700">{inc.chief_complaint}</td>
+                        <td className="py-3 px-3">
+                          <span className="font-semibold text-slate-700 uppercase">{inc.status}</span>
+                        </td>
+                        <td className="py-3 px-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedIncident(inc);
+                              setCurrentNav("overview");
+                            }}
+                            className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs"
+                          >
+                            Inspect
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* ============================================================== */}
+          {/* VIEW: LIVE TACTICAL MAP EXPANDED                               */}
+          {/* ============================================================== */}
+          {currentNav === "map" && (
+            <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs space-y-3 min-h-[640px] flex flex-col">
+              <h2 className="text-base font-bold text-slate-900">Live Tactical GIS Command Map</h2>
+              <div className="flex-1 rounded-lg overflow-hidden border border-slate-200 min-h-[580px]">
+                <DynamicCommandCenterMap
+                  incidents={incidents}
+                  ambulances={ambulances}
+                  hospitals={hospitals}
+                  selectedIncident={selectedIncident}
+                  onSelectIncident={(inc: any) => setSelectedIncident(inc)}
+                  activeRouteGeometry={activeRouteGeometry}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* ============================================================== */}
+          {/* VIEW: AMBULANCES FLEET TABLE                                   */}
+          {/* ============================================================== */}
+          {currentNav === "ambulances" && (
+            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4">
+              <h2 className="text-base font-bold text-slate-900">Regional Ambulance Fleet</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-y border-slate-200 text-slate-600 uppercase font-mono text-[10px]">
+                    <tr>
+                      <th className="py-2.5 px-3">Call Sign</th>
+                      <th className="py-2.5 px-3">Type</th>
+                      <th className="py-2.5 px-3">Status</th>
+                      <th className="py-2.5 px-3">Base Station</th>
+                      <th className="py-2.5 px-3">Fuel Level</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {ambulances.map((amb) => (
+                      <tr key={amb.id} className="hover:bg-slate-50 transition">
+                        <td className="py-3 px-3 font-mono font-bold text-slate-900">{amb.call_sign}</td>
+                        <td className="py-3 px-3 font-semibold text-blue-700">{amb.vehicle_type}</td>
+                        <td className="py-3 px-3">
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded font-mono ${
+                              amb.status === "AVAILABLE"
+                                ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                : amb.status === "MAINTENANCE"
+                                ? "bg-slate-100 text-slate-700 border border-slate-300"
+                                : "bg-amber-50 text-amber-700 border border-amber-200"
+                            }`}
+                          >
+                            {amb.status}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-slate-600">{amb.base_station}</td>
+                        <td className="py-3 px-3 font-mono font-bold">{amb.fuel_level_percent}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* ============================================================== */}
+          {/* VIEW: HOSPITALS CAPACITY & READINESS TABLE                     */}
+          {/* ============================================================== */}
+          {currentNav === "hospitals" && (
+            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4">
+              <h2 className="text-base font-bold text-slate-900">Regional Receiving Hospitals & Capacity</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-y border-slate-200 text-slate-600 uppercase font-mono text-[10px]">
+                    <tr>
+                      <th className="py-2.5 px-3">Facility Name</th>
+                      <th className="py-2.5 px-3">Readiness</th>
+                      <th className="py-2.5 px-3">ER Beds</th>
+                      <th className="py-2.5 px-3">ICU Beds</th>
+                      <th className="py-2.5 px-3">Ward Beds</th>
+                      <th className="py-2.5 px-3">Contact</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {hospitals.map((hosp) => (
+                      <tr key={hosp.id} className="hover:bg-slate-50 transition">
+                        <td className="py-3 px-3 font-bold text-slate-900">{hosp.name}</td>
+                        <td className="py-3 px-3">
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${
+                              hosp.readiness_status === "DIVERT"
+                                ? "bg-red-50 text-red-700 border border-red-200"
+                                : hosp.readiness_status === "BUSY"
+                                ? "bg-amber-50 text-amber-700 border border-amber-200"
+                                : "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                            }`}
+                          >
+                            {hosp.readiness_status || "READY"}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 font-mono font-bold text-emerald-700">
+                          {hosp.available_emergency_beds} / {hosp.total_emergency_beds}
+                        </td>
+                        <td className="py-3 px-3 font-mono font-bold text-blue-700">
+                          {hosp.available_icu_beds} / {hosp.total_icu_beds}
+                        </td>
+                        <td className="py-3 px-3 font-mono">
+                          {hosp.available_ward_beds ?? 15} / {hosp.total_ward_beds ?? 40}
+                        </td>
+                        <td className="py-3 px-3 font-mono text-slate-600">{hosp.contact_number}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* ============================================================== */}
+          {/* VIEW: INCIDENT HISTORY                                         */}
+          {/* ============================================================== */}
+          {currentNav === "history" && (
+            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4">
+              <h2 className="text-base font-bold text-slate-900">Incident History & Closed Files</h2>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-y border-slate-200 text-slate-600 uppercase font-mono text-[10px]">
+                    <tr>
+                      <th className="py-2.5 px-3">ID</th>
+                      <th className="py-2.5 px-3">Date & Time</th>
+                      <th className="py-2.5 px-3">Location</th>
+                      <th className="py-2.5 px-3">Complaint</th>
+                      <th className="py-2.5 px-3">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {incidents
+                      .filter((i) => i.status === "RESOLVED" || i.status === "CLOSED")
+                      .map((inc) => (
+                        <tr key={inc.id} className="hover:bg-slate-50 transition">
+                          <td className="py-3 px-3 font-mono font-bold text-slate-900">#{inc.id}</td>
+                          <td className="py-3 px-3 font-mono text-slate-500">
+                            {new Date(inc.created_at).toLocaleString()}
+                          </td>
+                          <td className="py-3 px-3 font-medium text-slate-700">{inc.location_address}</td>
+                          <td className="py-3 px-3 text-slate-600">{inc.chief_complaint}</td>
+                          <td className="py-3 px-3">
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
+                              RESOLVED
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </main>
       </div>
 
-      {/* ============================================================== */}
-      {/* 3. MODALS: NEW INCIDENT REGISTRATION & RESOURCE ALLOCATION     */}
-      {/* ============================================================== */}
-      {isRegistrationOpen && (
-        <IncidentRegistrationModal
-          isOpen={isRegistrationOpen}
-          onClose={() => setIsRegistrationOpen(false)}
-          onIncidentCreated={(newInc) => {
-            setSelectedIncident(newInc);
-            fetchData();
-          }}
-        />
-      )}
-
-      {isAllocationOpen && selectedIncident && recommendations && (
+      {/* Manual Allocation Modal */}
+      {isAllocationOpen && selectedIncident && (
         <AllocationModal
           isOpen={isAllocationOpen}
           onClose={() => setIsAllocationOpen(false)}
           incident={selectedIncident}
           recommendations={recommendations}
           onDispatchConfirmed={() => {
+            setIsAllocationOpen(false);
             fetchData();
-            setInspectorTab("dispatch");
+          }}
+        />
+      )}
+
+      {/* Incident Registration Modal */}
+      {isRegistrationOpen && (
+        <IncidentRegistrationModal
+          isOpen={isRegistrationOpen}
+          onClose={() => setIsRegistrationOpen(false)}
+          onIncidentCreated={(newInc) => {
+            setIsRegistrationOpen(false);
+            setSelectedIncident(newInc);
+            fetchData();
           }}
         />
       )}
