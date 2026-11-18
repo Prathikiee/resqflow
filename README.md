@@ -1,5 +1,9 @@
-ResQFlow — Emergency Response & Ambulance Coordination Platform
+**ResQFlow — Emergency Response & Ambulance Coordination Platform**
+
+
 ResQFlow is an intelligent emergency medical dispatch and ambulance coordination platform engineered for rapid, explainable emergency response across the Mangaluru, Karnataka metropolitan corridor.
+
+
 Key Capabilities (P0 & P1 Core)
 1. Emergency Registration & Intake:
    - Rapid caller intake with Mangaluru landmark presets (Kadri Hills, Hampankatta, Kuntikan, Bunder, Ullal, Surathkal).
@@ -28,6 +32,7 @@ Key Capabilities (P0 & P1 Core)
    - Full operational lifecycle tracking:
      \(\text{REPORTED} \rightarrow \text{TRIAGED} \rightarrow \text{ALLOCATED} \rightarrow \text{DISPATCHED} \rightarrow \text{EN\_ROUTE} \rightarrow \text{ON\_SCENE} \rightarrow \text{TRANSPORTING} \rightarrow \text{RESOLVED}\)
    - Synchronous updates to ambulance location, actual response time logging, and fleet availability upon hospital handover.
+     
 Hardware Prototype (Experimental)
 ResQFlow may also include a simple hardware prototype to explore automatic accident detection and location sharing.
 - ESP32: Acts as the controller and reads data from connected sensors.
