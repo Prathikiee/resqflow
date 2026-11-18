@@ -1,4 +1,4 @@
-#**ResQFlow — Emergency Response & Ambulance Coordination Platform**#
+**ResQFlow — Emergency Response & Ambulance Coordination Platform**
 
 
 ResQFlow is an intelligent emergency medical dispatch and ambulance coordination platform engineered for rapid, explainable emergency response across the Mangaluru, Karnataka metropolitan corridor.
