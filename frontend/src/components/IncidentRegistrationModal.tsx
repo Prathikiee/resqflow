@@ -88,7 +88,7 @@ export default function IncidentRegistrationModal({
     if (!isOpen) return;
 
     const timer = setTimeout(() => {
-      fetch(`${backendUrl}/api/triage/assess`, {
+      fetch(`${backendUrl}/api/incidents/triage-preview`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -90,6 +90,11 @@ app.include_router(witness_reports.router)
 app.include_router(crash_alerts.router)
 app.include_router(seed.router)
 
+# Compatibility alias for triage assessment
+@app.post("/api/triage/assess", response_model=incidents.TriageAssessmentOut, tags=["incidents"])
+def triage_assess_alias(payload: incidents.TriagePreviewRequest):
+    return incidents.preview_triage(payload)
+
 def authenticate_websocket_connection(websocket: WebSocket):
     """
     Validates token from query parameter, cookie, or authorization header.

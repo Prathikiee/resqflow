@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -23,6 +23,17 @@ from backend.app.core.ws import broadcast_sync
 from backend.app.services.timeline_service import log_incident_event
 
 router = APIRouter(prefix="/api/crash-alerts", tags=["crash-alerts"])
+
+ACTIVE_DISPATCH_STATUSES = [
+    "ASSIGNED",
+    "ACKNOWLEDGED",
+    "EN_ROUTE_INCIDENT",
+    "ON_SCENE",
+    "EN_ROUTE_HOSPITAL",
+    "AT_HOSPITAL",
+    "EN_ROUTE",
+    "TRANSPORTING",
+]
 
 def get_utc_now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -50,7 +61,7 @@ def ingest_crash_alert(
         db.query(Dispatch)
         .filter(
             Dispatch.ambulance_id == ambulance.id,
-            Dispatch.status.in_(["ASSIGNED", "EN_ROUTE", "ON_SCENE", "TRANSPORTING", "AT_HOSPITAL"]),
+            Dispatch.status.in_(ACTIVE_DISPATCH_STATUSES),
         )
         .order_by(Dispatch.created_at.desc())
         .first()
@@ -68,35 +79,78 @@ def ingest_crash_alert(
     # Fallback to first available hospital if no active transport
     if not hospital_id:
         hosp = db.query(Hospital).first()
-        hospital_id = hosp.id if hosp else 1
+        if not hosp:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No registered hospital facilities available to receive crash alert",
+            )
+        hospital_id = hosp.id
 
-    alert = CrashAlert(
-        ambulance_id=ambulance.id,
-        incident_id=incident_id,
-        hospital_id=hospital_id,
-        dispatch_id=dispatch_id,
-        source=payload.source or "HARDWARE_IOT",
-        severity=payload.severity,
-        latitude=payload.latitude,
-        longitude=payload.longitude,
-        location_description=payload.location_description or f"Near {payload.latitude:.4f}, {payload.longitude:.4f}",
-        status="TRIGGERED",
+    # Duplicate-alert debouncing: check for recent active alert within last 30 seconds
+    cutoff_time = get_utc_now() - timedelta(seconds=30)
+    recent_alert = (
+        db.query(CrashAlert)
+        .filter(
+            CrashAlert.ambulance_id == ambulance.id,
+            CrashAlert.status.in_(["TRIGGERED", "ACKNOWLEDGED"]),
+            CrashAlert.created_at >= cutoff_time,
+        )
+        .order_by(CrashAlert.created_at.desc())
+        .first()
     )
-    if payload.sensor_data:
-        alert.sensor_data = payload.sensor_data
 
-    db.add(alert)
-    db.commit()
-    db.refresh(alert)
+    # Threshold validation & false-positive assessment
+    sensor_data = payload.sensor_data or {}
+    severity = payload.severity
+    g_force = sensor_data.get("g_force")
+    airbag = sensor_data.get("airbag_deployed", False)
+    rollover = sensor_data.get("rollover", False)
+
+    # If sensor telemetry indicates sub-threshold reading without structural damage
+    if g_force is not None and g_force < 2.5 and not airbag and not rollover:
+        severity = "MINOR"
+
+    if recent_alert:
+        # Update existing active alert with latest sensor telemetry and location
+        recent_alert.latitude = payload.latitude
+        recent_alert.longitude = payload.longitude
+        if payload.location_description:
+            recent_alert.location_description = payload.location_description
+        if sensor_data:
+            recent_alert.sensor_data = sensor_data
+        recent_alert.updated_at = get_utc_now()
+        db.commit()
+        db.refresh(recent_alert)
+        alert = recent_alert
+    else:
+        alert = CrashAlert(
+            ambulance_id=ambulance.id,
+            incident_id=incident_id,
+            hospital_id=hospital_id,
+            dispatch_id=dispatch_id,
+            source=payload.source or "HARDWARE_IOT",
+            severity=severity,
+            latitude=payload.latitude,
+            longitude=payload.longitude,
+            location_description=payload.location_description or f"Near {payload.latitude:.4f}, {payload.longitude:.4f}",
+            sensor_data_json=json.dumps(sensor_data),
+            status="TRIGGERED",
+        )
+        db.add(alert)
+        db.commit()
+        db.refresh(alert)
 
     # Log incident timeline event if tied to an active incident
-    if incident_id:
+    if incident_id and not recent_alert:
         log_incident_event(
             db=db,
             incident_id=incident_id,
+            dispatch_id=dispatch_id,
             event_type="AMBULANCE_CRASH_ALERT",
-            description=f"CRITICAL: Crash alert received for assigned unit {ambulance.call_sign} (Severity: {alert.severity})",
-            actor=f"System (IoT Telemetry / {alert.source})",
+            event_title="Ambulance Collision Detected",
+            event_description=f"CRITICAL: Crash alert received for assigned unit {ambulance.call_sign} (Severity: {alert.severity})",
+            actor_type="SYSTEM",
+            actor_reference=f"IoT Telemetry / {alert.source}",
             metadata={
                 "crash_alert_id": alert.id,
                 "ambulance_id": ambulance.id,
@@ -160,7 +214,7 @@ def simulate_crash_alert(
             db.query(Dispatch)
             .filter(
                 Dispatch.destination_hospital_id == target_hospital_id,
-                Dispatch.status.in_(["ASSIGNED", "EN_ROUTE", "ON_SCENE", "TRANSPORTING", "AT_HOSPITAL"]),
+                Dispatch.status.in_(ACTIVE_DISPATCH_STATUSES),
             )
             .order_by(Dispatch.created_at.desc())
             .first()
@@ -171,7 +225,7 @@ def simulate_crash_alert(
             db.query(Dispatch)
             .filter(
                 Dispatch.ambulance_id == amb_id,
-                Dispatch.status.in_(["ASSIGNED", "EN_ROUTE", "ON_SCENE", "TRANSPORTING", "AT_HOSPITAL"]),
+                Dispatch.status.in_(ACTIVE_DISPATCH_STATUSES),
             )
             .order_by(Dispatch.created_at.desc())
             .first()
@@ -193,10 +247,12 @@ def simulate_crash_alert(
         )
 
     # Determine receiving hospital
+    hosp_first = db.query(Hospital).first()
+    default_hosp_id = hosp_first.id if hosp_first else 1
     hospital_id = (
         (active_dispatch.destination_hospital_id if active_dispatch else None)
         or target_hospital_id
-        or (db.query(Hospital).first().id if db.query(Hospital).first() else 1)
+        or default_hosp_id
     )
 
     incident_id = active_dispatch.incident_id if active_dispatch else None
@@ -240,9 +296,12 @@ def simulate_crash_alert(
         log_incident_event(
             db=db,
             incident_id=incident_id,
+            dispatch_id=dispatch_id,
             event_type="AMBULANCE_CRASH_ALERT",
-            description=f"CRITICAL: Crash simulated for assigned unit {ambulance.call_sign} (Severity: {alert.severity})",
-            actor=f"Simulation ({auth_user.email if auth_user else 'Demo Operator'})",
+            event_title="Ambulance Collision Simulated",
+            event_description=f"CRITICAL: Crash simulated for assigned unit {ambulance.call_sign} (Severity: {alert.severity})",
+            actor_type="SYSTEM",
+            actor_reference=f"Simulation ({auth_user.email if auth_user else 'Demo Operator'})",
             metadata={
                 "crash_alert_id": alert.id,
                 "ambulance_call_sign": ambulance.call_sign,
@@ -399,9 +458,12 @@ def respond_to_crash_alert(
         log_incident_event(
             db=db,
             incident_id=alert.incident_id,
+            dispatch_id=alert.dispatch_id,
             event_type="CRASH_ALERT_RESPONSE_UPDATED",
-            description=f"Hospital updated crash response to {alert.status}",
-            actor=alert.acknowledged_by or "Hospital Staff",
+            event_title="Hospital Crash Response Updated",
+            event_description=f"Hospital updated crash response to {alert.status}",
+            actor_type="HOSPITAL_STAFF" if auth_user and auth_user.role == ROLE_HOSPITAL_STAFF else "SYSTEM",
+            actor_reference=alert.acknowledged_by or "Hospital Staff",
             metadata={
                 "crash_alert_id": alert.id,
                 "status": alert.status,

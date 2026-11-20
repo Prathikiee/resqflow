@@ -22,6 +22,16 @@ class SimulateDecisionRequest(BaseModel):
 
 class HandoverAcknowledgeRequest(BaseModel):
     acknowledged_by: Optional[str] = None
+    receiving_notes: Optional[str] = None
+    receiving_clinician: Optional[str] = None
+
+class HandoverReviewRequest(BaseModel):
+    reviewed_by: Optional[str] = None
+    receiving_notes: Optional[str] = None
+
+class HandoverCompleteRequest(BaseModel):
+    completed_by: Optional[str] = None
+    receiving_notes: Optional[str] = None
 
 class HospitalPreparationUpdate(BaseModel):
     preparation_status: str = Field(..., description="NOT_STARTED, TEAM_NOTIFIED, BAY_PREPARED, SPECIALISTS_STANDBY, READY_FOR_ARRIVAL")
@@ -38,6 +48,10 @@ class HandoverPacketOut(BaseModel):
     status: str
     acknowledged_at: Optional[datetime] = None
     acknowledged_by: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    receiving_clinician: Optional[str] = None
+    receiving_notes: Optional[str] = None
 
     patient_age: Optional[int] = None
     patient_gender: Optional[str] = "Unknown"

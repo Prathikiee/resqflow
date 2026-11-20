@@ -95,6 +95,16 @@ def upgrade_schema(target_engine=None):
                     conn.execute(text("ALTER TABLE hospitals ADD COLUMN equipment_readiness_json TEXT DEFAULT '{}'"))
                 if "blood_bank_status_json" not in hosp_cols:
                     conn.execute(text("ALTER TABLE hospitals ADD COLUMN blood_bank_status_json TEXT DEFAULT '{}'"))
+                if "departments_json" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN departments_json TEXT DEFAULT '[]'"))
+                if "capabilities_json" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN capabilities_json TEXT DEFAULT '{}'"))
+                if "bed_capacity_breakdown_json" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN bed_capacity_breakdown_json TEXT DEFAULT '{}'"))
+                if "facility_type" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN facility_type VARCHAR(100) DEFAULT 'Tertiary Emergency & Trauma Centre'"))
+                if "emergency_department_hours" not in hosp_cols:
+                    conn.execute(text("ALTER TABLE hospitals ADD COLUMN emergency_department_hours VARCHAR(60) DEFAULT '24/7 Rapid Response'"))
                 conn.commit()
 
             if "dispatches" in table_names:
@@ -134,6 +144,17 @@ def upgrade_schema(target_engine=None):
             if "handover_packets" not in table_names:
                 from backend.app.models.entities import HandoverPacket
                 HandoverPacket.__table__.create(bind=conn, checkfirst=True)
+                conn.commit()
+            else:
+                hp_cols = [c["name"] for c in inspector.get_columns("handover_packets")]
+                if "receiving_notes" not in hp_cols:
+                    conn.execute(text("ALTER TABLE handover_packets ADD COLUMN receiving_notes TEXT"))
+                if "receiving_clinician" not in hp_cols:
+                    conn.execute(text("ALTER TABLE handover_packets ADD COLUMN receiving_clinician VARCHAR(120)"))
+                if "reviewed_at" not in hp_cols:
+                    conn.execute(text("ALTER TABLE handover_packets ADD COLUMN reviewed_at DATETIME"))
+                if "completed_at" not in hp_cols:
+                    conn.execute(text("ALTER TABLE handover_packets ADD COLUMN completed_at DATETIME"))
                 conn.commit()
 
             if "witness_reports" not in table_names:

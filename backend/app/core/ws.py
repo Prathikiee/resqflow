@@ -47,6 +47,7 @@ def create_event_envelope(
         "entity_type": resolved_entity_type,
         "entity_id": resolved_entity_id,
         "payload": payload,
+        "data": payload,  # Backward compatibility alias
     }
 
 class ConnectionManager:

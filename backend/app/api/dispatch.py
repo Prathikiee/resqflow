@@ -11,6 +11,8 @@ from backend.app.schemas.dispatch import (
     ConfirmationDecision,
     SimulateDecisionRequest,
     HandoverAcknowledgeRequest,
+    HandoverReviewRequest,
+    HandoverCompleteRequest,
     HandoverPacketOut,
     HospitalPreparationUpdate,
 )
@@ -572,6 +574,7 @@ def expire_single_dispatch_if_due(dispatch: Dispatch, db: Session) -> bool:
     return False
 
 @router.get("/recommend/{incident_id}")
+@router.get("/recommendations/{incident_id}")
 def get_dispatch_recommendation(incident_id: int, db: Session = Depends(get_db)):
     incident = db.query(Incident).filter(Incident.id == incident_id).first()
     if not incident:
@@ -582,6 +585,22 @@ def get_dispatch_recommendation(incident_id: int, db: Session = Depends(get_db))
 
     ambulance_results = score_and_rank_ambulances(incident=incident, ambulances=ambulances)
     hospital_results = rank_suitable_hospitals(incident=incident, hospitals=hospitals)
+
+    rec_ambulance = ambulance_results.get("recommended_ambulance")
+    rec_hospital = hospital_results.get("recommended_hospital")
+
+    # Generate route geometry coordinates preview for dispatcher map
+    amb_lat = rec_ambulance.get("current_latitude") if isinstance(rec_ambulance, dict) else getattr(rec_ambulance, "current_latitude", None)
+    amb_lng = rec_ambulance.get("current_longitude") if isinstance(rec_ambulance, dict) else getattr(rec_ambulance, "current_longitude", None)
+    hosp_lat = rec_hospital.get("latitude") if isinstance(rec_hospital, dict) else getattr(rec_hospital, "latitude", None)
+    hosp_lng = rec_hospital.get("longitude") if isinstance(rec_hospital, dict) else getattr(rec_hospital, "longitude", None)
+
+    route_geometry = []
+    if amb_lat is not None and amb_lng is not None:
+        route_geometry.append([amb_lat, amb_lng])
+        route_geometry.append([incident.latitude, incident.longitude])
+        if hosp_lat is not None and hosp_lng is not None:
+            route_geometry.append([hosp_lat, hosp_lng])
 
     return {
         "incident_id": incident.id,
@@ -599,6 +618,9 @@ def get_dispatch_recommendation(incident_id: int, db: Session = Depends(get_db))
         },
         "ambulance_allocation": ambulance_results,
         "hospital_ranking": hospital_results,
+        "recommended_ambulance": rec_ambulance,
+        "recommended_hospital": rec_hospital,
+        "route_geometry": route_geometry,
     }
 
 @router.post("/auto-allocate/{incident_id}", response_model=DispatchOut, status_code=status.HTTP_201_CREATED)
@@ -907,6 +929,7 @@ def get_dispatch(
     return dispatch
 
 @router.post("/{dispatch_id}/confirm/ambulance", response_model=DispatchOut)
+@router.post("/{dispatch_id}/confirm-ambulance", response_model=DispatchOut)
 def confirm_ambulance(
     dispatch_id: int,
     payload: ConfirmationDecision,
@@ -1057,6 +1080,7 @@ def confirm_ambulance(
         )
 
 @router.post("/{dispatch_id}/confirm/hospital", response_model=DispatchOut)
+@router.post("/{dispatch_id}/confirm-hospital", response_model=DispatchOut)
 def confirm_hospital(
     dispatch_id: int,
     payload: ConfirmationDecision,
@@ -1527,13 +1551,21 @@ def acknowledge_handover_packet(
             )
 
     # Strictly Idempotent: If already acknowledged, return existing packet immediately
-    if packet.status == "ACKNOWLEDGED":
+    if packet.status in ["ACKNOWLEDGED", "COMPLETED"]:
+        if payload and payload.receiving_notes and not packet.receiving_notes:
+            packet.receiving_notes = payload.receiving_notes
+            db.commit()
+            db.refresh(packet)
         return packet
 
     now = get_utc_now()
     packet.status = "ACKNOWLEDGED"
     packet.acknowledged_at = now
     packet.acknowledged_by = (payload and payload.acknowledged_by) or "Receiving Hospital ER Intake (Staff)"
+    if payload and payload.receiving_clinician:
+        packet.receiving_clinician = payload.receiving_clinician
+    if payload and payload.receiving_notes:
+        packet.receiving_notes = payload.receiving_notes
     packet.updated_at = now
 
     log_incident_event(
@@ -1562,6 +1594,8 @@ def acknowledge_handover_packet(
             "status": packet.status,
             "acknowledged_at": packet.acknowledged_at.isoformat() if packet.acknowledged_at else None,
             "acknowledged_by": packet.acknowledged_by,
+            "receiving_clinician": packet.receiving_clinician,
+            "receiving_notes": packet.receiving_notes,
         },
         ambulance_id=dispatch.ambulance_id,
         hospital_id=dispatch.destination_hospital_id,
@@ -1570,6 +1604,121 @@ def acknowledge_handover_packet(
         entity_id=packet.id,
     )
 
+    return packet
+
+@router.post("/{dispatch_id}/handover/review", response_model=HandoverPacketOut)
+def review_handover_packet(
+    dispatch_id: int,
+    payload: Optional[HandoverReviewRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Hospital clinical triage reviews incoming SBAR handover information prior to ambulance arrival.
+    """
+    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot review clinical handover packets")
+        if auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot review handover for another hospital facility")
+
+    packet = dispatch.handover_packet
+    if not packet and dispatch.coordination_status == "CONFIRMED":
+        packet = generate_or_update_handover_packet(dispatch, db, commit=False)
+
+    if not packet:
+        raise HTTPException(status_code=404, detail="Handover packet not found")
+
+    now = get_utc_now()
+    if packet.status in ["SENT", "PENDING", "NOT_RECEIVED"]:
+        packet.status = "REVIEWED"
+    packet.reviewed_at = now
+    if payload:
+        if payload.reviewed_by:
+            packet.receiving_clinician = payload.reviewed_by
+        if payload.receiving_notes:
+            packet.receiving_notes = payload.receiving_notes
+    packet.updated_at = now
+    db.commit()
+    db.refresh(packet)
+
+    broadcast_sync(
+        "HANDOVER_REVIEWED",
+        {
+            "dispatch_id": dispatch.id,
+            "packet_id": packet.id,
+            "status": packet.status,
+            "reviewed_at": packet.reviewed_at.isoformat() if packet.reviewed_at else None,
+            "receiving_clinician": packet.receiving_clinician,
+            "receiving_notes": packet.receiving_notes,
+        },
+        hospital_id=dispatch.destination_hospital_id,
+        ambulance_id=dispatch.ambulance_id,
+        entity_type="handover_packet",
+        entity_id=packet.id,
+    )
+    return packet
+
+@router.post("/{dispatch_id}/handover/complete", response_model=HandoverPacketOut)
+def complete_handover_packet(
+    dispatch_id: int,
+    payload: Optional[HandoverCompleteRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Hospital ER completes receiving workflow and formal clinician sign-off.
+    """
+    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot complete clinical handover")
+        if auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot complete handover for another hospital facility")
+
+    packet = dispatch.handover_packet
+    if not packet and dispatch.coordination_status == "CONFIRMED":
+        packet = generate_or_update_handover_packet(dispatch, db, commit=False)
+
+    if not packet:
+        raise HTTPException(status_code=404, detail="Handover packet not found")
+
+    now = get_utc_now()
+    packet.status = "COMPLETED"
+    packet.completed_at = now
+    if payload:
+        if payload.completed_by:
+            packet.receiving_clinician = payload.completed_by
+        if payload.receiving_notes:
+            packet.receiving_notes = payload.receiving_notes
+    packet.updated_at = now
+    db.commit()
+    db.refresh(packet)
+
+    broadcast_sync(
+        "HANDOVER_COMPLETED",
+        {
+            "dispatch_id": dispatch.id,
+            "packet_id": packet.id,
+            "status": packet.status,
+            "completed_at": packet.completed_at.isoformat() if packet.completed_at else None,
+            "receiving_clinician": packet.receiving_clinician,
+            "receiving_notes": packet.receiving_notes,
+        },
+        hospital_id=dispatch.destination_hospital_id,
+        ambulance_id=dispatch.ambulance_id,
+        entity_type="handover_packet",
+        entity_id=packet.id,
+    )
     return packet
 
 @router.patch("/{dispatch_id}/preparation", response_model=DispatchOut)

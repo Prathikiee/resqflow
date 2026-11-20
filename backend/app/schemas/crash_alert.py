@@ -7,10 +7,10 @@ class CrashAlertIngest(BaseModel):
     latitude: float
     longitude: float
     timestamp: Optional[datetime] = None
-    severity: str = Field(default="CRITICAL", pattern="^(MINOR|MODERATE|SEVERE|CRITICAL)$")
+    severity: str = Field(default="CRITICAL", pattern="^(?i)(MINOR|MODERATE|SEVERE|CRITICAL)$")
     location_description: Optional[str] = None
     sensor_data: Optional[Dict[str, Any]] = None
-    source: str = Field(default="HARDWARE_IOT", pattern="^(HARDWARE_IOT|DEMO_SIMULATION)$")
+    source: str = Field(default="HARDWARE_IOT", pattern="^(?i)(HARDWARE_IOT|DEMO_SIMULATION|ESP32|HARDWARE|IOT)$")
 
 class CrashAlertSimulate(BaseModel):
     ambulance_id: Optional[int] = None

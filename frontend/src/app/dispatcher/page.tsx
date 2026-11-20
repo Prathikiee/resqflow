@@ -220,6 +220,10 @@ export default function DispatcherCommandCenterPage() {
             if (data.event && data.event !== "PONG" && data.event !== "HANDSHAKE") {
               if (data.event === "INCIDENT_CREATED") {
                 addNotification(`🚨 New Civilian Emergency Reported #${data.payload?.id || "SOS"}`);
+              } else if (data.event === "AMBULANCE_CRASH_DETECTED") {
+                addNotification(`⚠️ CRITICAL: Ambulance Unit ${data.payload?.ambulance_call_sign || '#' + data.payload?.ambulance_id} Collision Detected!`);
+              } else if (data.event === "CRASH_ALERT_UPDATED") {
+                addNotification(`Hospital updated crash response: ${data.payload?.status}`);
               } else if (data.event === "DISPATCH_CONFIRMED") {
                 addNotification(`Dual Confirmation Active for Dispatch #${data.payload?.id}`);
               } else if (data.event === "DISPATCH_CONFIRMATION_UPDATED") {

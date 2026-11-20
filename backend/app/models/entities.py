@@ -160,6 +160,13 @@ class Hospital(Base):
     equipment_readiness_json = Column(Text, default="{}")  # {"ct_scanner": "OPERATIONAL", "cath_lab": "OPERATIONAL", ...}
     blood_bank_status_json = Column(Text, default="{}")    # {"O_NEG": "ADEQUATE", "O_POS": "ADEQUATE", ...}
 
+    # Department & Operational Capability Management
+    departments_json = Column(Text, default="[]")
+    capabilities_json = Column(Text, default="{}")
+    bed_capacity_breakdown_json = Column(Text, default="{}")
+    facility_type = Column(String(100), default="Tertiary Multi-Specialty Hospital")
+    emergency_department_hours = Column(String(60), default="24/7 Rapid Response")
+
     last_updated = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     # Relationships
@@ -225,6 +232,192 @@ class Hospital(Base):
     @doctors_availability.setter
     def doctors_availability(self, val: List[dict]):
         self.doctors_availability_json = json.dumps(val or [])
+
+    @property
+    def departments(self) -> List[dict]:
+        try:
+            depts = json.loads(self.departments_json or "[]")
+            if depts:
+                return depts
+        except Exception:
+            pass
+        return [
+            {
+                "id": "dept_er",
+                "name": "Emergency Medicine",
+                "operational_status": "ACTIVE",
+                "operating_hours": "24/7",
+                "emergency_coverage": True,
+                "specialty_availability": ["Emergency Medicine", "Resuscitation", "Acute Triage"],
+                "notes": "Level 1 Emergency & Resuscitation Bays open 24/7",
+            },
+            {
+                "id": "dept_icu",
+                "name": "Critical Care / ICU",
+                "operational_status": "ACTIVE",
+                "operating_hours": "24/7",
+                "emergency_coverage": True,
+                "specialty_availability": ["Intensive Care", "Mechanical Ventilation"],
+                "notes": "Multidisciplinary Adult & Neuro ICU",
+            },
+            {
+                "id": "dept_cardio",
+                "name": "Cardiology",
+                "operational_status": "ACTIVE",
+                "operating_hours": "24/7",
+                "emergency_coverage": True,
+                "specialty_availability": ["Cardiology", "Interventional Cardiology"],
+                "notes": "Primary PCI / Digital Cath Lab on 24/7 standby",
+            },
+            {
+                "id": "dept_trauma",
+                "name": "Trauma & Orthopedics",
+                "operational_status": "ACTIVE",
+                "operating_hours": "24/7",
+                "emergency_coverage": True,
+                "specialty_availability": ["Trauma Surgery", "Orthopedic Surgery"],
+                "notes": "Polytrauma resuscitation and surgical suites",
+            },
+            {
+                "id": "dept_neuro",
+                "name": "Neurology & Stroke",
+                "operational_status": "ACTIVE",
+                "operating_hours": "24/7",
+                "emergency_coverage": True,
+                "specialty_availability": ["Neurology", "Stroke Thrombolysis"],
+                "notes": "Rapid Code Stroke protocol with immediate CT angiography",
+            },
+            {
+                "id": "dept_surgery",
+                "name": "General Surgery",
+                "operational_status": "ACTIVE",
+                "operating_hours": "24/7",
+                "emergency_coverage": True,
+                "specialty_availability": ["General Surgery", "Acute Abdominal Surgery"],
+                "notes": "Emergency laparotomy and acute abdominal coverage",
+            },
+            {
+                "id": "dept_peds",
+                "name": "Pediatrics",
+                "operational_status": "ACTIVE",
+                "operating_hours": "24/7",
+                "emergency_coverage": True,
+                "specialty_availability": ["Pediatric Emergency", "Neonatology"],
+                "notes": "Dedicated PICU/NICU bays and pediatric resuscitation",
+            },
+            {
+                "id": "dept_obgyn",
+                "name": "Obstetrics & Gynecology",
+                "operational_status": "ACTIVE",
+                "operating_hours": "24/7",
+                "emergency_coverage": True,
+                "specialty_availability": ["Obstetrics", "Emergency C-Section"],
+                "notes": "Immediate emergency delivery suite and fetal monitoring",
+            },
+            {
+                "id": "dept_anesth",
+                "name": "Anesthesiology",
+                "operational_status": "ACTIVE",
+                "operating_hours": "24/7",
+                "emergency_coverage": True,
+                "specialty_availability": ["Trauma Anesthesia", "Airway Management"],
+                "notes": "24/7 resident trauma anesthesiology team",
+            },
+            {
+                "id": "dept_radiology",
+                "name": "Radiology & Imaging",
+                "operational_status": "ACTIVE",
+                "operating_hours": "24/7",
+                "emergency_coverage": True,
+                "specialty_availability": ["Multi-Slice CT", "Emergency Ultrasound", "X-Ray"],
+                "notes": "24/7 emergency diagnostic radiologist on duty",
+            },
+        ]
+
+    @departments.setter
+    def departments(self, val: List[dict]):
+        self.departments_json = json.dumps(val or [])
+
+    @property
+    def capabilities(self) -> dict:
+        try:
+            caps = json.loads(self.capabilities_json or "{}")
+            if caps:
+                return caps
+        except Exception:
+            pass
+        return {
+            "cardiac_emergency": "AVAILABLE",
+            "trauma_capability": "AVAILABLE",
+            "icu_availability": "AVAILABLE",
+            "ventilator_availability": "AVAILABLE",
+            "defibrillator_availability": "AVAILABLE",
+            "emergency_imaging": "AVAILABLE",
+            "operating_theatre": "AVAILABLE",
+            "blood_bank": "AVAILABLE",
+        }
+
+    @capabilities.setter
+    def capabilities(self, val: dict):
+        self.capabilities_json = json.dumps(val or {})
+
+    @property
+    def bed_capacity_breakdown(self) -> dict:
+        try:
+            b = json.loads(self.bed_capacity_breakdown_json or "{}")
+            if b and "emergency" in b and "icu" in b:
+                return b
+        except Exception:
+            pass
+        # Derive defaults from existing columns
+        er_tot = self.total_emergency_beds or 20
+        er_occ = self.occupied_emergency_beds
+        er_res = self.reserved_emergency_beds or 0
+        er_unavail = 0
+        er_avail = max(0, er_tot - er_occ - er_res - er_unavail)
+
+        icu_tot = self.total_icu_beds or 10
+        icu_occ = self.occupied_icu_beds
+        icu_res = 0
+        icu_unavail = 0
+        icu_avail = max(0, icu_tot - icu_occ - icu_res - icu_unavail)
+
+        hdu_tot = 8
+        hdu_occ = 2
+        hdu_res = 0
+        hdu_unavail = 0
+        hdu_avail = max(0, hdu_tot - hdu_occ - hdu_res - hdu_unavail)
+
+        ward_tot = self.total_ward_beds or 50
+        ward_occ = self.occupied_ward_beds
+        ward_res = 0
+        ward_unavail = 0
+        ward_avail = max(0, ward_tot - ward_occ - ward_res - ward_unavail)
+
+        iso_tot = 6
+        iso_occ = 1
+        iso_res = 0
+        iso_unavail = 0
+        iso_avail = max(0, iso_tot - iso_occ - iso_res - iso_unavail)
+
+        ped_tot = self.pediatric_beds_total or 10
+        ped_occ = self.occupied_pediatric_beds
+        ped_res = 0
+        ped_unavail = 0
+        ped_avail = max(0, ped_tot - ped_occ - ped_res - ped_unavail)
+
+        return {
+            "emergency": {"name": "Emergency / ER", "total": er_tot, "occupied": er_occ, "reserved": er_res, "unavailable": er_unavail, "available": er_avail},
+            "icu": {"name": "Intensive Care Unit (ICU)", "total": icu_tot, "occupied": icu_occ, "reserved": icu_res, "unavailable": icu_unavail, "available": icu_avail},
+            "hdu": {"name": "High Dependency Unit (HDU)", "total": hdu_tot, "occupied": hdu_occ, "reserved": hdu_res, "unavailable": hdu_unavail, "available": hdu_avail},
+            "general_ward": {"name": "General Inpatient Ward", "total": ward_tot, "occupied": ward_occ, "reserved": ward_res, "unavailable": ward_unavail, "available": ward_avail},
+            "isolation": {"name": "Isolation / Airborne Infection", "total": iso_tot, "occupied": iso_occ, "reserved": iso_res, "unavailable": iso_unavail, "available": iso_avail},
+            "pediatric": {"name": "Pediatric Ward", "total": ped_tot, "occupied": ped_occ, "reserved": ped_res, "unavailable": ped_unavail, "available": ped_avail},
+        }
+
+    @bed_capacity_breakdown.setter
+    def bed_capacity_breakdown(self, val: dict):
+        self.bed_capacity_breakdown_json = json.dumps(val or {})
 
 
 class Dispatch(Base):
@@ -358,9 +551,13 @@ class HandoverPacket(Base):
     dispatch_id = Column(Integer, ForeignKey("dispatches.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
     incident_id = Column(Integer, ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True)
 
-    status = Column(String(30), default="SENT", nullable=False)  # PENDING, SENT, ACKNOWLEDGED
+    status = Column(String(30), default="SENT", nullable=False)  # PENDING, SENT, REVIEWED, ACKNOWLEDGED, COMPLETED
     acknowledged_at = Column(DateTime, nullable=True)
     acknowledged_by = Column(String(120), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    receiving_clinician = Column(String(120), nullable=True)
+    receiving_notes = Column(Text, nullable=True)
 
     patient_age = Column(Integer, nullable=True)
     patient_gender = Column(String(30), nullable=True)
