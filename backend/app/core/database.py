@@ -176,6 +176,11 @@ def upgrade_schema(target_engine=None):
                 from backend.app.models.entities import CrashAlert
                 CrashAlert.__table__.create(bind=conn, checkfirst=True)
                 conn.commit()
+
+            if "patient_vitals" not in table_names:
+                from backend.app.models.entities import PatientVitals
+                PatientVitals.__table__.create(bind=conn, checkfirst=True)
+                conn.commit()
     except Exception as e:
         logger.warning(f"Schema upgrade check note: {e}")
 

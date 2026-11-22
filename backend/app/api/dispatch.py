@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
-from backend.app.models.entities import Incident, Ambulance, Hospital, Dispatch, HandoverPacket, User
+from backend.app.models.entities import Incident, Ambulance, Hospital, Dispatch, HandoverPacket, User, PatientVitals
+from backend.app.schemas.vitals import VitalsCreate, VitalsOut
 from backend.app.schemas.dispatch import (
     DispatchRequest,
     DispatchOut,
@@ -1532,6 +1533,246 @@ def advance_dispatch_lifecycle(
     )
 
     return dispatch
+
+# ============================================================================
+# MEMBER 3, PHASE 1: PATIENT VITALS TELEMETRY & CLINICAL MONITORING
+# ============================================================================
+
+@router.post("/{dispatch_id}/vitals", response_model=VitalsOut, status_code=status.HTTP_201_CREATED)
+def record_patient_vitals(
+    dispatch_id: int,
+    payload: VitalsCreate,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Records patient physiological vitals for an active assigned ambulance mission.
+    Requirements:
+      1. Authenticated ambulance user only (or dispatcher/super-admin).
+      2. Linked directly to the active confirmed dispatch and incident.
+      3. Input validation: HR (30-250), Systolic (50-260), Diastolic (30-160),
+         SpO2 (50-100), RR (5-60), Systolic > Diastolic.
+      4. Duplicate submission protection: rapid duplicate submissions (<15s) with
+         identical values return the existing record idempotently.
+      5. Generates an IncidentEvent timeline entry and broadcasts a live WebSocket event.
+      6. Synchronizes handover packet clinical observations if present.
+    """
+    begin_immediate_if_sqlite(db)
+
+    disp_query = db.query(Dispatch).filter(Dispatch.id == dispatch_id).execution_options(populate_existing=True)
+    if is_postgres(db):
+        disp_query = disp_query.with_for_update()
+    dispatch = disp_query.first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    # 1. Authorization check
+    auth_user = current_user if isinstance(current_user, User) else None
+    if not auth_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials required to record patient vitals",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if auth_user.role == ROLE_CITIZEN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Citizens cannot record patient vitals",
+        )
+    if auth_user.role == ROLE_HOSPITAL_STAFF:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Hospital staff cannot record ambulance patient vitals",
+        )
+    if auth_user.role == ROLE_AMBULANCE_CREW:
+        if auth_user.ambulance_id and dispatch.ambulance_id != auth_user.ambulance_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Paramedic crews can only record vitals for their own assigned ambulance unit",
+            )
+
+    # 2. Mission status check: must be confirmed and not completed/cancelled
+    if dispatch.coordination_status != "CONFIRMED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot record vitals: Dispatch coordination status is '{dispatch.coordination_status}'. Mission must be dual-confirmed first.",
+        )
+
+    if dispatch.status in ["COMPLETED", "CANCELLED"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot record vitals: Dispatch #{dispatch.id} is already in terminal stage '{dispatch.status}'.",
+        )
+
+    now = get_utc_now()
+
+    # 3. Duplicate submission prevention: check for identical record submitted within last 15 seconds
+    recent = (
+        db.query(PatientVitals)
+        .filter(PatientVitals.dispatch_id == dispatch.id)
+        .order_by(PatientVitals.recorded_at.desc())
+        .first()
+    )
+    if recent:
+        delta_sec = (now - recent.recorded_at).total_seconds() if recent.recorded_at else 999
+        if (
+            delta_sec < 15
+            and recent.heart_rate == payload.heart_rate
+            and recent.blood_pressure_systolic == payload.blood_pressure_systolic
+            and recent.blood_pressure_diastolic == payload.blood_pressure_diastolic
+            and recent.oxygen_saturation == payload.oxygen_saturation
+            and recent.respiratory_rate == payload.respiratory_rate
+        ):
+            # If notes were provided on the duplicate, update notes
+            if payload.notes and not recent.notes:
+                recent.notes = payload.notes
+                db.commit()
+                db.refresh(recent)
+            return recent
+
+    # 4. Create and persist vitals record
+    vitals = PatientVitals(
+        dispatch_id=dispatch.id,
+        incident_id=dispatch.incident_id,
+        recorded_by_user_id=auth_user.id,
+        heart_rate=payload.heart_rate,
+        blood_pressure_systolic=payload.blood_pressure_systolic,
+        blood_pressure_diastolic=payload.blood_pressure_diastolic,
+        oxygen_saturation=payload.oxygen_saturation,
+        respiratory_rate=payload.respiratory_rate,
+        notes=payload.notes.strip() if payload.notes else None,
+        recorded_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(vitals)
+
+    # 5. Log incident timeline event
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="PATIENT_VITALS_RECORDED",
+        event_title="Patient Vitals Recorded",
+        event_description=(
+            f"Vitals recorded: HR {vitals.heart_rate} bpm, "
+            f"BP {vitals.blood_pressure_display} mmHg, "
+            f"SpO2 {vitals.oxygen_saturation}%, "
+            f"RR {vitals.respiratory_rate}/min."
+            + (f" Notes: {vitals.notes}" if vitals.notes else "")
+        ),
+        actor_type="AMBULANCE_CREW",
+        actor_reference=dispatch.ambulance_call_sign or auth_user.full_name,
+        metadata={
+            "vitals_id": vitals.id,
+            "heart_rate": vitals.heart_rate,
+            "blood_pressure": vitals.blood_pressure_display,
+            "oxygen_saturation": vitals.oxygen_saturation,
+            "respiratory_rate": vitals.respiratory_rate,
+            "notes": vitals.notes,
+        },
+        commit=False,
+    )
+
+    # 6. Update Handover Packet if exists
+    if dispatch.handover_packet:
+        generate_or_update_handover_packet(dispatch, db, commit=False)
+
+    db.commit()
+    db.refresh(vitals)
+
+    # 7. Live WebSocket broadcast
+    broadcast_sync(
+        "PATIENT_VITALS_RECORDED",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "vitals_id": vitals.id,
+            "heart_rate": vitals.heart_rate,
+            "blood_pressure_systolic": vitals.blood_pressure_systolic,
+            "blood_pressure_diastolic": vitals.blood_pressure_diastolic,
+            "blood_pressure_display": vitals.blood_pressure_display,
+            "oxygen_saturation": vitals.oxygen_saturation,
+            "respiratory_rate": vitals.respiratory_rate,
+            "notes": vitals.notes,
+            "recorded_at": vitals.recorded_at.isoformat(),
+        },
+        ambulance_id=dispatch.ambulance_id,
+        hospital_id=dispatch.destination_hospital_id,
+        entity_type="patient_vitals",
+        entity_id=vitals.id,
+    )
+
+    return vitals
+
+
+@router.get("/{dispatch_id}/vitals", response_model=List[VitalsOut])
+def list_patient_vitals(
+    dispatch_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Retrieves all recorded patient vital signs for a dispatch, ordered by newest first.
+    """
+    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_AMBULANCE_CREW and auth_user.ambulance_id and dispatch.ambulance_id != auth_user.ambulance_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Cannot view vitals for another ambulance unit",
+            )
+        if auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Cannot view vitals for another hospital destination",
+            )
+
+    return (
+        db.query(PatientVitals)
+        .filter(PatientVitals.dispatch_id == dispatch_id)
+        .order_by(PatientVitals.recorded_at.desc())
+        .all()
+    )
+
+
+@router.get("/{dispatch_id}/vitals/latest", response_model=Optional[VitalsOut])
+def get_latest_patient_vitals(
+    dispatch_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Retrieves the most recent patient vital signs reading for a dispatch.
+    """
+    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_AMBULANCE_CREW and auth_user.ambulance_id and dispatch.ambulance_id != auth_user.ambulance_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Cannot view vitals for another ambulance unit",
+            )
+        if auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Cannot view vitals for another hospital destination",
+            )
+
+    return (
+        db.query(PatientVitals)
+        .filter(PatientVitals.dispatch_id == dispatch_id)
+        .order_by(PatientVitals.recorded_at.desc())
+        .first()
+    )
 
 @router.get("/{dispatch_id}/handover", response_model=HandoverPacketOut)
 def get_handover_packet(

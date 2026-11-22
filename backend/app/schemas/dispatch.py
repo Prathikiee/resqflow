@@ -1,6 +1,7 @@
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
+from backend.app.schemas.vitals import VitalsOut
 
 class DispatchRequest(BaseModel):
     incident_id: int
@@ -125,6 +126,10 @@ class DispatchOut(BaseModel):
 
     # Emergency Handover Packet
     handover_packet: Optional[HandoverPacketOut] = None
+
+    # Patient Vitals Telemetry
+    vitals: List[VitalsOut] = []
+    latest_vitals: Optional[VitalsOut] = None
 
     # Embedded location coordinates for turn-by-turn navigation
     incident_latitude: Optional[float] = None
