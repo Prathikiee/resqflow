@@ -631,6 +631,32 @@ class HandoverPacket(Base):
     def required_equipment(self, val: List[str]):
         self.required_equipment_json = json.dumps(val or [])
 
+    @property
+    def latest_vitals(self):
+        if self.dispatch and self.dispatch.latest_vitals:
+            return self.dispatch.latest_vitals
+        return None
+
+    @property
+    def vitals(self):
+        if self.dispatch and self.dispatch.vitals:
+            return self.dispatch.vitals
+        return []
+
+    @property
+    def mission_status(self) -> Optional[str]:
+        if self.dispatch:
+            return self.dispatch.status
+        return None
+
+    @property
+    def incident_status(self) -> Optional[str]:
+        if self.incident:
+            return self.incident.status
+        if self.dispatch and self.dispatch.incident:
+            return self.dispatch.incident.status
+        return None
+
 
 class WitnessReport(Base):
     __tablename__ = "witness_reports"

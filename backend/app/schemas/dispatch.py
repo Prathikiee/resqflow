@@ -93,6 +93,12 @@ class HandoverPacketOut(BaseModel):
     estimated_arrival_eta_seconds: Optional[float] = None
     route_distance_meters: Optional[float] = None
 
+    # Pre-hospital Clinical Vitals & Mission Status
+    latest_vitals: Optional[VitalsOut] = None
+    vitals: List[VitalsOut] = []
+    mission_status: Optional[str] = None
+    incident_status: Optional[str] = None
+
     created_at: datetime
     updated_at: datetime
 

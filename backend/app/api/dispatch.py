@@ -1463,7 +1463,7 @@ def advance_dispatch_lifecycle(
                 dispatch.estimated_eta_seconds = h_route["duration_seconds"]
                 dispatch.route_distance_meters = h_route["distance_meters"]
 
-    elif current_status == "EN_ROUTE_HOSPITAL":
+    elif current_status in ["EN_ROUTE_HOSPITAL", "AT_HOSPITAL"]:
         dispatch.status = "COMPLETED"
         dispatch.arrived_hospital_at = now
         dispatch.completed_at = now
@@ -1808,7 +1808,7 @@ def get_handover_packet(
                 detail="Access denied: Clinical SBAR handover packets are strictly confidential and restricted to paramedics, hospital ER staff, and regional dispatchers.",
             )
         elif auth_user.role == ROLE_HOSPITAL_STAFF:
-            if auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+            if not auth_user.hospital_id or dispatch.destination_hospital_id != auth_user.hospital_id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Hospital staff can only view handover packets routed to their own facility")
         elif auth_user.role == ROLE_AMBULANCE_CREW:
             if auth_user.ambulance_id and dispatch.ambulance_id != auth_user.ambulance_id:
@@ -1855,7 +1855,7 @@ def acknowledge_handover_packet(
         if auth_user.role == ROLE_AMBULANCE_CREW:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ambulance crew cannot acknowledge hospital intake handover packets. This action is reserved for hospital ER staff.")
         if auth_user.role == ROLE_HOSPITAL_STAFF:
-            if auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+            if not auth_user.hospital_id or dispatch.destination_hospital_id != auth_user.hospital_id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Hospital staff can only acknowledge handover packets for their own receiving facility")
 
     packet_query = db.query(HandoverPacket).filter(HandoverPacket.dispatch_id == dispatch_id).execution_options(populate_existing=True)
@@ -1946,7 +1946,7 @@ def review_handover_packet(
     if auth_user:
         if auth_user.role == ROLE_CITIZEN:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot review clinical handover packets")
-        if auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+        if auth_user.role == ROLE_HOSPITAL_STAFF and (not auth_user.hospital_id or dispatch.destination_hospital_id != auth_user.hospital_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot review handover for another hospital facility")
 
     packet = dispatch.handover_packet
@@ -2004,7 +2004,7 @@ def complete_handover_packet(
     if auth_user:
         if auth_user.role == ROLE_CITIZEN:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot complete clinical handover")
-        if auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+        if auth_user.role == ROLE_HOSPITAL_STAFF and (not auth_user.hospital_id or dispatch.destination_hospital_id != auth_user.hospital_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot complete handover for another hospital facility")
 
     packet = dispatch.handover_packet
@@ -2137,12 +2137,24 @@ def confirm_patient_arrival_at_hospital(
 
     now = get_utc_now()
     dispatch.patient_arrived_hospital_confirmed_at = now
-    if dispatch.status in ["ASSIGNED", "EN_ROUTE", "ON_SCENE", "TRANSPORTING"]:
+    if not dispatch.arrived_hospital_at:
+        dispatch.arrived_hospital_at = now
+
+    if dispatch.status in ["ASSIGNED", "EN_ROUTE", "EN_ROUTE_INCIDENT", "ON_SCENE", "TRANSPORTING", "EN_ROUTE_HOSPITAL"]:
         dispatch.status = "AT_HOSPITAL"
 
     incident = db.query(Incident).filter(Incident.id == dispatch.incident_id).first()
     if incident and incident.status in ["REPORTED", "TRIAGED", "ALLOCATED", "DISPATCHED", "EN_ROUTE", "ON_SCENE", "TRANSPORTING"]:
         incident.status = "AT_HOSPITAL"
+
+    # Synchronize bed reservation
+    if dispatch.destination_hospital_id:
+        hosp_query = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id)
+        if is_postgres(db):
+            hosp_query = hosp_query.with_for_update()
+        hospital = hosp_query.first()
+        if hospital and (hospital.reserved_emergency_beds or 0) > 0:
+            hospital.reserved_emergency_beds = max(0, hospital.reserved_emergency_beds - 1)
 
     db.commit()
     db.refresh(dispatch)

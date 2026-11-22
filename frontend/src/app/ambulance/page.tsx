@@ -100,6 +100,7 @@ const NEXT_LIFECYCLE_ACTION: Record<string, { nextStatus: string; label: string;
   EN_ROUTE_INCIDENT: { nextStatus: "ON_SCENE", label: "Confirm Arrived on Scene with Patient", icon: MapPin },
   ON_SCENE: { nextStatus: "EN_ROUTE_HOSPITAL", label: "Patient Onboard • Departing Scene towards Hospital ER", icon: Building2 },
   EN_ROUTE_HOSPITAL: { nextStatus: "COMPLETED", label: "Confirm Arrived at ER & Safe Handover", icon: CheckCircle2 },
+  AT_HOSPITAL: { nextStatus: "COMPLETED", label: "Complete ER Handover & Mark Unit Available", icon: CheckCircle2 },
 };
 
 export default function AmbulancePortalPage() {
@@ -1069,7 +1070,7 @@ export default function AmbulancePortalPage() {
                     {/* Progress Track */}
                     <div className="grid grid-cols-4 gap-2 text-center text-xs">
                       {(() => {
-                        const LIFECYCLE_ORDER = ["ASSIGNED", "EN_ROUTE_INCIDENT", "ON_SCENE", "EN_ROUTE_HOSPITAL", "COMPLETED"];
+                        const LIFECYCLE_ORDER = ["ASSIGNED", "EN_ROUTE_INCIDENT", "ON_SCENE", "EN_ROUTE_HOSPITAL", "AT_HOSPITAL", "COMPLETED"];
                         const currentIdx = LIFECYCLE_ORDER.indexOf(activeMission.status);
                         return [
                           { id: "ASSIGNED", label: "1. Assigned" },

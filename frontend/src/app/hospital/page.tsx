@@ -13,12 +13,16 @@ import {
   Check,
   CheckCircle2,
   CheckSquare,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Clock,
+  Droplet,
   Eye,
   FileText,
   Filter,
   Flame,
+  Heart,
   HeartPulse,
   History,
   LayoutDashboard,
@@ -113,6 +117,22 @@ interface CrashAlertRecord {
   created_at: string;
 }
 
+interface VitalsRecord {
+  id: number;
+  dispatch_id: number;
+  incident_id: number;
+  recorded_by_user_id?: number;
+  heart_rate: number;
+  blood_pressure_systolic: number;
+  blood_pressure_diastolic: number;
+  oxygen_saturation: number;
+  respiratory_rate: number;
+  notes?: string | null;
+  blood_pressure_display?: string;
+  recorded_at: string;
+  created_at?: string;
+}
+
 interface DispatchRecord {
   id: number;
   incident_id: number;
@@ -155,6 +175,8 @@ interface DispatchRecord {
     required_ambulance_type?: string;
   };
   handover_packet?: any;
+  vitals?: VitalsRecord[];
+  latest_vitals?: VitalsRecord;
 }
 
 export default function HospitalPortalPage() {
@@ -177,6 +199,7 @@ export default function HospitalPortalPage() {
   // Modals & Selected items state
   const [selectedIncidentModal, setSelectedIncidentModal] = useState<DispatchRecord | null>(null);
   const [activeHandoverModal, setActiveHandoverModal] = useState<any | null>(null);
+  const [showModalVitalsHistory, setShowModalVitalsHistory] = useState(false);
   const [handoverClinicianName, setHandoverClinicianName] = useState("");
   const [handoverNotesInput, setHandoverNotesInput] = useState("");
   const [rejectModalDispatch, setRejectModalDispatch] = useState<DispatchRecord | null>(null);
@@ -345,9 +368,11 @@ export default function HospitalPortalPage() {
             "HOSPITAL_PROFILE_UPDATED",
             "PREPARATION_UPDATED",
             "PATIENT_ARRIVED_AT_HOSPITAL",
+            "PATIENT_ARRIVED_HOSPITAL",
             "HANDOVER_ACKNOWLEDGED",
             "HANDOVER_REVIEWED",
             "HANDOVER_COMPLETED",
+            "PATIENT_VITALS_RECORDED",
             "AMBULANCE_CRASH_DETECTED",
             "DISPATCH_CREATED",
           ];
@@ -576,6 +601,7 @@ export default function HospitalPortalPage() {
 
   // 4. SBAR Handover Lifecycle Handlers (Review, Acknowledge, Complete)
   const handleOpenHandover = async (dispatchId: number) => {
+    setShowModalVitalsHistory(false);
     const token = localStorage.getItem("lifelink_token");
     try {
       const resp = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/handover`, {
@@ -589,6 +615,7 @@ export default function HospitalPortalPage() {
         const disp = dispatches.find((d) => d.id === dispatchId);
         setActiveHandoverModal({
           dispatch_id: dispatchId,
+          incident_id: disp?.incident_id,
           status: "NOT_RECEIVED",
           ambulance_call_sign: disp?.ambulance_call_sign || "Unit",
           chief_complaint: disp?.incident?.chief_complaint || "Emergency medical condition",
@@ -597,6 +624,10 @@ export default function HospitalPortalPage() {
           patient_age: disp?.incident?.patient_age,
           patient_gender: disp?.incident?.patient_gender,
           incident_address: disp?.incident?.location_address,
+          latest_vitals: disp?.latest_vitals,
+          vitals: disp?.vitals || [],
+          mission_status: disp?.status,
+          incident_status: disp?.incident?.status,
         });
       }
     } catch (_) {}
@@ -1706,6 +1737,51 @@ export default function HospitalPortalPage() {
                           </div>
                         </div>
 
+                        {/* Live Vitals Telemetry Chip Bar (Phase 2 Handover Integration) */}
+                        {disp.latest_vitals && (
+                          <div className="bg-rose-50/60 border border-rose-200/90 rounded-lg p-3 space-y-2">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="font-bold text-rose-950 flex items-center gap-1.5">
+                                <Activity className="w-3.5 h-3.5 text-rose-600" />
+                                <span>In-Transit Patient Vitals (Field Telemetry)</span>
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-mono">
+                                Recorded at {new Date(disp.latest_vitals.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                              <div className="bg-white p-2 rounded border border-rose-100">
+                                <span className="text-[10px] font-medium text-slate-500 block">Heart Rate</span>
+                                <span className="font-mono font-black text-rose-950 text-base">{disp.latest_vitals.heart_rate}</span>
+                                <span className="text-[10px] text-rose-600 block">bpm</span>
+                              </div>
+                              <div className="bg-white p-2 rounded border border-indigo-100">
+                                <span className="text-[10px] font-medium text-slate-500 block">Blood Pressure</span>
+                                <span className="font-mono font-black text-indigo-950 text-base">{disp.latest_vitals.blood_pressure_systolic}/{disp.latest_vitals.blood_pressure_diastolic}</span>
+                                <span className="text-[10px] text-indigo-600 block">mmHg</span>
+                              </div>
+                              <div className="bg-white p-2 rounded border border-sky-100">
+                                <span className="text-[10px] font-medium text-slate-500 block">Oxygen (SpO2)</span>
+                                <span className="font-mono font-black text-sky-950 text-base">{disp.latest_vitals.oxygen_saturation}%</span>
+                                <span className="text-[10px] text-sky-600 block">sat</span>
+                              </div>
+                              <div className="bg-white p-2 rounded border border-emerald-100">
+                                <span className="text-[10px] font-medium text-slate-500 block">Resp. Rate</span>
+                                <span className="font-mono font-black text-emerald-950 text-base">{disp.latest_vitals.respiratory_rate}</span>
+                                <span className="text-[10px] text-emerald-600 block">/min</span>
+                              </div>
+                            </div>
+
+                            {disp.latest_vitals.notes && (
+                              <p className="text-[11px] text-slate-700 bg-white/90 p-2 rounded border border-rose-100">
+                                <span className="font-bold text-slate-900">Paramedic Notes: </span>
+                                {disp.latest_vitals.notes}
+                              </p>
+                            )}
+                          </div>
+                        )}
+
                         {/* Working Actions Bar */}
                         <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-100">
                           <div className="flex items-center gap-2">
@@ -2767,18 +2843,168 @@ export default function HospitalPortalPage() {
             </div>
 
             <div className="p-5 overflow-y-auto space-y-4 text-xs">
-              {/* Handover State Indicator */}
-              <div className="flex items-center justify-between p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-blue-900">Workflow State:</span>
-                  <span className="font-mono font-bold text-blue-700 uppercase">
-                    {activeHandoverModal.status || "SENT"}
-                  </span>
+              {/* Handover State & Mission Context Indicators */}
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-blue-900">Handover State:</span>
+                    <span className="font-mono font-bold text-blue-700 uppercase">
+                      {activeHandoverModal.status || "SENT"}
+                    </span>
+                  </div>
+                  {activeHandoverModal.acknowledged_at && (
+                    <span className="text-[11px] text-blue-800 font-medium">
+                      Ack: {new Date(activeHandoverModal.acknowledged_at).toLocaleTimeString()}
+                    </span>
+                  )}
                 </div>
-                {activeHandoverModal.acknowledged_at && (
-                  <span className="text-[11px] text-blue-800">
-                    Ack: {new Date(activeHandoverModal.acknowledged_at).toLocaleTimeString()}
+
+                {/* Identification & Status Chips */}
+                <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-blue-200/60 text-[11px]">
+                  <span className="px-2 py-0.5 rounded bg-white text-slate-700 border border-blue-200 font-mono font-semibold">
+                    Incident #{activeHandoverModal.incident_id}
                   </span>
+                  <span className="px-2 py-0.5 rounded bg-white text-slate-700 border border-blue-200 font-mono font-semibold">
+                    Dispatch #{activeHandoverModal.dispatch_id}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-white text-blue-700 border border-blue-200 font-bold">
+                    Unit: {activeHandoverModal.ambulance_call_sign || "ALS Unit"}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-900 font-bold uppercase">
+                    Mission: {activeHandoverModal.mission_status || "EN_ROUTE_HOSPITAL"}
+                  </span>
+                  {activeHandoverModal.incident_status && (
+                    <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-medium uppercase">
+                      Incident: {activeHandoverModal.incident_status}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* PRE-HOSPITAL CLINICAL VITALS TELEMETRY SECTION */}
+              <div className="p-3.5 bg-rose-50/50 border border-rose-200 rounded-lg space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded bg-rose-100 text-rose-700 flex items-center justify-center">
+                      <Activity className="w-3.5 h-3.5" />
+                    </div>
+                    <h4 className="font-bold text-slate-900 text-xs">Pre-Hospital Patient Vitals Telemetry</h4>
+                  </div>
+
+                  {activeHandoverModal.vitals && activeHandoverModal.vitals.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowModalVitalsHistory(!showModalVitalsHistory)}
+                      className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                    >
+                      <span>{showModalVitalsHistory ? "Hide Vitals Log" : `View All (${activeHandoverModal.vitals.length})`}</span>
+                      {showModalVitalsHistory ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                    </button>
+                  )}
+                </div>
+
+                {activeHandoverModal.latest_vitals ? (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                      {/* HR */}
+                      <div className="bg-white p-2 rounded-lg border border-rose-200">
+                        <div className="flex items-center justify-center gap-1 text-rose-700 text-[10px] font-bold">
+                          <Heart className="w-3 h-3" />
+                          <span>Heart Rate</span>
+                        </div>
+                        <span className="font-mono font-black text-rose-950 text-base block mt-0.5">
+                          {activeHandoverModal.latest_vitals.heart_rate}
+                        </span>
+                        <span className="text-[10px] text-rose-600 font-medium">bpm</span>
+                      </div>
+
+                      {/* BP */}
+                      <div className="bg-white p-2 rounded-lg border border-indigo-200">
+                        <div className="flex items-center justify-center gap-1 text-indigo-700 text-[10px] font-bold">
+                          <Droplet className="w-3 h-3" />
+                          <span>Blood Pressure</span>
+                        </div>
+                        <span className="font-mono font-black text-indigo-950 text-base block mt-0.5">
+                          {activeHandoverModal.latest_vitals.blood_pressure_systolic}/{activeHandoverModal.latest_vitals.blood_pressure_diastolic}
+                        </span>
+                        <span className="text-[10px] text-indigo-600 font-medium">mmHg</span>
+                      </div>
+
+                      {/* SpO2 */}
+                      <div className="bg-white p-2 rounded-lg border border-sky-200">
+                        <div className="flex items-center justify-center gap-1 text-sky-700 text-[10px] font-bold">
+                          <Wind className="w-3 h-3" />
+                          <span>Oxygen (SpO2)</span>
+                        </div>
+                        <span className="font-mono font-black text-sky-950 text-base block mt-0.5">
+                          {activeHandoverModal.latest_vitals.oxygen_saturation}%
+                        </span>
+                        <span className="text-[10px] text-sky-600 font-medium">sat</span>
+                      </div>
+
+                      {/* RR */}
+                      <div className="bg-white p-2 rounded-lg border border-emerald-200">
+                        <div className="flex items-center justify-center gap-1 text-emerald-700 text-[10px] font-bold">
+                          <Activity className="w-3 h-3" />
+                          <span>Resp. Rate</span>
+                        </div>
+                        <span className="font-mono font-black text-emerald-950 text-base block mt-0.5">
+                          {activeHandoverModal.latest_vitals.respiratory_rate}
+                        </span>
+                        <span className="text-[10px] text-emerald-600 font-medium">/min</span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between text-[11px] text-slate-500 pt-1">
+                      <span>Recorded at: <strong>{new Date(activeHandoverModal.latest_vitals.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</strong></span>
+                      {activeHandoverModal.latest_vitals.notes && (
+                        <span className="italic text-slate-700 bg-white/80 px-2 py-0.5 rounded border border-rose-100">
+                          &ldquo;{activeHandoverModal.latest_vitals.notes}&rdquo;
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Expandable Vitals Timeline */}
+                    {showModalVitalsHistory && activeHandoverModal.vitals && activeHandoverModal.vitals.length > 1 && (
+                      <div className="border border-slate-200 rounded-lg overflow-hidden bg-white mt-2">
+                        <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 font-bold text-[10px] text-slate-600 uppercase">
+                          Pre-Hospital Vitals History ({activeHandoverModal.vitals.length} records)
+                        </div>
+                        <div className="overflow-x-auto max-h-36">
+                          <table className="w-full text-left text-xs">
+                            <thead className="bg-slate-50 text-[10px] text-slate-500 font-mono uppercase border-b border-slate-200">
+                              <tr>
+                                <th className="py-1.5 px-2">Time</th>
+                                <th className="py-1.5 px-2">HR</th>
+                                <th className="py-1.5 px-2">BP</th>
+                                <th className="py-1.5 px-2">SpO2</th>
+                                <th className="py-1.5 px-2">RR</th>
+                                <th className="py-1.5 px-2">Notes</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {activeHandoverModal.vitals.map((v: VitalsRecord) => (
+                                <tr key={v.id} className="hover:bg-slate-50">
+                                  <td className="py-1 px-2 font-mono text-[11px] text-slate-600">
+                                    {new Date(v.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                  </td>
+                                  <td className="py-1 px-2 font-mono font-bold text-rose-700">{v.heart_rate}</td>
+                                  <td className="py-1 px-2 font-mono font-semibold text-indigo-700">{v.blood_pressure_systolic}/{v.blood_pressure_diastolic}</td>
+                                  <td className="py-1 px-2 font-mono font-semibold text-sky-700">{v.oxygen_saturation}%</td>
+                                  <td className="py-1 px-2 font-mono text-emerald-700">{v.respiratory_rate}</td>
+                                  <td className="py-1 px-2 text-slate-600 truncate max-w-xs">{v.notes || "—"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="p-3 bg-white rounded-lg border border-dashed border-rose-200 text-center text-slate-500 text-xs">
+                    Ambulance crew has not yet recorded field vitals telemetry. Live readings will appear here once saved.
+                  </div>
                 )}
               </div>
 
@@ -2874,6 +3100,29 @@ export default function HospitalPortalPage() {
               </button>
 
               <div className="flex items-center gap-2">
+                {(() => {
+                  const disp = dispatches.find((d) => d.id === activeHandoverModal.dispatch_id);
+                  const isArrived = disp?.status === "AT_HOSPITAL" || !!disp?.patient_arrived_hospital_confirmed_at;
+                  return (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await handleConfirmArrival(activeHandoverModal.dispatch_id);
+                        await handleOpenHandover(activeHandoverModal.dispatch_id);
+                      }}
+                      disabled={actionLoading || isArrived}
+                      className={`px-3 py-2 rounded-lg text-xs font-bold shadow-xs flex items-center gap-1.5 transition ${
+                        isArrived
+                          ? "bg-emerald-50 text-emerald-800 border border-emerald-300 cursor-default"
+                          : "bg-emerald-600 hover:bg-emerald-700 text-white"
+                      }`}
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>{isArrived ? "Arrival Confirmed ✓" : "Confirm ER Arrival"}</span>
+                    </button>
+                  );
+                })()}
+
                 <button
                   type="button"
                   onClick={() => handleReviewHandover(activeHandoverModal.dispatch_id)}
@@ -2894,7 +3143,7 @@ export default function HospitalPortalPage() {
                   type="button"
                   onClick={() => handleCompleteHandover(activeHandoverModal.dispatch_id)}
                   disabled={actionLoading}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-sm"
+                  className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-lg shadow-sm"
                 >
                   Sign Off & Complete
                 </button>
