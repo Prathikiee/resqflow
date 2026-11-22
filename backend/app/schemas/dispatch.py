@@ -146,6 +146,9 @@ class DispatchOut(BaseModel):
     destination_hospital_latitude: Optional[float] = None
     destination_hospital_longitude: Optional[float] = None
     ambulance_call_sign: Optional[str] = None
+    ambulance_vehicle_type: Optional[str] = None
+    ambulance_current_latitude: Optional[float] = None
+    ambulance_current_longitude: Optional[float] = None
 
     dispatched_at: datetime
     arrived_incident_at: Optional[datetime] = None

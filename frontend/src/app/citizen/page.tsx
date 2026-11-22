@@ -17,17 +17,20 @@ import {
   Clock,
   Crosshair,
   Flame,
+  HeartPulse,
   HelpCircle,
   LogOut,
   MapPin,
   MessageSquare,
   Mic,
   MicOff,
+  Navigation,
   PhoneCall,
   Radio,
   RefreshCw,
   Send,
   ShieldAlert,
+  ShieldCheck,
   Volume2,
   X,
 } from "lucide-react";
@@ -53,12 +56,16 @@ interface DispatchRecord {
   incident_id: number;
   ambulance_id: number;
   ambulance_call_sign: string;
+  ambulance_vehicle_type?: string;
+  ambulance_current_latitude?: number;
+  ambulance_current_longitude?: number;
   destination_hospital_name: string;
   destination_hospital_id: number;
   destination_hospital_address?: string;
   coordination_status: string;
   ambulance_confirmation_status: string;
   hospital_confirmation_status: string;
+  patient_arrived_hospital_confirmed_at?: string;
   status: string;
   attempt_number: number;
   reservation_expires_at?: string;
@@ -141,7 +148,18 @@ export default function CitizenPortalPage() {
   const [flagChestPain, setFlagChestPain] = useState(false);
 
   const isSubmittingRef = useRef(false);
+  const activeIncidentRef = useRef<IncidentRecord | null>(null);
+  const activeDispatchRef = useRef<DispatchRecord | null>(null);
+  const [isRefreshingTracking, setIsRefreshingTracking] = useState(false);
   const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  useEffect(() => {
+    activeIncidentRef.current = activeIncident;
+  }, [activeIncident]);
+
+  useEffect(() => {
+    activeDispatchRef.current = activeDispatch;
+  }, [activeDispatch]);
 
   // Check whether current location is considered valid and confirmed
   const isLocationReady = Boolean(
@@ -187,12 +205,14 @@ export default function CitizenPortalPage() {
   }, []);
 
   // Fetch active incident or verify user session
-  const fetchActiveIncident = useCallback(async () => {
+  const fetchActiveIncident = useCallback(async (isManualRefresh = false) => {
     const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
     if (!token) {
       router.push("/login");
       return;
     }
+
+    if (isManualRefresh) setIsRefreshingTracking(true);
 
     try {
       const meResp = await fetch(`${backendUrl}/api/auth/me`, {
@@ -203,26 +223,49 @@ export default function CitizenPortalPage() {
       setUser(meData);
 
       const savedIncId = localStorage.getItem("lifelink_active_incident_id");
+      let foundActive = false;
+
       if (savedIncId) {
         const incResp = await fetch(`${backendUrl}/api/incidents/${savedIncId}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (incResp.ok) {
           const incData = await incResp.json();
-          if (incData.status !== "RESOLVED" && incData.status !== "CANCELLED") {
-            setActiveIncident(incData);
+          setActiveIncident(incData);
+          foundActive = true;
 
-            const dispResp = await fetch(`${backendUrl}/api/dispatch?incident_id=${savedIncId}`, {
+          const dispResp = await fetch(`${backendUrl}/api/dispatch?incident_id=${savedIncId}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (dispResp.ok) {
+            const disps = await dispResp.json();
+            if (disps.length > 0) {
+              setActiveDispatch(disps[0]);
+            }
+          }
+        }
+      }
+
+      // If no active incident found in local storage, query user's personal reported incidents
+      if (!foundActive) {
+        const listResp = await fetch(`${backendUrl}/api/incidents`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (listResp.ok) {
+          const incidents = await listResp.json();
+          const active = incidents.find(
+            (inc: any) => inc.status !== "RESOLVED" && inc.status !== "CANCELLED" && inc.status !== "CLOSED"
+          );
+          if (active) {
+            setActiveIncident(active);
+            localStorage.setItem("lifelink_active_incident_id", String(active.id));
+            const dispResp = await fetch(`${backendUrl}/api/dispatch?incident_id=${active.id}`, {
               headers: { Authorization: `Bearer ${token}` },
             });
             if (dispResp.ok) {
               const disps = await dispResp.json();
-              if (disps.length > 0) {
-                setActiveDispatch(disps[0]);
-              }
+              if (disps.length > 0) setActiveDispatch(disps[0]);
             }
-          } else {
-            localStorage.removeItem("lifelink_active_incident_id");
           }
         }
       }
@@ -230,6 +273,7 @@ export default function CitizenPortalPage() {
       setErrorMessage(err.message || "Failed to connect to backend");
     } finally {
       setIsLoading(false);
+      if (isManualRefresh) setIsRefreshingTracking(false);
     }
   }, [backendUrl, router]);
 
@@ -262,17 +306,26 @@ export default function CitizenPortalPage() {
           const payload = msg.payload || msg.data;
           if (!payload) return;
 
-          if (eventType === "INCIDENT_STATUS_UPDATED" && activeIncident && payload.incident_id === activeIncident.id) {
+          const curInc = activeIncidentRef.current;
+          const curDisp = activeDispatchRef.current;
+
+          // 1. Incident status updates
+          if (
+            (eventType === "INCIDENT_STATUS_UPDATED" || eventType === "INCIDENT_CREATED") &&
+            curInc &&
+            payload.incident_id === curInc.id
+          ) {
             setActiveIncident((prev: any) => (prev ? { ...prev, status: payload.status } : prev));
           }
 
+          // 2. Dispatch creation & provisional reservation
           if (
             (eventType === "DISPATCH_PROVISIONAL_RESERVATION" ||
               eventType === "DISPATCH_CONFIRMATION_UPDATED" ||
               eventType === "DISPATCH_CONFIRMED" ||
               eventType === "DISPATCH_CREATED") &&
-            activeIncident &&
-            payload.incident_id === activeIncident.id
+            curInc &&
+            payload.incident_id === curInc.id
           ) {
             setActiveDispatch((prev: any) => {
               if (!prev) {
@@ -281,50 +334,105 @@ export default function CitizenPortalPage() {
                   incident_id: payload.incident_id,
                   ambulance_id: payload.ambulance_id,
                   ambulance_call_sign: payload.ambulance_call_sign || "Assigned Ambulance",
-                  destination_hospital_name: payload.hospital_name || "Assigned Emergency Dept",
+                  ambulance_vehicle_type: payload.ambulance_vehicle_type || "BLS",
+                  ambulance_current_latitude: payload.ambulance_current_latitude,
+                  ambulance_current_longitude: payload.ambulance_current_longitude,
+                  destination_hospital_name: payload.destination_hospital_name || payload.hospital_name || "Assigned Emergency Dept",
                   destination_hospital_id: payload.destination_hospital_id,
+                  destination_hospital_address: payload.destination_hospital_address,
                   coordination_status: payload.coordination_status || "PENDING_CONFIRMATIONS",
-                  ambulance_confirmation_status: payload.ambulance_confirmation_status || "PENDING",
-                  hospital_confirmation_status: payload.hospital_confirmation_status || "PENDING",
+                  ambulance_confirmation_status: payload.ambulance_confirmation_status || payload.ambulance_confirmation || "PENDING",
+                  hospital_confirmation_status: payload.hospital_confirmation_status || payload.hospital_confirmation || "PENDING",
                   status: payload.status || "ASSIGNED",
                   attempt_number: payload.attempt_number || 1,
                   estimated_eta_seconds: payload.estimated_eta_seconds,
+                  route_distance_meters: payload.route_distance_meters,
                 };
               }
               return {
                 ...prev,
+                ambulance_call_sign: payload.ambulance_call_sign || prev.ambulance_call_sign,
+                ambulance_vehicle_type: payload.ambulance_vehicle_type || prev.ambulance_vehicle_type,
+                destination_hospital_name: payload.destination_hospital_name || payload.hospital_name || prev.destination_hospital_name,
+                destination_hospital_address: payload.destination_hospital_address || prev.destination_hospital_address,
                 coordination_status: payload.coordination_status || prev.coordination_status,
-                ambulance_confirmation_status: payload.ambulance_confirmation_status || prev.ambulance_confirmation_status,
-                hospital_confirmation_status: payload.hospital_confirmation_status || prev.hospital_confirmation_status,
+                ambulance_confirmation_status: payload.ambulance_confirmation_status || payload.ambulance_confirmation || prev.ambulance_confirmation_status,
+                hospital_confirmation_status: payload.hospital_confirmation_status || payload.hospital_confirmation || prev.hospital_confirmation_status,
                 status: payload.status || prev.status,
                 estimated_eta_seconds: payload.estimated_eta_seconds ?? prev.estimated_eta_seconds,
+                route_distance_meters: payload.route_distance_meters ?? prev.route_distance_meters,
+                ambulance_current_latitude: payload.ambulance_current_latitude ?? prev.ambulance_current_latitude,
+                ambulance_current_longitude: payload.ambulance_current_longitude ?? prev.ambulance_current_longitude,
               };
             });
           }
 
+          // 3. Dispatch lifecycle progression
           if (
             (eventType === "DISPATCH_STEPPED" || eventType === "DISPATCH_LIFECYCLE_STEPPED") &&
-            activeIncident &&
-            payload.incident_id === activeIncident.id
+            curInc &&
+            payload.incident_id === curInc.id
           ) {
             setActiveDispatch((prev: any) =>
-              prev ? { ...prev, status: payload.status, estimated_eta_seconds: payload.estimated_eta_seconds } : prev
+              prev
+                ? {
+                    ...prev,
+                    status: payload.status,
+                    estimated_eta_seconds: payload.estimated_eta_seconds ?? prev.estimated_eta_seconds,
+                  }
+                : prev
+            );
+            if (payload.incident_status) {
+              setActiveIncident((prev: any) => (prev ? { ...prev, status: payload.incident_status } : prev));
+            }
+          }
+
+          // 4. Hospital arrival confirmed
+          if (
+            eventType === "PATIENT_ARRIVED_HOSPITAL" &&
+            curInc &&
+            payload.incident_id === curInc.id
+          ) {
+            setActiveDispatch((prev: any) =>
+              prev
+                ? {
+                    ...prev,
+                    status: "AT_HOSPITAL",
+                    patient_arrived_hospital_confirmed_at: payload.patient_arrived_hospital_confirmed_at,
+                  }
+                : prev
+            );
+            setActiveIncident((prev: any) => (prev ? { ...prev, status: "AT_HOSPITAL" } : prev));
+          }
+
+          // 5. Ambulance status and real-time GPS telemetry
+          if (
+            eventType === "AMBULANCE_STATUS_UPDATED" &&
+            curDisp &&
+            payload.ambulance_id === curDisp.ambulance_id
+          ) {
+            setActiveDispatch((prev: any) =>
+              prev
+                ? {
+                    ...prev,
+                    ambulance_current_latitude: payload.current_latitude ?? prev.ambulance_current_latitude,
+                    ambulance_current_longitude: payload.current_longitude ?? prev.ambulance_current_longitude,
+                  }
+                : prev
             );
           }
 
-          if (eventType === "INCIDENT_RESOLVED" && activeIncident && payload.incident_id === activeIncident.id) {
+          // 6. Terminal incident statuses
+          if (eventType === "INCIDENT_RESOLVED" && curInc && payload.incident_id === curInc.id) {
             setActiveIncident((prev: any) => (prev ? { ...prev, status: "RESOLVED" } : prev));
-            localStorage.removeItem("lifelink_active_incident_id");
           }
 
-          if (eventType === "INCIDENT_CANCELLED" && activeIncident && payload.incident_id === activeIncident.id) {
+          if (eventType === "INCIDENT_CANCELLED" && curInc && payload.incident_id === curInc.id) {
             setActiveIncident((prev: any) => (prev ? { ...prev, status: "CANCELLED" } : prev));
-            localStorage.removeItem("lifelink_active_incident_id");
           }
 
-          if (eventType === "INCIDENT_CLOSED" && activeIncident && payload.incident_id === activeIncident.id) {
+          if (eventType === "INCIDENT_CLOSED" && curInc && payload.incident_id === curInc.id) {
             setActiveIncident((prev: any) => (prev ? { ...prev, status: "CLOSED" } : prev));
-            localStorage.removeItem("lifelink_active_incident_id");
           }
         } catch (_) {}
       };
@@ -338,7 +446,7 @@ export default function CitizenPortalPage() {
       isCleanedUp = true;
       if (ws) ws.close();
     };
-  }, [backendUrl, activeIncident]);
+  }, [backendUrl]);
 
   // Speech Recognition Setup
   const stopListening = useCallback(() => {
@@ -652,15 +760,79 @@ export default function CitizenPortalPage() {
     );
   }
 
+  // Emergency Category Detector
+  const getEmergencyCategory = (complaint?: string, triageLevel?: string) => {
+    const text = (complaint || "").toLowerCase();
+    if (/cardiac|chest pain|heart|angina/.test(text)) return "Cardiac Emergency";
+    if (/accident|crash|collision|trauma|fall|fracture/.test(text)) return "Road Trauma / Accident";
+    if (/breath|respiratory|asthma|chok/.test(text)) return "Respiratory Distress";
+    if (/fire|burn|flame|smoke/.test(text)) return "Fire & Rescue";
+    if (/bleed|hemorrhage/.test(text)) return "Severe Hemorrhage";
+    if (/stroke|paralysis/.test(text)) return "Neurological / Stroke";
+    if (triageLevel) return `Triage ${triageLevel} Priority`;
+    return "Medical Emergency";
+  };
+
   // Calculate timeline stage (1 to 5)
   const getTimelineStage = () => {
     if (!activeIncident) return 1;
-    if (activeIncident.status === "RESOLVED") return 5;
-    if (!activeDispatch) return 2;
+    if (activeIncident.status === "RESOLVED" || activeIncident.status === "CLOSED") return 5;
+    if (activeIncident.status === "AT_HOSPITAL") return 5;
+    if (!activeDispatch) {
+      if (activeIncident.status === "TRIAGED" || activeIncident.status === "ALLOCATED") return 2;
+      return 1;
+    }
     if (activeDispatch.status === "COMPLETED" || activeDispatch.status === "AT_HOSPITAL") return 5;
-    if (activeDispatch.status === "ON_SCENE" || activeDispatch.status === "EN_ROUTE_HOSPITAL") return 4;
-    if (activeDispatch.status === "EN_ROUTE_INCIDENT" || activeDispatch.coordination_status === "CONFIRMED") return 3;
+    if (
+      activeDispatch.status === "ON_SCENE" ||
+      activeDispatch.status === "EN_ROUTE_HOSPITAL" ||
+      activeIncident.status === "ON_SCENE" ||
+      activeIncident.status === "TRANSPORTING"
+    )
+      return 4;
+    if (
+      activeDispatch.status === "EN_ROUTE_INCIDENT" ||
+      activeDispatch.coordination_status === "CONFIRMED" ||
+      activeIncident.status === "EN_ROUTE"
+    )
+      return 3;
+    if (activeDispatch.status === "ASSIGNED" || activeIncident.status === "DISPATCHED") return 2;
     return 2;
+  };
+
+  // Contextual stage description for citizen
+  const getStageDescription = () => {
+    const stage = getTimelineStage();
+    if (activeIncident?.status === "CANCELLED") {
+      return "This emergency incident was cancelled. Dispatched ambulance and hospital bed reservations have been returned to active service.";
+    }
+    if (
+      activeIncident?.status === "RESOLVED" ||
+      activeIncident?.status === "CLOSED" ||
+      activeDispatch?.status === "COMPLETED"
+    ) {
+      return "Emergency mission complete. Patient has been safely transferred to emergency department clinical care.";
+    }
+    switch (stage) {
+      case 1:
+        return "Your emergency SOS has been received and verified by the regional dispatch system. Clinical triage completed.";
+      case 2:
+        return activeDispatch?.ambulance_call_sign
+          ? `Unit ${activeDispatch.ambulance_call_sign} provisionally allocated. Awaiting crew response and hospital ER bed reservation.`
+          : "Regional emergency control is allocating the nearest available paramedic unit and receiving emergency department.";
+      case 3:
+        return activeDispatch?.ambulance_call_sign
+          ? `Ambulance ${activeDispatch.ambulance_call_sign} has confirmed dispatch and is en route to your location. Keep phone line open.`
+          : "Emergency crew has accepted the mission and is actively en route.";
+      case 4:
+        return activeDispatch?.status === "EN_ROUTE_HOSPITAL" || activeIncident?.status === "TRANSPORTING"
+          ? "Paramedics have stabilized the patient on scene and are actively transporting to the receiving trauma department."
+          : "Paramedic crew has arrived on scene and is evaluating and stabilizing the patient.";
+      case 5:
+        return "Ambulance has arrived at the emergency department. Clinical handover to hospital trauma bay is in progress.";
+      default:
+        return "Emergency services are actively responding to your emergency.";
+    }
   };
 
   const currentStage = getTimelineStage();
@@ -752,27 +924,97 @@ export default function CitizenPortalPage() {
         {activeIncident ? (
           <div className="space-y-6 py-2">
             {/* Status Banner */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 text-center space-y-2 shadow-xs">
-              <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-red-50 border border-red-200 text-red-700 text-xs font-bold tracking-wide">
-                <Radio className="w-3.5 h-3.5 animate-pulse text-red-600" />
-                <span>EMERGENCY DISPATCH IN PROGRESS</span>
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 text-center space-y-3 shadow-xs">
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                {/* WebSocket Pulse Badge */}
+                <span
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold tracking-wide border ${
+                    wsConnected
+                      ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+                      : "bg-amber-50 border-amber-200 text-amber-700"
+                  }`}
+                >
+                  <Radio className={`w-3.5 h-3.5 ${wsConnected ? "animate-pulse text-emerald-600" : "text-amber-600"}`} />
+                  <span>{wsConnected ? "Live Tracking Active" : "Corridor Syncing..."}</span>
+                </span>
+
+                {/* Emergency Category Badge */}
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-50 border border-red-200 text-red-700 text-xs font-bold tracking-wide">
+                  <Activity className="w-3.5 h-3.5 text-red-600" />
+                  <span>{getEmergencyCategory(activeIncident.chief_complaint, activeIncident.triage_level)}</span>
+                </span>
+
+                {/* Triage Priority Badge */}
+                {activeIncident.triage_level && (
+                  <span
+                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold tracking-wide border ${
+                      activeIncident.triage_color === "RED"
+                        ? "bg-red-50 border-red-300 text-red-800"
+                        : activeIncident.triage_color === "YELLOW"
+                        ? "bg-amber-50 border-amber-300 text-amber-800"
+                        : "bg-emerald-50 border-emerald-300 text-emerald-800"
+                    }`}
+                  >
+                    <span className="w-2 h-2 rounded-full bg-current" />
+                    <span>Priority: {activeIncident.triage_level}</span>
+                  </span>
+                )}
               </div>
-              <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
-                Incident #{activeIncident.id}
-              </h1>
-              <p className="text-xs sm:text-sm text-slate-600 max-w-lg mx-auto">
-                <strong className="text-slate-900 font-semibold">Location:</strong> {activeIncident.location_address}
-              </p>
-              <p className="text-xs text-slate-500 max-w-lg mx-auto">
-                <strong className="text-slate-700 font-medium">Complaint:</strong> {activeIncident.chief_complaint}
-              </p>
+
+              <div>
+                <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                  Emergency Incident #{activeIncident.id}
+                </h1>
+                <div className="mt-1 flex items-center justify-center gap-2">
+                  <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Status:</span>
+                  <span
+                    className={`text-xs font-extrabold px-2.5 py-0.5 rounded-md ${
+                      activeIncident.status === "CANCELLED"
+                        ? "bg-slate-100 text-slate-600"
+                        : activeIncident.status === "RESOLVED" || activeIncident.status === "CLOSED"
+                        ? "bg-emerald-100 text-emerald-800"
+                        : activeDispatch?.status === "AT_HOSPITAL" || activeIncident.status === "AT_HOSPITAL"
+                        ? "bg-purple-100 text-purple-800"
+                        : activeDispatch?.status === "ON_SCENE"
+                        ? "bg-blue-100 text-blue-800"
+                        : "bg-red-100 text-red-800"
+                    }`}
+                  >
+                    {activeIncident.status === "CANCELLED"
+                      ? "CANCELLED"
+                      : activeIncident.status === "RESOLVED" || activeIncident.status === "CLOSED"
+                      ? "CASE RESOLVED"
+                      : activeDispatch?.status
+                      ? activeDispatch.status.replace(/_/g, " ")
+                      : activeIncident.status}
+                  </span>
+                </div>
+              </div>
+
+              <div className="pt-1 space-y-1">
+                <p className="text-xs sm:text-sm text-slate-700 max-w-lg mx-auto flex items-center justify-center gap-1.5">
+                  <MapPin className="w-4 h-4 text-red-600 shrink-0" />
+                  <span>
+                    <strong className="text-slate-900 font-semibold">Location:</strong> {activeIncident.location_address}
+                  </span>
+                </p>
+                <p className="text-xs text-slate-500 max-w-lg mx-auto">
+                  <strong className="text-slate-700 font-medium">Complaint:</strong> {activeIncident.chief_complaint}
+                </p>
+              </div>
             </div>
 
             {/* 5-STAGE PROGRESS TIMELINE */}
             <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4">
-              <span className="text-xs font-bold text-slate-900 uppercase tracking-wider block">
-                Emergency Response Timeline
-              </span>
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-900 uppercase tracking-wider block">
+                  Emergency Response Timeline
+                </span>
+                <span className="text-[11px] font-semibold text-slate-400">
+                  Step {currentStage} of 5
+                </span>
+              </div>
+
               <div className="relative flex items-center justify-between pt-2">
                 {/* Horizontal Track Line */}
                 <div className="absolute left-6 right-6 top-6 h-1 bg-slate-100 z-0" />
@@ -782,10 +1024,10 @@ export default function CitizenPortalPage() {
                 />
 
                 {[
-                  { num: 1, label: "Request Received" },
-                  { num: 2, label: "Review & Triage" },
-                  { num: 3, label: "Ambulance En Route" },
-                  { num: 4, label: "On Scene" },
+                  { num: 1, label: "SOS Received" },
+                  { num: 2, label: "Unit Allocated" },
+                  { num: 3, label: "En Route" },
+                  { num: 4, label: "On Scene / Care" },
                   { num: 5, label: "Hospital ER" },
                 ].map((step) => {
                   const isDone = currentStage >= step.num;
@@ -814,68 +1056,198 @@ export default function CitizenPortalPage() {
                   );
                 })}
               </div>
+
+              {/* Real-Time Stage Explainer Card */}
+              <div className="mt-4 p-3.5 rounded-xl bg-blue-50/60 border border-blue-100 flex items-start gap-3 text-xs text-blue-900 leading-relaxed">
+                <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold text-blue-950 block mb-0.5">Response Status</span>
+                  <span>{getStageDescription()}</span>
+                </div>
+              </div>
             </div>
 
             {/* DISPATCH ASSIGNMENT CARDS */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* Ambulance Assignment */}
-              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-blue-50 border border-blue-200 flex items-center justify-center text-blue-600 shrink-0">
-                    <Ambulance className="w-5 h-5" />
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3 flex flex-col justify-between">
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-blue-50 border border-blue-200 flex items-center justify-center text-blue-600 shrink-0">
+                        <Ambulance className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+                          Assigned Ambulance
+                        </span>
+                        <p className="text-sm font-bold text-slate-900">
+                          {activeDispatch?.ambulance_call_sign || "Matching closest available unit..."}
+                        </p>
+                      </div>
+                    </div>
+                    {activeDispatch?.ambulance_vehicle_type && (
+                      <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 uppercase">
+                        {activeDispatch.ambulance_vehicle_type}
+                      </span>
+                    )}
                   </div>
-                  <div>
-                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
-                      Assigned Ambulance
-                    </span>
-                    <p className="text-sm font-bold text-slate-900">
-                      {activeDispatch?.ambulance_call_sign || "Matching closest available unit..."}
-                    </p>
-                  </div>
-                </div>
 
-                {activeDispatch?.estimated_eta_seconds ? (
-                  <div className="p-3 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-between text-xs font-semibold text-blue-900">
-                    <span className="flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 text-blue-600" />
-                      <span>Estimated Arrival Time:</span>
-                    </span>
-                    <span className="font-bold font-mono text-sm text-blue-700">
-                      ~{Math.round(activeDispatch.estimated_eta_seconds / 60)} mins
-                    </span>
+                  {/* Confirmation / Mission Status */}
+                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700 font-medium flex items-center justify-between">
+                    <span>Crew Confirmation:</span>
+                    <strong
+                      className={`font-bold ${
+                        activeDispatch?.ambulance_confirmation_status === "ACCEPTED"
+                          ? "text-emerald-700"
+                          : activeDispatch?.ambulance_confirmation_status === "REJECTED"
+                          ? "text-red-700"
+                          : "text-amber-700"
+                      }`}
+                    >
+                      {activeDispatch?.ambulance_confirmation_status === "ACCEPTED"
+                        ? "Confirmed & Dispatched ✓"
+                        : activeDispatch?.ambulance_confirmation_status === "REJECTED"
+                        ? "Reassigning alternate unit..."
+                        : "Awaiting Crew Acceptance"}
+                    </strong>
                   </div>
-                ) : (
-                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 font-medium">
-                    Dispatch routing active • Coordinates synced
-                  </div>
-                )}
+
+                  {/* Estimated Arrival Time (ETA) */}
+                  {activeDispatch?.estimated_eta_seconds && activeDispatch.estimated_eta_seconds > 0 ? (
+                    <div className="p-3 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-between text-xs font-semibold text-blue-900">
+                      <span className="flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Estimated Arrival Time:</span>
+                      </span>
+                      <span className="font-bold font-mono text-sm text-blue-700">
+                        ~{Math.round(activeDispatch.estimated_eta_seconds / 60)} mins
+                        {activeDispatch.route_distance_meters && (
+                          <span className="text-[11px] text-blue-600 font-normal ml-1">
+                            ({(activeDispatch.route_distance_meters / 1000).toFixed(1)} km)
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 font-medium flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <span>ETA: Calculating based on live road conditions</span>
+                    </div>
+                  )}
+
+                  {/* Live GPS Telemetry */}
+                  {activeDispatch?.ambulance_current_latitude && activeDispatch?.ambulance_current_longitude ? (
+                    <div className="p-2.5 rounded-xl bg-emerald-50/70 border border-emerald-100 flex items-center justify-between text-xs text-emerald-900 font-medium">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
+                        <Navigation className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span>Ambulance GPS Fix:</span>
+                      </span>
+                      <span className="font-mono font-bold text-emerald-800 text-[11px]">
+                        {activeDispatch.ambulance_current_latitude.toFixed(4)},{" "}
+                        {activeDispatch.ambulance_current_longitude.toFixed(4)}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-500 font-medium flex items-center gap-1.5">
+                      <Navigation className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <span>Live GPS coordinates: Awaiting ambulance stream</span>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Hospital Assignment */}
-              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 shrink-0">
-                    <Building2 className="w-5 h-5" />
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3 flex flex-col justify-between">
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 shrink-0">
+                      <Building2 className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+                        Destination Hospital
+                      </span>
+                      <p className="text-sm font-bold text-slate-900">
+                        {activeDispatch?.destination_hospital_name || "Coordinating receiving trauma facility..."}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
-                      Destination Hospital
-                    </span>
-                    <p className="text-sm font-bold text-slate-900">
-                      {activeDispatch?.destination_hospital_name || "Coordinating receiving trauma facility..."}
-                    </p>
-                  </div>
-                </div>
 
-                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700 font-medium flex items-center justify-between">
-                  <span>Bed Reservation:</span>
-                  <strong className="text-slate-900 font-bold">
-                    {activeDispatch?.hospital_confirmation_status === "ACCEPTED"
-                      ? "Bed Reserved & ER Notified"
-                      : "Awaiting ER Confirmation"}
-                  </strong>
+                  {activeDispatch?.destination_hospital_address && (
+                    <p className="text-xs text-slate-500 flex items-start gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                      <span className="truncate">{activeDispatch.destination_hospital_address}</span>
+                    </p>
+                  )}
+
+                  {/* Bed Reservation Status */}
+                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700 font-medium flex items-center justify-between">
+                    <span>Bed Reservation:</span>
+                    <strong
+                      className={`font-bold ${
+                        activeDispatch?.hospital_confirmation_status === "ACCEPTED"
+                          ? "text-emerald-700"
+                          : activeDispatch?.hospital_confirmation_status === "REJECTED"
+                          ? "text-red-700"
+                          : "text-amber-700"
+                      }`}
+                    >
+                      {activeDispatch?.hospital_confirmation_status === "ACCEPTED"
+                        ? "Bed Reserved & ER Notified ✓"
+                        : activeDispatch?.hospital_confirmation_status === "REJECTED"
+                        ? "Finding Alternate Facility..."
+                        : "Awaiting ER Confirmation"}
+                    </strong>
+                  </div>
+
+                  {/* Emergency Department Reception Status */}
+                  {activeDispatch?.patient_arrived_hospital_confirmed_at ||
+                  activeDispatch?.status === "AT_HOSPITAL" ||
+                  activeIncident.status === "AT_HOSPITAL" ? (
+                    <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-semibold flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>Patient Arrival Confirmed at Trauma Bay ✓</span>
+                    </div>
+                  ) : (
+                    <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 font-medium flex items-center gap-1.5">
+                      <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <span>ER Trauma Bay Preparing for Arrival</span>
+                    </div>
+                  )}
                 </div>
               </div>
+            </div>
+
+            {/* LIVE INCIDENT TELEMETRY STRIP */}
+            <div className="bg-white border border-slate-200 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs shadow-2xs">
+              <div className="flex flex-wrap items-center gap-4 text-slate-600">
+                <span>
+                  <strong className="text-slate-800">Incident:</strong> #{activeIncident.id}
+                </span>
+                <span>
+                  <strong className="text-slate-800">Dispatch:</strong>{" "}
+                  {activeDispatch ? `#${activeDispatch.id}` : "Pending Allocation"}
+                </span>
+                <span>
+                  <strong className="text-slate-800">Coordination:</strong>{" "}
+                  <span className="font-semibold text-slate-900">
+                    {activeDispatch?.coordination_status || "PENDING"}
+                  </span>
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => fetchActiveIncident(true)}
+                disabled={isRefreshingTracking}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-semibold text-xs transition disabled:opacity-50"
+                title="Refresh tracking data from server"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingTracking ? "animate-spin text-blue-600" : ""}`} />
+                <span>{isRefreshingTracking ? "Refreshing..." : "Refresh"}</span>
+              </button>
             </div>
 
             {/* Helpline Banner */}

@@ -967,6 +967,7 @@ def create_dispatch(
 
 @router.get("", response_model=List[DispatchOut])
 def list_dispatches(
+    incident_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_current_user),
 ):
@@ -979,6 +980,9 @@ def list_dispatches(
             query = query.filter(Dispatch.ambulance_id == auth_user.ambulance_id)
         elif auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id:
             query = query.filter(Dispatch.destination_hospital_id == auth_user.hospital_id)
+
+    if incident_id:
+        query = query.filter(Dispatch.incident_id == incident_id)
 
     dispatches = query.order_by(Dispatch.created_at.desc()).all()
     for d in dispatches:

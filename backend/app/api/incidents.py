@@ -508,6 +508,7 @@ def close_incident(
             "notes": notes,
         },
         target_roles=[ROLE_DISPATCHER, ROLE_SUPER_ADMIN],
+        reporter_user_id=incident.reporter_user_id,
         entity_type="incident",
         entity_id=incident.id,
     )
@@ -518,6 +519,7 @@ def close_incident(
             "status": "CLOSED",
         },
         target_roles=[ROLE_DISPATCHER, ROLE_SUPER_ADMIN],
+        reporter_user_id=incident.reporter_user_id,
         entity_type="incident",
         entity_id=incident.id,
     )

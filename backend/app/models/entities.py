@@ -550,6 +550,18 @@ class Dispatch(Base):
     def ambulance_call_sign(self) -> Optional[str]:
         return self.ambulance.call_sign if self.ambulance else None
 
+    @property
+    def ambulance_vehicle_type(self) -> Optional[str]:
+        return self.ambulance.vehicle_type if self.ambulance else None
+
+    @property
+    def ambulance_current_latitude(self) -> Optional[float]:
+        return self.ambulance.current_latitude if self.ambulance else None
+
+    @property
+    def ambulance_current_longitude(self) -> Optional[float]:
+        return self.ambulance.current_longitude if self.ambulance else None
+
 
 class HandoverPacket(Base):
     __tablename__ = "handover_packets"
