@@ -8,7 +8,21 @@ class DispatchRequest(BaseModel):
     destination_hospital_id: Optional[int] = None
 
 class IncidentStatusUpdate(BaseModel):
-    status: str = Field(..., description="REPORTED, TRIAGED, ALLOCATED, DISPATCHED, EN_ROUTE, ON_SCENE, TRANSPORTING, AT_HOSPITAL, RESOLVED, CANCELLED")
+    status: str = Field(..., description="REPORTED, TRIAGED, ALLOCATED, DISPATCHED, EN_ROUTE, ON_SCENE, TRANSPORTING, AT_HOSPITAL, RESOLVED, CLOSED, CANCELLED")
+
+class IncidentCancelRequest(BaseModel):
+    reason: Optional[str] = "Emergency request cancelled by reporter"
+
+class IncidentCloseRequest(BaseModel):
+    resolution_notes: Optional[str] = None
+
+class PreflightValidationOut(BaseModel):
+    is_valid: bool
+    incident_id: int
+    ambulance_id: Optional[int] = None
+    hospital_id: Optional[int] = None
+    errors: List[str] = []
+    warnings: List[str] = []
 
 class ConfirmationDecision(BaseModel):
     decision: str = Field(..., description="ACCEPTED or REJECTED")

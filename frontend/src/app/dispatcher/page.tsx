@@ -38,6 +38,7 @@ import {
   User,
   Users,
   X,
+  XCircle,
   Zap,
 } from "lucide-react";
 import DynamicCommandCenterMap from "@/components/MapWrapper";
@@ -80,6 +81,9 @@ export default function DispatcherCommandCenterPage() {
   // In-flight guard for lifecycle stepping
   const isSteppingLifecycleRef = useRef(false);
   const [isSteppingLifecycle, setIsSteppingLifecycle] = useState(false);
+  const [isAutoAllocating, setIsAutoAllocating] = useState(false);
+  const selectedIncidentRef = useRef<any | null>(null);
+  selectedIncidentRef.current = selectedIncident;
 
   // Reservation countdown tracking
   const [reservationRemainingSeconds, setReservationRemainingSeconds] = useState<number | null>(null);
@@ -92,6 +96,13 @@ export default function DispatcherCommandCenterPage() {
   const addNotification = (msg: string) => {
     setNotifications((prev) => [msg, ...prev.slice(0, 4)]);
   };
+
+  const selectIncident = useCallback((inc: any) => {
+    setSelectedIncident(inc);
+    if (typeof window !== "undefined" && inc?.id) {
+      localStorage.setItem("lifelink_selected_incident_id", String(inc.id));
+    }
+  }, []);
 
   // Calculate remaining reservation TTL based on server timestamps
   const calculateRemainingSeconds = useCallback((disp: any, serverDateStr?: string | null): number => {
@@ -174,7 +185,18 @@ export default function DispatcherCommandCenterPage() {
       if (incRes.ok) {
         const incData = await incRes.json();
         setIncidents(incData);
-        if (!selectedIncident && incData.length > 0) {
+
+        const savedIdStr = typeof window !== "undefined" ? localStorage.getItem("lifelink_selected_incident_id") : null;
+        const targetId = selectedIncidentRef.current?.id ?? (savedIdStr ? Number(savedIdStr) : null);
+
+        if (targetId) {
+          const matched = incData.find((i: any) => Number(i.id) === Number(targetId));
+          if (matched) {
+            setSelectedIncident(matched);
+          } else if (!selectedIncidentRef.current && incData.length > 0) {
+            setSelectedIncident(incData[0]);
+          }
+        } else if (!selectedIncidentRef.current && incData.length > 0) {
           setSelectedIncident(incData[0]);
         }
       }
@@ -187,7 +209,7 @@ export default function DispatcherCommandCenterPage() {
     } finally {
       setLoading(false);
     }
-  }, [backendUrl, router, user, selectedIncident]);
+  }, [backendUrl, router, user]);
 
   // WebSocket Subscription
   useEffect(() => {
@@ -220,6 +242,12 @@ export default function DispatcherCommandCenterPage() {
             if (data.event && data.event !== "PONG" && data.event !== "HANDSHAKE") {
               if (data.event === "INCIDENT_CREATED") {
                 addNotification(`🚨 New Civilian Emergency Reported #${data.payload?.id || "SOS"}`);
+              } else if (data.event === "DISPATCH_CREATED") {
+                addNotification(`⚡ Dispatch #${data.payload?.dispatch_id || data.payload?.id} Created for Incident #${data.payload?.incident_id}`);
+              } else if (data.event === "DISPATCH_ESCALATED") {
+                addNotification(`⚠️ Dispatch #${data.payload?.dispatch_id} Escalated (Attempt #${data.payload?.attempt_number})`);
+              } else if (data.event === "DISPATCH_ESCALATION_FAILED") {
+                addNotification(`🚨 Escalation Exhausted: Dispatch #${data.payload?.dispatch_id} requires manual reassignment!`);
               } else if (data.event === "AMBULANCE_CRASH_DETECTED") {
                 addNotification(`⚠️ CRITICAL: Ambulance Unit ${data.payload?.ambulance_call_sign || '#' + data.payload?.ambulance_id} Collision Detected!`);
               } else if (data.event === "CRASH_ALERT_UPDATED") {
@@ -277,8 +305,14 @@ export default function DispatcherCommandCenterPage() {
   }, [selectedIncident, backendUrl]);
 
   const currentDispatch = selectedIncident
-    ? dispatches.find((d) => d.incident_id === selectedIncident.id && d.status !== "CANCELLED")
+    ? dispatches
+        .filter((d) => Number(d.incident_id) === Number(selectedIncident.id) && d.status !== "CANCELLED")
+        .sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0))[0] || null
     : null;
+
+  const hasActiveDispatch = Boolean(
+    currentDispatch && currentDispatch.status !== "COMPLETED" && currentDispatch.status !== "CANCELLED"
+  );
 
   // Reservation countdown
   useEffect(() => {
@@ -353,7 +387,8 @@ export default function DispatcherCommandCenterPage() {
   };
 
   const handleAutoAllocate = async () => {
-    if (!selectedIncident?.id) return;
+    if (!selectedIncident?.id || hasActiveDispatch || isAutoAllocating) return;
+    setIsAutoAllocating(true);
     const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
     try {
       const resp = await fetch(`${backendUrl}/api/dispatch/auto-allocate/${selectedIncident.id}`, {
@@ -367,10 +402,67 @@ export default function DispatcherCommandCenterPage() {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.detail || "Auto-allocation failed");
       }
+      const newDispatch = await resp.json();
+      setDispatches((prev) => [newDispatch, ...prev.filter((d) => Number(d.id) !== Number(newDispatch.id))]);
+      setSelectedIncident((prev: any) => (prev ? { ...prev, status: "ALLOCATED" } : prev));
+      setIncidents((prev) =>
+        prev.map((inc) => (Number(inc.id) === Number(selectedIncident.id) ? { ...inc, status: "ALLOCATED" } : inc))
+      );
       addNotification(`Auto-allocated best ambulance & hospital for Incident #${selectedIncident.id}`);
       await fetchData();
     } catch (err: any) {
       alert(`Auto-allocation error: ${err.message}`);
+    } finally {
+      setIsAutoAllocating(false);
+    }
+  };
+
+  const handleCancelIncident = async (incidentId: number) => {
+    const reason = prompt("Enter emergency cancellation reason:", "Dispatcher manual cancellation / false alarm");
+    if (!reason) return;
+    const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    };
+    try {
+      const res = await fetch(`${backendUrl}/api/incidents/${incidentId}/cancel`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ reason }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Cancellation failed");
+      }
+      addNotification(`Incident #${incidentId} cancelled. Resources released.`);
+      await fetchData();
+    } catch (err: any) {
+      alert(`Cancellation error: ${err.message}`);
+    }
+  };
+
+  const handleCloseIncident = async (incidentId: number) => {
+    if (!confirm(`Are you sure you want to formally close and archive Incident #${incidentId}?`)) return;
+    const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    };
+    try {
+      const res = await fetch(`${backendUrl}/api/incidents/${incidentId}/close`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ resolution_notes: "Operations desk reviewed and closed incident record." }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Incident closure failed");
+      }
+      addNotification(`Incident #${incidentId} formally closed and archived.`);
+      await fetchData();
+    } catch (err: any) {
+      alert(`Closure error: ${err.message}`);
     }
   };
 
@@ -577,7 +669,7 @@ export default function DispatcherCommandCenterPage() {
                       return (
                         <div
                           key={inc.id}
-                          onClick={() => setSelectedIncident(inc)}
+                          onClick={() => selectIncident(inc)}
                           className={`p-3.5 transition cursor-pointer flex items-start justify-between gap-3 ${
                             isSelected
                               ? "bg-blue-50/70 border-l-4 border-l-blue-600"
@@ -638,25 +730,85 @@ export default function DispatcherCommandCenterPage() {
                           #{selectedIncident.id} • {selectedIncident.caller_name} ({selectedIncident.caller_phone})
                         </h3>
                       </div>
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap justify-end">
                         {/* Auto-Allocate Trigger */}
                         <button
                           type="button"
                           onClick={handleAutoAllocate}
-                          className="px-2.5 py-1 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1 shadow-2xs transition"
-                          title="Automatically reserve best ambulance and hospital"
+                          disabled={hasActiveDispatch || isAutoAllocating || selectedIncident.status === "CLOSED" || selectedIncident.status === "CANCELLED"}
+                          className={`px-2.5 py-1 rounded-md text-xs font-bold flex items-center gap-1 shadow-2xs transition ${
+                            hasActiveDispatch || selectedIncident.status === "CLOSED" || selectedIncident.status === "CANCELLED"
+                              ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed"
+                              : isAutoAllocating
+                              ? "bg-blue-400 text-white cursor-wait"
+                              : "bg-blue-600 hover:bg-blue-700 text-white"
+                          }`}
+                          title={
+                            hasActiveDispatch
+                              ? `Active dispatch #${currentDispatch?.id} already allocated (${currentDispatch?.coordination_status})`
+                              : "Automatically reserve best ambulance and hospital"
+                          }
                         >
                           <Zap className="w-3.5 h-3.5" />
-                          <span>⚡ Auto-Allocate</span>
+                          <span>
+                            {hasActiveDispatch
+                              ? `Allocated (#${currentDispatch?.id})`
+                              : isAutoAllocating
+                              ? "Allocating..."
+                              : "⚡ Auto-Allocate"}
+                          </span>
                         </button>
                         <button
                           type="button"
                           onClick={() => setIsAllocationOpen(true)}
-                          className="px-2.5 py-1 rounded-md border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1 transition"
+                          disabled={hasActiveDispatch || selectedIncident.status === "CLOSED" || selectedIncident.status === "CANCELLED"}
+                          className={`px-2.5 py-1 rounded-md border text-xs font-semibold flex items-center gap-1 transition ${
+                            hasActiveDispatch || selectedIncident.status === "CLOSED" || selectedIncident.status === "CANCELLED"
+                              ? "border-slate-200 text-slate-300 bg-slate-50 cursor-not-allowed"
+                              : "border-slate-200 hover:bg-slate-50 text-slate-700"
+                          }`}
                         >
                           <Sliders className="w-3.5 h-3.5 text-slate-500" />
                           <span>Manual</span>
                         </button>
+
+                        {/* Lifecycle Closure Action */}
+                        {selectedIncident.status === "RESOLVED" && (
+                          <button
+                            type="button"
+                            onClick={() => handleCloseIncident(selectedIncident.id)}
+                            className="px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1 transition shadow-2xs"
+                            title="Formally close and archive resolved incident"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>Close Case</span>
+                          </button>
+                        )}
+
+                        {/* Emergency Cancellation Action */}
+                        {selectedIncident.status !== "RESOLVED" && selectedIncident.status !== "CLOSED" && selectedIncident.status !== "CANCELLED" && (
+                          <button
+                            type="button"
+                            onClick={() => handleCancelIncident(selectedIncident.id)}
+                            className="px-2.5 py-1 rounded-md border border-red-200 text-red-700 hover:bg-red-50 text-xs font-semibold flex items-center gap-1 transition"
+                            title="Cancel incident and release all fleet and hospital reservations"
+                          >
+                            <XCircle className="w-3.5 h-3.5 text-red-500" />
+                            <span>Cancel</span>
+                          </button>
+                        )}
+
+                        {selectedIncident.status === "CLOSED" && (
+                          <span className="px-2.5 py-0.5 rounded bg-slate-100 text-slate-500 font-mono text-[10px] font-bold border border-slate-200">
+                            CASE CLOSED
+                          </span>
+                        )}
+
+                        {selectedIncident.status === "CANCELLED" && (
+                          <span className="px-2.5 py-0.5 rounded bg-red-50 text-red-700 font-mono text-[10px] font-bold border border-red-200">
+                            CANCELLED
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -740,6 +892,28 @@ export default function DispatcherCommandCenterPage() {
                             )}
                           </div>
                         )}
+                        {/* Reassignment Required Alert & Action */}
+                        {currentDispatch.coordination_status === "REASSIGNMENT_REQUIRED" && (
+                          <div className="p-2.5 rounded bg-red-50 border border-red-200 space-y-1.5 mt-2">
+                            <div className="flex items-center gap-1.5 text-xs font-bold text-red-800">
+                              <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                              <span>Reassignment Required (Reservation Expired)</span>
+                            </div>
+                            {currentDispatch.rejection_reason && (
+                              <p className="text-[11px] text-red-700 font-mono">
+                                {currentDispatch.rejection_reason}
+                              </p>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleTriggerReassignment(currentDispatch.id)}
+                              className="px-2.5 py-1 rounded bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1 transition shadow-2xs"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                              <span>Reassign Available Unit</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div className="p-3 rounded-lg bg-amber-50/60 border border-amber-200 text-xs text-amber-900 flex items-center justify-between">
@@ -772,6 +946,18 @@ export default function DispatcherCommandCenterPage() {
                         >
                           Audit Timeline
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => setInspectorTab("escalation")}
+                          className={`px-2.5 py-1 rounded text-xs font-bold transition flex items-center gap-1 ${
+                            inspectorTab === "escalation"
+                              ? "bg-slate-900 text-white"
+                              : "text-slate-500 hover:text-slate-900"
+                          }`}
+                        >
+                          <ShieldAlert className="w-3 h-3" />
+                          <span>Escalation History ({currentDispatch?.escalation_history?.length || 0})</span>
+                        </button>
                       </div>
 
                       {inspectorTab === "overview" && recommendations && (
@@ -798,6 +984,49 @@ export default function DispatcherCommandCenterPage() {
                       {inspectorTab === "timeline" && (
                         <div className="max-h-[220px] overflow-y-auto">
                           <UnifiedTimelinePanel incidentId={selectedIncident.id} backendUrl={backendUrl} />
+                        </div>
+                      )}
+
+                      {inspectorTab === "escalation" && (
+                        <div className="space-y-2 text-xs max-h-[220px] overflow-y-auto pr-1">
+                          {currentDispatch?.escalation_history && currentDispatch.escalation_history.length > 0 ? (
+                            currentDispatch.escalation_history.map((esc: any, idx: number) => (
+                              <div
+                                key={idx}
+                                className="p-2.5 rounded-lg border border-amber-200 bg-amber-50/70 space-y-1.5"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span className="font-bold text-amber-900 font-mono text-[11px]">
+                                    Attempt #{esc.attempt_number} • {esc.failure_source || "TIMEOUT"}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400 font-mono">
+                                    {esc.timestamp ? new Date(esc.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : ""}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-slate-700">
+                                  Failed Unit: <strong className="text-red-700">{esc.failed_ambulance_call_sign || `#${esc.failed_ambulance_id}`}</strong>
+                                  {esc.failed_hospital_name ? ` → ${esc.failed_hospital_name}` : ""}
+                                </p>
+                                {esc.failure_reason && (
+                                  <p className="text-[10px] text-amber-800 italic bg-white/70 p-1 rounded border border-amber-100">
+                                    {esc.failure_reason}
+                                  </p>
+                                )}
+                                <div className="text-[10px] text-slate-600 flex items-center justify-between pt-0.5">
+                                  <span>
+                                    Replaced with: <strong>{esc.replacement_ambulance_call_sign || "None (Exhausted)"}</strong>
+                                  </span>
+                                  <span className="font-mono font-bold text-emerald-700">
+                                    {esc.escalation_result || "ESCALATED"}
+                                  </span>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="p-4 rounded-lg bg-slate-50 border border-slate-200 text-center text-xs text-slate-500">
+                              No smart escalation triggers. Initial dual confirmation operating without rejection.
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -833,7 +1062,7 @@ export default function DispatcherCommandCenterPage() {
                       ambulances={ambulances}
                       hospitals={hospitals}
                       selectedIncident={selectedIncident}
-                      onSelectIncident={(inc: any) => setSelectedIncident(inc)}
+                      onSelectIncident={(inc: any) => selectIncident(inc)}
                       activeRouteGeometry={activeRouteGeometry}
                     />
                   </div>
@@ -893,7 +1122,7 @@ export default function DispatcherCommandCenterPage() {
                           <button
                             type="button"
                             onClick={() => {
-                              setSelectedIncident(inc);
+                              selectIncident(inc);
                               setCurrentNav("overview");
                             }}
                             className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs"
@@ -921,7 +1150,7 @@ export default function DispatcherCommandCenterPage() {
                   ambulances={ambulances}
                   hospitals={hospitals}
                   selectedIncident={selectedIncident}
-                  onSelectIncident={(inc: any) => setSelectedIncident(inc)}
+                  onSelectIncident={(inc: any) => selectIncident(inc)}
                   activeRouteGeometry={activeRouteGeometry}
                 />
               </div>
@@ -1076,8 +1305,21 @@ export default function DispatcherCommandCenterPage() {
           onClose={() => setIsAllocationOpen(false)}
           incident={selectedIncident}
           recommendations={recommendations}
-          onDispatchConfirmed={() => {
+          hasActiveDispatch={hasActiveDispatch}
+          activeDispatch={currentDispatch}
+          onDispatchConfirmed={(newDisp?: any) => {
             setIsAllocationOpen(false);
+            if (newDisp) {
+              setDispatches((prev) => {
+                const idx = prev.findIndex((d) => d.id === newDisp.id);
+                if (idx >= 0) {
+                  const updated = [...prev];
+                  updated[idx] = newDisp;
+                  return updated;
+                }
+                return [newDisp, ...prev];
+              });
+            }
             fetchData();
           }}
         />
@@ -1090,7 +1332,7 @@ export default function DispatcherCommandCenterPage() {
           onClose={() => setIsRegistrationOpen(false)}
           onIncidentCreated={(newInc) => {
             setIsRegistrationOpen(false);
-            setSelectedIncident(newInc);
+            selectIncident(newInc);
             fetchData();
           }}
         />

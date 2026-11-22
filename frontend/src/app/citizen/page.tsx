@@ -117,6 +117,11 @@ export default function CitizenPortalPage() {
   const [pendingFlow, setPendingFlow] = useState<"TALK" | "TEXT" | null>(null);
   const [manualInput, setManualInput] = useState("");
 
+  // Cancel Incident Modal state
+  const [isCancelModalOpen, setIsCancelModalOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState("");
+  const [isCancelling, setIsCancelling] = useState(false);
+
   // Talk for Help state
   const [isListening, setIsListening] = useState(false);
   const [spokenTranscript, setSpokenTranscript] = useState("");
@@ -309,6 +314,16 @@ export default function CitizenPortalPage() {
 
           if (eventType === "INCIDENT_RESOLVED" && activeIncident && payload.incident_id === activeIncident.id) {
             setActiveIncident((prev: any) => (prev ? { ...prev, status: "RESOLVED" } : prev));
+            localStorage.removeItem("lifelink_active_incident_id");
+          }
+
+          if (eventType === "INCIDENT_CANCELLED" && activeIncident && payload.incident_id === activeIncident.id) {
+            setActiveIncident((prev: any) => (prev ? { ...prev, status: "CANCELLED" } : prev));
+            localStorage.removeItem("lifelink_active_incident_id");
+          }
+
+          if (eventType === "INCIDENT_CLOSED" && activeIncident && payload.incident_id === activeIncident.id) {
+            setActiveIncident((prev: any) => (prev ? { ...prev, status: "CLOSED" } : prev));
             localStorage.removeItem("lifelink_active_incident_id");
           }
         } catch (_) {}
@@ -573,6 +588,37 @@ export default function CitizenPortalPage() {
     } finally {
       setIsSubmitting(false);
       isSubmittingRef.current = false;
+    }
+  };
+
+  const handleCancelIncident = async () => {
+    if (!activeIncident) return;
+    setIsCancelling(true);
+    try {
+      const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+      const res = await fetch(`${backendUrl}/api/incidents/${activeIncident.id}/cancel`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ reason: cancelReason || "Cancelled by citizen" }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Failed to cancel emergency request");
+      }
+
+      const updatedInc = await res.json();
+      setActiveIncident(updatedInc);
+      localStorage.removeItem("lifelink_active_incident_id");
+      setIsCancelModalOpen(false);
+      setCancelReason("");
+    } catch (err: any) {
+      setErrorMessage(err.message || "Failed to cancel emergency request");
+    } finally {
+      setIsCancelling(false);
     }
   };
 
@@ -852,12 +898,35 @@ export default function CitizenPortalPage() {
               </a>
             </div>
 
-            {/* Reset / New SOS Action */}
-            <div className="pt-2 text-center">
+            {/* Incident Status Alert Banner if Cancelled or Closed/Resolved */}
+            {activeIncident?.status === "CANCELLED" && (
+              <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold flex items-center gap-2.5">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>This emergency request was cancelled. Dispatched ambulance and hospital reservations have been released.</span>
+              </div>
+            )}
+            {(activeIncident?.status === "RESOLVED" || activeIncident?.status === "CLOSED") && (
+              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center gap-2.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>Emergency case {activeIncident?.status === "CLOSED" ? "formally closed" : "resolved"}. Patient handover and clinical care completed.</span>
+              </div>
+            )}
+
+            {/* Actions: Cancel Emergency Request & Reset */}
+            <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
+              {activeIncident?.status !== "CANCELLED" && activeIncident?.status !== "RESOLVED" && activeIncident?.status !== "CLOSED" && (
+                <button
+                  type="button"
+                  onClick={() => setIsCancelModalOpen(true)}
+                  className="w-full sm:w-auto px-4 py-2 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-xs font-bold text-red-700 transition"
+                >
+                  Cancel Emergency Request
+                </button>
+              )}
               <button
                 type="button"
                 onClick={handleResetForNewSos}
-                className="px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-white transition"
+                className="w-full sm:w-auto px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-white transition"
               >
                 Report Another Emergency / Start Over
               </button>
@@ -1338,6 +1407,67 @@ export default function CitizenPortalPage() {
           </div>
         )}
       </main>
+
+      {/* ============================================================== */}
+      {/* CANCELLATION CONFIRMATION MODAL                                */}
+      {/* ============================================================== */}
+      {isCancelModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-2 text-red-600">
+                <AlertTriangle className="w-5 h-5 shrink-0" />
+                <h3 className="text-base font-bold text-slate-900">Cancel Emergency Request?</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCancelModalOpen(false)}
+                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Canceling will notify dispatchers and immediately release any dispatched ambulance crew and reserved hospital trauma beds back into public service.
+            </p>
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-700 block">
+                Reason for cancellation (optional):
+              </label>
+              <select
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 text-slate-800 focus:outline-none focus:ring-2 focus:ring-red-500"
+              >
+                <option value="">Select a common reason...</option>
+                <option value="Situation resolved on site">Situation resolved on site</option>
+                <option value="Patient transported via private vehicle">Patient transported via private vehicle</option>
+                <option value="Accidental / false alarm">Accidental / false alarm</option>
+                <option value="Duplicate report">Duplicate report</option>
+                <option value="Other / Not required">Other / Not required</option>
+              </select>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsCancelModalOpen(false)}
+                className="px-4 py-2 text-xs font-semibold rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 transition"
+              >
+                Keep Active
+              </button>
+              <button
+                type="button"
+                onClick={handleCancelIncident}
+                disabled={isCancelling}
+                className="px-4 py-2 text-xs font-bold rounded-xl bg-red-600 hover:bg-red-700 text-white transition flex items-center gap-1.5"
+              >
+                {isCancelling ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
+                <span>Confirm Cancellation</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ============================================================== */}
       {/* MISSING LOCATION MODAL (Shared Across Both Flows)               */}

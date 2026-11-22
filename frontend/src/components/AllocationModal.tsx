@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   AlertCircle,
+  AlertTriangle,
   Ambulance,
   Building2,
   Check,
@@ -29,6 +30,8 @@ interface AllocationModalProps {
   onClose: () => void;
   incident: any;
   recommendations: any;
+  hasActiveDispatch?: boolean;
+  activeDispatch?: any;
   onDispatchConfirmed: (dispatch: any) => void;
 }
 
@@ -37,11 +40,15 @@ export default function AllocationModal({
   onClose,
   incident,
   recommendations,
+  hasActiveDispatch = false,
+  activeDispatch = null,
   onDispatchConfirmed,
 }: AllocationModalProps) {
   const [selectedAmbId, setSelectedAmbId] = useState<number | null>(null);
   const [selectedHospId, setSelectedHospId] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [validationWarnings, setValidationWarnings] = useState<string[]>([]);
 
   if (!isOpen || !incident || !recommendations) return null;
 
@@ -57,17 +64,75 @@ export default function AllocationModal({
 
   const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+  // Pre-flight validation effect
+  useEffect(() => {
+    setErrorMessage(null);
+    setValidationWarnings([]);
+
+    if (hasActiveDispatch || activeDispatch) {
+      setErrorMessage(
+        `Incident #${incident.id} already has an active dispatch (#${activeDispatch?.id || ""} - ${activeDispatch?.coordination_status || activeDispatch?.status || "ALLOCATED"}). Manual re-allocation is disabled to prevent duplicate dispatches.`
+      );
+      return;
+    }
+
+    if (incident.status === "RESOLVED" || incident.status === "CLOSED" || incident.status === "CANCELLED") {
+      setErrorMessage(
+        `Incident #${incident.id} is in terminal status '${incident.status}'. Fleet resources cannot be allocated.`
+      );
+      return;
+    }
+
+    // Local warnings
+    const warnings: string[] = [];
+    if (selectedAmbulance && incident.required_ambulance_type === "ALS" && selectedAmbulance.vehicle_type !== "ALS") {
+      warnings.push(`Clinical mismatch: Triage recommends ALS unit, but ${selectedAmbulance.call_sign} is a ${selectedAmbulance.vehicle_type}.`);
+    }
+    if (selectedHospital) {
+      const unreserved = (selectedHospital.available_emergency_beds ?? 5) - (selectedHospital.reserved_emergency_beds ?? 0);
+      if (unreserved <= 1) {
+        warnings.push(`Hospital ${selectedHospital.name} emergency bay capacity is critical (${unreserved} unreserved bay left).`);
+      }
+    }
+    setValidationWarnings(warnings);
+  }, [hasActiveDispatch, activeDispatch, incident, selectedAmbulance, selectedHospital]);
+
   const handleConfirmDispatch = async () => {
+    if (hasActiveDispatch || activeDispatch) {
+      setErrorMessage("Incident already has an active dispatch. Allocation rejected.");
+      return;
+    }
     if (!defaultAmbId) {
-      alert("Please select an ambulance unit.");
+      setErrorMessage("Please select an ambulance unit from the ranked list.");
       return;
     }
     setSubmitting(true);
+    setErrorMessage(null);
+
     try {
       const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (token) headers["Authorization"] = `Bearer ${token}`;
 
+      // Smart pre-flight validation against backend
+      const valRes = await fetch(`${backendUrl}/api/dispatch/validate`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          incident_id: incident.id,
+          ambulance_id: defaultAmbId,
+          destination_hospital_id: defaultHospId,
+        }),
+      });
+
+      if (valRes.ok) {
+        const valData = await valRes.json();
+        if (!valData.is_valid && valData.errors?.length > 0) {
+          throw new Error(valData.errors.join(" • "));
+        }
+      }
+
+      // Proceed with actual allocation
       const res = await fetch(`${backendUrl}/api/dispatch`, {
         method: "POST",
         headers,
@@ -79,15 +144,15 @@ export default function AllocationModal({
       });
 
       if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.detail || "Dispatch failed");
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Dispatch creation failed");
       }
 
       const dispatch = await res.json();
       onDispatchConfirmed(dispatch);
       onClose();
     } catch (err: any) {
-      alert(`Dispatch error: ${err.message}`);
+      setErrorMessage(`Pre-Flight Allocation Error: ${err.message}`);
     } finally {
       setSubmitting(false);
     }
@@ -148,6 +213,31 @@ export default function AllocationModal({
               <span>{incident.location_address}</span>
             </div>
           </div>
+
+          {/* Pre-Flight Error / Warning Banner */}
+          {errorMessage && (
+            <div className="p-3.5 rounded-xl border border-red-200 bg-red-50 flex items-start gap-3 text-xs text-red-800">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold">Allocation Pre-Flight Guard</p>
+                <p className="mt-0.5 text-[11px] text-red-700 leading-relaxed">{errorMessage}</p>
+              </div>
+            </div>
+          )}
+
+          {validationWarnings.length > 0 && !errorMessage && (
+            <div className="p-3.5 rounded-xl border border-amber-200 bg-amber-50 space-y-1 text-xs text-amber-800">
+              <div className="flex items-center gap-2 font-bold text-amber-900">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>Pre-Flight Allocation Advisory</span>
+              </div>
+              <ul className="list-disc list-inside text-[11px] text-amber-700 space-y-0.5 pl-1">
+                {validationWarnings.map((w, idx) => (
+                  <li key={idx}>{w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {/* Section 1: Ambulance Ranking & Explainability */}
           <div className="space-y-3">
@@ -395,10 +485,18 @@ export default function AllocationModal({
             <button
               type="button"
               onClick={handleConfirmDispatch}
-              disabled={submitting || !selectedAmbulance}
-              className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-md shadow-blue-600/20 transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
+              disabled={submitting || !selectedAmbulance || Boolean(errorMessage) || hasActiveDispatch}
+              className={`px-6 py-2.5 rounded-lg text-xs font-bold shadow-md transition flex items-center gap-2 cursor-pointer ${
+                submitting || !selectedAmbulance || Boolean(errorMessage) || hasActiveDispatch
+                  ? "bg-slate-200 text-slate-400 cursor-not-allowed shadow-none"
+                  : "bg-blue-600 hover:bg-blue-700 text-white shadow-blue-600/20"
+              }`}
             >
-              {submitting ? "Initiating Dual-Reservation..." : "Confirm & Reserve Unit (Dual Confirmation)"}
+              {submitting
+                ? "Initiating Dual-Reservation..."
+                : hasActiveDispatch || errorMessage
+                ? "Allocation Blocked"
+                : "Confirm & Reserve Unit (Dual Confirmation)"}
             </button>
           </div>
         </div>

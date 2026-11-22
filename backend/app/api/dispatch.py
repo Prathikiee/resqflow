@@ -8,6 +8,7 @@ from backend.app.models.entities import Incident, Ambulance, Hospital, Dispatch,
 from backend.app.schemas.dispatch import (
     DispatchRequest,
     DispatchOut,
+    PreflightValidationOut,
     ConfirmationDecision,
     SimulateDecisionRequest,
     HandoverAcknowledgeRequest,
@@ -679,6 +680,80 @@ def auto_allocate_dispatch(
 
     return create_dispatch(payload=dispatch_payload, db=db, current_user=current_user, request=None)
 
+@router.post("/validate", response_model=PreflightValidationOut)
+def validate_dispatch_preflight(
+    payload: DispatchRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    FEATURE: Smart Pre-Flight Validation for Manual Dispatch Allocation
+    Inspects proposed allocation parameters against authoritative database state.
+    Returns whether allocation is feasible, with descriptive error and warning messages.
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    incident = db.query(Incident).filter(Incident.id == payload.incident_id).first()
+    if not incident:
+        return PreflightValidationOut(
+            is_valid=False,
+            incident_id=payload.incident_id,
+            ambulance_id=payload.ambulance_id,
+            hospital_id=payload.destination_hospital_id,
+            errors=["Incident record not found."],
+        )
+
+    if incident.status in ["CANCELLED", "RESOLVED", "CLOSED"]:
+        errors.append(f"Incident #{incident.id} is already in terminal stage '{incident.status}'. No new dispatch can be allocated.")
+
+    active_disp = db.query(Dispatch).filter(
+        Dispatch.incident_id == incident.id,
+        Dispatch.status.notin_(["COMPLETED", "CANCELLED"]),
+        Dispatch.coordination_status.notin_(["REJECTED", "EXPIRED"]),
+    ).first()
+    if active_disp:
+        errors.append(f"Incident #{incident.id} already has an active dispatch (#{active_disp.id} - status: {active_disp.status}). Duplicate allocation prohibited.")
+
+    ambulance = db.query(Ambulance).filter(Ambulance.id == payload.ambulance_id).first()
+    if not ambulance:
+        errors.append(f"Ambulance unit #{payload.ambulance_id} not found in fleet.")
+    else:
+        if not ambulance.is_active:
+            errors.append(f"Ambulance {ambulance.call_sign} is decommissioned or inactive.")
+        if ambulance.status != "AVAILABLE":
+            errors.append(f"Ambulance {ambulance.call_sign} is currently '{ambulance.status}' (expected 'AVAILABLE').")
+        if ambulance.reservation_dispatch_id and (not active_disp or ambulance.reservation_dispatch_id != active_disp.id):
+            errors.append(f"Ambulance {ambulance.call_sign} holds an active reservation for dispatch #{ambulance.reservation_dispatch_id}.")
+
+        if incident.required_ambulance_type == "ALS" and ambulance.vehicle_type != "ALS":
+            warnings.append(f"Clinical Triage mismatch: Incident requires an ALS unit, but {ambulance.call_sign} is a {ambulance.vehicle_type} unit.")
+
+    if payload.destination_hospital_id:
+        hospital = db.query(Hospital).filter(Hospital.id == payload.destination_hospital_id).first()
+        if not hospital:
+            errors.append(f"Hospital facility #{payload.destination_hospital_id} not found.")
+        else:
+            if not hospital.accepting_emergencies:
+                errors.append(f"Hospital {hospital.name} is currently not accepting emergency transfers.")
+            if hospital.readiness_status == "DIVERT":
+                errors.append(f"Hospital {hospital.name} is currently on DIVERT status.")
+            elif hospital.readiness_status == "BUSY":
+                warnings.append(f"Hospital {hospital.name} is operating at heavy capacity ('BUSY').")
+
+            unreserved_beds = hospital.available_emergency_beds - (hospital.reserved_emergency_beds or 0)
+            if unreserved_beds <= 0:
+                errors.append(f"Hospital {hospital.name} has no available emergency bays (0 unreserved beds remaining).")
+
+    return PreflightValidationOut(
+        is_valid=len(errors) == 0,
+        incident_id=payload.incident_id,
+        ambulance_id=payload.ambulance_id,
+        hospital_id=payload.destination_hospital_id,
+        errors=errors,
+        warnings=warnings,
+    )
+
 @router.post("", response_model=DispatchOut, status_code=status.HTTP_201_CREATED)
 def create_dispatch(
     payload: DispatchRequest,
@@ -703,6 +778,12 @@ def create_dispatch(
     incident = db.query(Incident).filter(Incident.id == payload.incident_id).first()
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
+
+    if incident.status in ["CANCELLED", "RESOLVED", "CLOSED"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot allocate dispatch for Incident #{incident.id}: Incident is already in terminal stage '{incident.status}'."
+        )
 
     active_disp = db.query(Dispatch).filter(
         Dispatch.incident_id == incident.id,
