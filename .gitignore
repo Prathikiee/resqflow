@@ -235,3 +235,6 @@ yarn-error.log*
 *.db
 *.db-journal
 *.sqlite3
+
+# TypeScript generated build info
+*.tsbuildinfo
