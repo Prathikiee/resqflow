@@ -2,7 +2,7 @@ import pytest
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException
 from backend.app.core.database import SessionLocal, Base, engine
-from backend.app.models.entities import Incident, Ambulance, Hospital, Dispatch
+from backend.app.models.entities import Incident, Ambulance, Hospital, Dispatch, User
 from backend.app.services.seed_service import seed_database
 from backend.app.api.incidents import create_incident
 from backend.app.schemas.incident import IncidentCreate
@@ -198,3 +198,112 @@ def test_smart_escalation_no_alternatives_preserves_incident(fresh_db):
 
     db.refresh(inc)
     assert inc.status == "TRIAGED"
+
+def test_dispatcher_override_reassigns_after_all_units_exhausted(fresh_db):
+    """
+    REGRESSION TEST:
+    Verifies that when all available ambulances have previously timed out and the
+    dispatch is in REASSIGNMENT_REQUIRED, a manual dispatcher override (reassign_dispatch)
+    successfully resets the exclusion lock-out, selects the best available unit,
+    and returns to PENDING_CONFIRMATIONS with a fresh 90s reservation TTL.
+    """
+    db = fresh_db
+    inc = db.query(Incident).first()
+    ambs = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").all()
+    hosp = db.query(Hospital).first()
+    dispatcher_user = db.query(User).filter(User.role == "DISPATCHER").first()
+
+    disp = create_dispatch(
+        DispatchRequest(incident_id=inc.id, ambulance_id=ambs[0].id, destination_hospital_id=hosp.id),
+        db=db,
+    )
+
+    # Simulate exhaustion: all ambulances in failed_amb_ids across attempts
+    disp.coordination_status = "REASSIGNMENT_REQUIRED"
+    disp.escalation_history = [
+        {"attempt_number": 1, "failed_ambulance_id": a.id, "failure_source": "TIMEOUT"}
+        for a in ambs
+    ]
+    db.commit()
+
+    # Dispatcher manually triggers reassignment
+    reassigned = reassign_dispatch(
+        dispatch_id=disp.id,
+        db=db,
+        current_user=dispatcher_user,
+    )
+
+    assert reassigned.coordination_status == "PENDING_CONFIRMATIONS"
+    assert reassigned.ambulance_confirmation_status == "PENDING"
+    assert reassigned.hospital_confirmation_status == "PENDING"
+    assert reassigned.reservation_expires_at is not None
+    assert reassigned.ambulance_id in [a.id for a in ambs]
+
+    assigned_amb = db.query(Ambulance).filter(Ambulance.id == reassigned.ambulance_id).first()
+    assert assigned_amb.status == "RESERVED"
+    assert assigned_amb.reservation_dispatch_id == reassigned.id
+
+def test_dual_confirmation_with_als103_and_fathermuller(fresh_db):
+    """
+    REGRESSION TEST:
+    Verifies that paramedic ALS-103 and Father Muller hospital staff can successfully
+    dual-confirm a provisional dispatch, promoting coordination status to CONFIRMED
+    and transitioning the ambulance and incident to DISPATCHED.
+    """
+    db = fresh_db
+    inc = db.query(Incident).first()
+    als103 = db.query(Ambulance).filter(Ambulance.call_sign == "KA-19-ALS-103").first()
+    fathermuller = db.query(Hospital).filter(Hospital.name.like("%Father Muller%")).first()
+    als103_user = db.query(User).filter(User.email == "als103@lifelink.demo").first()
+    fm_user = db.query(User).filter(User.email == "fathermuller@lifelink.demo").first()
+
+    assert als103 is not None
+    assert fathermuller is not None
+    assert als103_user is not None
+    assert fm_user is not None
+
+    disp = create_dispatch(
+        DispatchRequest(incident_id=inc.id, ambulance_id=als103.id, destination_hospital_id=fathermuller.id),
+        db=db,
+    )
+    assert disp.coordination_status == "PENDING_CONFIRMATIONS"
+    assert disp.ambulance_id == als103.id
+    assert disp.destination_hospital_id == fathermuller.id
+
+    # 1. Paramedic ALS-103 confirms
+    disp = confirm_ambulance(
+        dispatch_id=disp.id,
+        payload=ConfirmationDecision(decision="ACCEPTED"),
+        db=db,
+        current_user=als103_user,
+    )
+    assert disp.ambulance_confirmation_status == "ACCEPTED"
+    assert disp.hospital_confirmation_status == "PENDING"
+    assert disp.coordination_status == "PENDING_CONFIRMATIONS"
+
+    # 2. Father Muller ER staff confirms
+    disp = confirm_hospital(
+        dispatch_id=disp.id,
+        payload=ConfirmationDecision(decision="ACCEPTED"),
+        db=db,
+        current_user=fm_user,
+    )
+    assert disp.hospital_confirmation_status == "ACCEPTED"
+    assert disp.coordination_status == "CONFIRMED"
+
+    db.refresh(als103)
+    db.refresh(inc)
+    assert als103.status == "DISPATCHED"
+    assert inc.status == "DISPATCHED"
+
+def test_websocket_envelope_contains_event_and_event_type():
+    """
+    REGRESSION TEST:
+    Ensures create_event_envelope populates both 'event' and 'event_type'
+    so all portal WebSocket listeners reliably receive the event type.
+    """
+    from backend.app.core.ws import create_event_envelope
+    env = create_event_envelope("DISPATCH_CONFIRMATION_UPDATED", {"dispatch_id": 1})
+    assert env["event"] == "DISPATCH_CONFIRMATION_UPDATED"
+    assert env["event_type"] == "DISPATCH_CONFIRMATION_UPDATED"
+

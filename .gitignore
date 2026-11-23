@@ -238,3 +238,7 @@ yarn-error.log*
 
 # TypeScript generated build info
 *.tsbuildinfo
+
+# SQLite temporary sidecar files
+*.db-shm
+*.db-wal

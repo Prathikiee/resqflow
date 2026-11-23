@@ -268,23 +268,33 @@ def auto_escalate_dispatch(
 
     # 2. Gather excluded resources across all attempts
     history = list(dispatch.escalation_history or [])
-    failed_amb_ids = {dispatch.ambulance_id}
+    failed_amb_ids = set()
     failed_hosp_ids = set()
-    if failure_source == "HOSPITAL" and dispatch.destination_hospital_id:
-        failed_hosp_ids.add(dispatch.destination_hospital_id)
 
-    for entry in history:
-        if entry.get("failed_ambulance_id"):
-            failed_amb_ids.add(entry["failed_ambulance_id"])
-        if entry.get("failed_hospital_id") and entry.get("failure_source") == "HOSPITAL":
-            failed_hosp_ids.add(entry["failed_hospital_id"])
+    if failure_source == "DISPATCHER_OVERRIDE":
+        # Dispatcher manual intervention explicitly resets exclusions to pick best available unit
+        pass
+    else:
+        if dispatch.ambulance_id:
+            failed_amb_ids.add(dispatch.ambulance_id)
+        if failure_source == "HOSPITAL" and dispatch.destination_hospital_id:
+            failed_hosp_ids.add(dispatch.destination_hospital_id)
+
+        for entry in history:
+            if entry.get("failed_ambulance_id"):
+                failed_amb_ids.add(entry["failed_ambulance_id"])
+            if entry.get("failed_hospital_id") and entry.get("failure_source") == "HOSPITAL":
+                failed_hosp_ids.add(entry["failed_hospital_id"])
 
     # 3. Find candidate ambulances: AVAILABLE and not in failed_amb_ids
-    all_ambs = db.query(Ambulance).filter(
-        Ambulance.id.notin_(failed_amb_ids),
+    amb_filters = [
         Ambulance.status == "AVAILABLE",
         Ambulance.is_active == True,
-    ).all()
+    ]
+    if failed_amb_ids:
+        amb_filters.append(Ambulance.id.notin_(failed_amb_ids))
+
+    all_ambs = db.query(Ambulance).filter(*amb_filters).all()
 
     if not all_ambs or not incident:
         # No alternative ambulances available
@@ -318,13 +328,13 @@ def auto_escalate_dispatch(
             "incident_id": dispatch.incident_id,
             "failure_source": failure_source,
             "reason": failure_reason,
-        })
+        }, broadcast_to_all=True)
         broadcast_sync("DISPATCH_CONFIRMATION_UPDATED", {
             "dispatch_id": dispatch.id,
             "coordination_status": dispatch.coordination_status,
             "ambulance_confirmation": dispatch.ambulance_confirmation_status,
             "hospital_confirmation": dispatch.hospital_confirmation_status,
-        })
+        }, broadcast_to_all=True)
         return dispatch
 
     ranking = score_and_rank_ambulances(incident=incident, ambulances=all_ambs)
@@ -477,7 +487,7 @@ def auto_escalate_dispatch(
         "previous_ambulance_call_sign": old_amb.call_sign if old_amb else None,
         "failure_source": failure_source,
         "failure_reason": failure_reason,
-    })
+    }, ambulance_id=new_amb.id, hospital_id=new_hosp.id if new_hosp else None, broadcast_to_all=True)
     broadcast_sync("DISPATCH_CONFIRMATION_UPDATED", {
         "dispatch_id": dispatch.id,
         "coordination_status": dispatch.coordination_status,
@@ -485,14 +495,14 @@ def auto_escalate_dispatch(
         "hospital_confirmation": dispatch.hospital_confirmation_status,
         "reservation_expires_at": reservation_expires.isoformat(),
         "attempt_number": dispatch.attempt_number,
-    })
+    }, ambulance_id=new_amb.id, hospital_id=new_hosp.id if new_hosp else None, broadcast_to_all=True)
     broadcast_sync("DISPATCH_REASSIGNED", {
         "dispatch_id": dispatch.id,
         "incident_id": incident.id,
         "new_ambulance_id": new_amb.id,
         "new_ambulance_call_sign": new_amb.call_sign,
         "attempt_number": dispatch.attempt_number,
-    })
+    }, ambulance_id=new_amb.id, hospital_id=new_hosp.id if new_hosp else None, broadcast_to_all=True)
 
     return dispatch
 

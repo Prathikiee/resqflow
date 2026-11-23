@@ -651,6 +651,14 @@ DEMO_ACCOUNTS = [
         "password": "Lifelink@2026!",
     },
     {
+        "email": "als103@lifelink.demo",
+        "full_name": "Paramedic assigned to ALS-103",
+        "role": "AMBULANCE_CREW",
+        "ambulance_call_sign": "KA-19-ALS-103",
+        "phone_number": "+91 94481 10103",
+        "password": "Lifelink@2026!",
+    },
+    {
         "email": "citizen@lifelink.demo",
         "full_name": "Rahul Alva",
         "role": "CITIZEN",

@@ -358,9 +358,12 @@ export default function HospitalPortalPage() {
       ws.onmessage = (event) => {
         try {
           const envelope = JSON.parse(event.data);
-          const type = envelope.event_type || envelope.type;
+          const type = envelope.event || envelope.event_type || envelope.type;
           const relevantTypes = [
             "DISPATCH_CONFIRMATION_UPDATED",
+            "DISPATCH_CREATED",
+            "DISPATCH_REASSIGNED",
+            "DISPATCH_ESCALATED",
             "HOSPITAL_CAPACITY_UPDATED",
             "HOSPITAL_DOCTOR_UPDATED",
             "HOSPITAL_DEPARTMENTS_UPDATED",
@@ -374,7 +377,6 @@ export default function HospitalPortalPage() {
             "HANDOVER_COMPLETED",
             "PATIENT_VITALS_RECORDED",
             "AMBULANCE_CRASH_DETECTED",
-            "DISPATCH_CREATED",
           ];
           if (relevantTypes.includes(type)) {
             fetchHospitalData();
@@ -394,7 +396,10 @@ export default function HospitalPortalPage() {
 
     connect();
 
+    const pollInterval = setInterval(fetchHospitalData, 7000);
+
     return () => {
+      clearInterval(pollInterval);
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) ws.close();
     };
@@ -1285,12 +1290,23 @@ export default function HospitalPortalPage() {
                         </p>
                       </div>
                     </div>
-                    <button
-                      onClick={() => setCurrentNav("requests")}
-                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-lg shadow-sm"
-                    >
-                      Review Requests
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {primaryPendingRequest && (
+                        <button
+                          onClick={() => handleDecideReservation(primaryPendingRequest.id, "ACCEPTED")}
+                          disabled={actionLoading}
+                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-sm flex items-center gap-1 transition"
+                        >
+                          <Check className="w-3.5 h-3.5" /> Accept Bed Reservation
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setCurrentNav("requests")}
+                        className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-lg shadow-sm"
+                      >
+                        Review Requests
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
