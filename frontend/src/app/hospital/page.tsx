@@ -204,6 +204,8 @@ export default function HospitalPortalPage() {
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([]);
   const [crashAlerts, setCrashAlerts] = useState<CrashAlertRecord[]>([]);
   const [collisionAlerts, setCollisionAlerts] = useState<CollisionAlertRecord[]>([]);
+  const [collisionLoading, setCollisionLoading] = useState<boolean>(true);
+  const [collisionError, setCollisionError] = useState<string | null>(null);
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [currentNav, setCurrentNav] = useState<string>("overview");
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -280,20 +282,122 @@ export default function HospitalPortalPage() {
   const [prepNoteInput, setPrepNoteInput] = useState<{ [dispatchId: number]: string }>({});
 
   const isActionInProgressRef = useRef(false);
-  const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  // Dynamic backend URL resolution for local and network IP access
+  const getBackendUrl = useCallback(() => {
+    if (typeof window !== "undefined") {
+      if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
+      const host = window.location.hostname;
+      if (host && host !== "localhost" && host !== "127.0.0.1") {
+        return `${window.location.protocol}//${host}:8000`;
+      }
+    }
+    return process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  }, []);
+
+  const [backendUrl, setBackendUrl] = useState<string>("http://localhost:8000");
+
+  useEffect(() => {
+    setBackendUrl(getBackendUrl());
+  }, [getBackendUrl]);
 
   // =============================================================================
   // DATA FETCHING & SYNCHRONIZATION
   // =============================================================================
+  const fetchCollisionAlerts = useCallback(async () => {
+    try {
+      const activeUrl = getBackendUrl();
+      const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+      const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+
+      let resp = await fetch(`${activeUrl}/api/incidents/collision-alerts`, {
+        headers,
+        cache: "no-store",
+      });
+
+      // If unauthorized with token, retry without token since collision alerts are regional
+      if (!resp.ok && token && (resp.status === 401 || resp.status === 403)) {
+        resp = await fetch(`${activeUrl}/api/incidents/collision-alerts`, {
+          cache: "no-store",
+        });
+      }
+
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status} - ${resp.statusText || "Request failed"}`);
+      }
+
+      const rawData = await resp.json();
+      let items: any[] = [];
+      if (Array.isArray(rawData)) {
+        items = rawData;
+      } else if (rawData && typeof rawData === "object") {
+        if (Array.isArray(rawData.incidents)) items = rawData.incidents;
+        else if (Array.isArray(rawData.data)) items = rawData.data;
+        else if (Array.isArray(rawData.alerts)) items = rawData.alerts;
+      }
+
+      // Ensure newest collision incidents appear first (sorted by created_at descending)
+      const sorted = [...items].sort((a, b) => {
+        const parseUTC = (str: any) => {
+          if (!str) return 0;
+          let s = String(str).trim().replace(" ", "T");
+          if (!s.endsWith("Z") && !/[+-]\d{2}:?\d{2}$/.test(s)) s += "Z";
+          const t = new Date(s).getTime();
+          return isNaN(t) ? 0 : t;
+        };
+        return parseUTC(b.created_at) - parseUTC(a.created_at);
+      });
+
+      setCollisionAlerts(sorted);
+      setCollisionError(null);
+    } catch (err: any) {
+      console.warn("Collision alerts fetch error:", err);
+      setCollisionError(err.message || "Unable to reach collision alert telemetry");
+    } finally {
+      setCollisionLoading(false);
+    }
+  }, [getBackendUrl]);
+
+  // Convert UTC timestamp to Indian Standard Time (Asia/Kolkata) with format: "24 Nov 2026, 11:29:41 AM IST"
+  const formatCollisionTimeIST = (dateStr: string | null | undefined): string => {
+    if (!dateStr) return "Recent Event";
+    let iso = String(dateStr).trim().replace(" ", "T");
+    if (!iso.endsWith("Z") && !/[+-]\d{2}:?\d{2}$/.test(iso)) {
+      iso += "Z";
+    }
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "Recent Event";
+    try {
+      const formatted = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Kolkata",
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: true,
+      }).format(d);
+      return formatted.replace(/\b(am|pm)\b/i, (m) => m.toUpperCase()) + " IST";
+    } catch {
+      return d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + " IST";
+    }
+  };
+
   const fetchHospitalData = useCallback(async () => {
+    // Always fetch collision alerts independently so they are not blocked by hospital ID checks
+    fetchCollisionAlerts();
+
     const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
     if (!token) {
       router.push("/login");
       return;
     }
 
+    const activeUrl = getBackendUrl();
+
     try {
-      const meResp = await fetch(`${backendUrl}/api/auth/me`, {
+      const meResp = await fetch(`${activeUrl}/api/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!meResp.ok) throw new Error("Invalid session");
@@ -303,7 +407,7 @@ export default function HospitalPortalPage() {
 
       if (userData.hospital_id) {
         // 1. Fetch Hospital Record
-        const hospResp = await fetch(`${backendUrl}/api/hospitals/${userData.hospital_id}`, {
+        const hospResp = await fetch(`${activeUrl}/api/hospitals/${userData.hospital_id}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (hospResp.ok) {
@@ -326,7 +430,7 @@ export default function HospitalPortalPage() {
         }
 
         // 2. Fetch Hospital Doctors with live shift evaluation
-        const docResp = await fetch(`${backendUrl}/api/hospitals/${userData.hospital_id}/doctors`, {
+        const docResp = await fetch(`${activeUrl}/api/hospitals/${userData.hospital_id}/doctors`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (docResp.ok) {
@@ -334,7 +438,7 @@ export default function HospitalPortalPage() {
         }
 
         // 3. Fetch Allocated Incidents
-        const dispResp = await fetch(`${backendUrl}/api/hospitals/${userData.hospital_id}/allocated-incidents`, {
+        const dispResp = await fetch(`${activeUrl}/api/hospitals/${userData.hospital_id}/allocated-incidents`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (dispResp.ok) {
@@ -342,23 +446,11 @@ export default function HospitalPortalPage() {
         }
 
         // 4. Fetch Crash Alerts
-        const crashResp = await fetch(`${backendUrl}/api/crash-alerts`, {
+        const crashResp = await fetch(`${activeUrl}/api/crash-alerts`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (crashResp.ok) {
           setCrashAlerts(await crashResp.json());
-        }
-
-        // 5. Fetch Dedicated Ambulance Collision Alerts (ESP32 Simulator)
-        try {
-          const colResp = await fetch(`${backendUrl}/api/incidents/collision-alerts`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (colResp.ok) {
-            setCollisionAlerts(await colResp.json());
-          }
-        } catch (colErr) {
-          console.warn("Collision alerts fetch error:", colErr);
         }
       }
     } catch (err: any) {
@@ -366,16 +458,18 @@ export default function HospitalPortalPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [backendUrl, router, handoverClinicianName]);
+  }, [getBackendUrl, router, handoverClinicianName, fetchCollisionAlerts]);
 
   // WebSocket Subscription
   useEffect(() => {
+    fetchCollisionAlerts();
     fetchHospitalData();
 
     const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
     if (!token) return;
 
-    const wsUrl = backendUrl.replace(/^http/, "ws") + `/ws/live?token=${encodeURIComponent(token)}`;
+    const activeUrl = getBackendUrl();
+    const wsUrl = activeUrl.replace(/^http/, "ws") + `/ws/live?token=${encodeURIComponent(token)}`;
     let ws: WebSocket | null = null;
     let reconnectTimeout: NodeJS.Timeout | null = null;
 
@@ -412,9 +506,10 @@ export default function HospitalPortalPage() {
             "INCIDENT_CREATED",
           ];
           if (relevantTypes.includes(type)) {
+            fetchCollisionAlerts();
             fetchHospitalData();
           }
-        } catch (_) {}
+        } catch (_) { }
       };
 
       ws.onclose = () => {
@@ -429,14 +524,17 @@ export default function HospitalPortalPage() {
 
     connect();
 
-    const pollInterval = setInterval(fetchHospitalData, 5000);
+    const pollInterval = setInterval(() => {
+      fetchCollisionAlerts();
+      fetchHospitalData();
+    }, 5000);
 
     return () => {
       clearInterval(pollInterval);
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) ws.close();
     };
-  }, [backendUrl, fetchHospitalData]);
+  }, [getBackendUrl, fetchHospitalData, fetchCollisionAlerts]);
 
   // =============================================================================
   // DERIVED METRICS & FILTERED DISPATCHES
@@ -668,7 +766,7 @@ export default function HospitalPortalPage() {
           incident_status: disp?.incident?.status,
         });
       }
-    } catch (_) {}
+    } catch (_) { }
   };
 
   const handleReviewHandover = async (dispatchId: number) => {
@@ -835,7 +933,7 @@ export default function HospitalPortalPage() {
         setFeedbackMsg({ text: `Doctor status updated to ${newStatus}.`, type: "success" });
         await fetchHospitalData();
       }
-    } catch (_) {}
+    } catch (_) { }
   };
 
   const handleDeleteDoctor = async (doctorId: string, doctorName: string) => {
@@ -851,7 +949,7 @@ export default function HospitalPortalPage() {
         setFeedbackMsg({ text: `Dr. ${doctorName} removed from roster.`, type: "info" });
         await fetchHospitalData();
       }
-    } catch (_) {}
+    } catch (_) { }
   };
 
   // 6. Bed Capacity Save
@@ -953,7 +1051,7 @@ export default function HospitalPortalPage() {
         setFeedbackMsg({ text: `Capability '${capabilityKey.replace("_", " ")}' updated to ${newValue}.`, type: "success" });
         await fetchHospitalData();
       }
-    } catch (_) {}
+    } catch (_) { }
   };
 
   // 8. Hospital Settings / Profile Save
@@ -1136,13 +1234,12 @@ export default function HospitalPortalPage() {
             <div className="flex items-center gap-2">
               <span className="text-[11px] font-semibold text-slate-500 hidden sm:inline">Readiness:</span>
               <span
-                className={`text-xs font-bold px-2.5 py-0.5 rounded-full uppercase border ${
-                  currentReadiness === "READY"
+                className={`text-xs font-bold px-2.5 py-0.5 rounded-full uppercase border ${currentReadiness === "READY"
                     ? "bg-emerald-50 text-emerald-700 border-emerald-300"
                     : currentReadiness === "BUSY"
-                    ? "bg-amber-50 text-amber-700 border-amber-300"
-                    : "bg-red-50 text-red-700 border-red-300"
-                }`}
+                      ? "bg-amber-50 text-amber-700 border-amber-300"
+                      : "bg-red-50 text-red-700 border-red-300"
+                  }`}
               >
                 {currentReadiness}
               </span>
@@ -1161,13 +1258,12 @@ export default function HospitalPortalPage() {
         {/* Global Feedback Banner */}
         {feedbackMsg && (
           <div
-            className={`mx-4 sm:mx-6 mt-4 p-3 rounded-lg border text-xs font-medium flex items-center justify-between transition-all ${
-              feedbackMsg.type === "success"
+            className={`mx-4 sm:mx-6 mt-4 p-3 rounded-lg border text-xs font-medium flex items-center justify-between transition-all ${feedbackMsg.type === "success"
                 ? "bg-emerald-50 text-emerald-800 border-emerald-200"
                 : feedbackMsg.type === "error"
-                ? "bg-red-50 text-red-800 border-red-200"
-                : "bg-blue-50 text-blue-800 border-blue-200"
-            }`}
+                  ? "bg-red-50 text-red-800 border-red-200"
+                  : "bg-blue-50 text-blue-800 border-blue-200"
+              }`}
           >
             <span>{feedbackMsg.text}</span>
             <button onClick={() => setFeedbackMsg(null)} className="text-slate-400 hover:text-slate-700 ml-2">
@@ -1262,16 +1358,36 @@ export default function HospitalPortalPage() {
                     <span>AMBULANCE COLLISION ALERTS</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-[10px] font-bold px-2 py-0.5 bg-amber-100 text-amber-900 border border-amber-300 rounded-full tracking-wide">
-                      SIMULATED
-                    </span>
-                    <span className="text-xs font-semibold px-2 py-0.5 bg-red-100 text-red-800 rounded-full">
-                      {collisionAlerts.length} Event{collisionAlerts.length === 1 ? "" : "s"}
-                    </span>
+                    {!collisionLoading && (
+                      <span className="text-xs font-semibold px-2 py-0.5 bg-red-100 text-red-800 rounded-full">
+                        {collisionAlerts.length} Event{collisionAlerts.length === 1 ? "" : "s"}
+                      </span>
+                    )}
                   </div>
                 </div>
 
-                {collisionAlerts.length === 0 ? (
+                {collisionLoading && collisionAlerts.length === 0 ? (
+                  <div className="p-6 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-center gap-2 text-slate-500 text-xs">
+                    <RefreshCw className="w-4 h-4 animate-spin text-red-600" />
+                    <span>Connecting to ambulance collision telemetry stream...</span>
+                  </div>
+                ) : collisionError && collisionAlerts.length === 0 ? (
+                  <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                    <div className="flex items-center gap-2 text-red-800">
+                      <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                      <span>Telemetry connection error: {collisionError}. Retrying in background...</span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setCollisionLoading(true);
+                        fetchCollisionAlerts();
+                      }}
+                      className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white font-bold rounded shadow-sm self-start sm:self-auto transition"
+                    >
+                      Retry Connection
+                    </button>
+                  </div>
+                ) : collisionAlerts.length === 0 ? (
                   <div className="p-4 bg-slate-50 border border-dashed border-slate-200 rounded-lg text-center text-slate-500 text-xs">
                     <Radio className="w-4 h-4 text-slate-400 mx-auto mb-1 animate-pulse" />
                     No active ambulance collision alerts detected. System is actively listening for ESP32 hardware triggers.
@@ -1279,20 +1395,12 @@ export default function HospitalPortalPage() {
                 ) : (
                   <div className="space-y-3">
                     {collisionAlerts.map((alert) => {
-                      const detectedDate = new Date(alert.created_at);
-                      const formattedDate = detectedDate.toLocaleDateString([], {
-                        year: "numeric",
-                        month: "short",
-                        day: "numeric",
-                      });
-                      const formattedTime = detectedDate.toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        second: "2-digit",
-                        hour12: true,
-                      });
-                      const mapUrl = `https://www.google.com/maps?q=${alert.latitude},${alert.longitude}`;
-                      const osmUrl = `https://www.openstreetmap.org/?mlat=${alert.latitude}&mlon=${alert.longitude}#map=16/${alert.latitude}/${alert.longitude}`;
+                      const latNum = Number(alert.latitude ?? 12.899259);
+                      const lonNum = Number(alert.longitude ?? 74.984388);
+                      const latStr = isNaN(latNum) ? "12.899259" : latNum.toFixed(6);
+                      const lonStr = isNaN(lonNum) ? "74.984388" : lonNum.toFixed(6);
+                      const mapUrl = `https://www.google.com/maps?q=${latStr},${lonStr}`;
+                      const osmUrl = `https://www.openstreetmap.org/?mlat=${latStr}&mlon=${lonStr}#map=16/${latStr}/${lonStr}`;
 
                       return (
                         <div
@@ -1304,9 +1412,6 @@ export default function HospitalPortalPage() {
                               <span className="text-lg">🚨</span>
                               <span className="text-sm font-extrabold text-red-900 tracking-tight">
                                 Ambulance Collision Detected
-                              </span>
-                              <span className="text-[11px] font-black px-2 py-0.5 bg-amber-200 text-amber-950 border border-amber-400 rounded uppercase tracking-wider">
-                                SIMULATED
                               </span>
                             </div>
                             <div className="flex items-center gap-2">
@@ -1325,11 +1430,11 @@ export default function HospitalPortalPage() {
                                 Detection Date & Time
                               </div>
                               <div className="font-semibold text-slate-800 flex items-center gap-1.5">
-                                <Clock className="w-3.5 h-3.5 text-red-600" />
-                                <span>{formattedDate} at {formattedTime}</span>
+                                <Clock className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                                <span>{formatCollisionTimeIST(alert.created_at)}</span>
                               </div>
                               <div className="text-[11px] text-slate-500">
-                                Source: {alert.caller_name || "ESP32 Collision Simulator"}
+                                Source: ESP32 Hardware Trigger
                               </div>
                             </div>
 
@@ -1342,7 +1447,7 @@ export default function HospitalPortalPage() {
                                 <span>{alert.location_address || "Canara Engineering College"}</span>
                               </div>
                               <div className="flex items-center justify-between text-[11px] text-slate-600">
-                                <span className="font-mono">Lat: {alert.latitude.toFixed(6)}, Lon: {alert.longitude.toFixed(6)}</span>
+                                <span className="font-mono">Lat: {latStr}, Lon: {lonStr}</span>
                                 <div className="flex items-center gap-2">
                                   <a
                                     href={mapUrl}
@@ -1366,11 +1471,20 @@ export default function HospitalPortalPage() {
                             </div>
                           </div>
 
-                          {alert.chief_complaint && (
-                            <div className="text-xs bg-red-100/60 p-2 rounded-lg text-red-950 font-medium border border-red-200/60">
-                              {alert.chief_complaint}
-                            </div>
-                          )}
+                          {(() => {
+                            const rawComplaint = alert.chief_complaint || "";
+                            const complaintText =
+                              rawComplaint === "SIMULATED AMBULANCE COLLISION - triggered by physical ESP32 button" ||
+                                rawComplaint.includes("SIMULATED AMBULANCE COLLISION")
+                                ? "Ambulance collision detected. Emergency response required."
+                                : rawComplaint;
+
+                            return complaintText ? (
+                              <div className="text-xs bg-red-100/60 p-2 rounded-lg text-red-950 font-medium border border-red-200/60">
+                                {complaintText}
+                              </div>
+                            ) : null;
+                          })()}
                         </div>
                       );
                     })}
@@ -1497,13 +1611,12 @@ export default function HospitalPortalPage() {
                               Incident #{disp.incident_id} • Unit {disp.ambulance_call_sign || `#${disp.ambulance_id}`}
                             </span>
                             <span
-                              className={`text-[10px] font-bold px-2 py-0.5 rounded ${
-                                disp.incident?.triage_color === "RED"
+                              className={`text-[10px] font-bold px-2 py-0.5 rounded ${disp.incident?.triage_color === "RED"
                                   ? "bg-red-100 text-red-800"
                                   : disp.incident?.triage_color === "YELLOW"
-                                  ? "bg-amber-100 text-amber-800"
-                                  : "bg-emerald-100 text-emerald-800"
-                              }`}
+                                    ? "bg-amber-100 text-amber-800"
+                                    : "bg-emerald-100 text-emerald-800"
+                                }`}
                             >
                               {disp.incident?.triage_level || "Priority 1"}
                             </span>
@@ -1565,13 +1678,12 @@ export default function HospitalPortalPage() {
                         </div>
                         <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
                           <div
-                            className={`h-full ${
-                              item.available === 0
+                            className={`h-full ${item.available === 0
                                 ? "bg-red-500"
                                 : item.available <= 2
-                                ? "bg-amber-500"
-                                : "bg-emerald-500"
-                            }`}
+                                  ? "bg-amber-500"
+                                  : "bg-emerald-500"
+                              }`}
                             style={{
                               width: `${Math.min(
                                 100,
@@ -1608,11 +1720,10 @@ export default function HospitalPortalPage() {
                           </div>
                         </div>
                         <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                            doc.effective_status === "AVAILABLE"
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${doc.effective_status === "AVAILABLE"
                               ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
                               : "bg-amber-50 text-amber-700 border border-amber-200"
-                          }`}
+                            }`}
                         >
                           {doc.effective_status}
                         </span>
@@ -1682,13 +1793,12 @@ export default function HospitalPortalPage() {
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
                         <div className="flex items-center gap-2">
                           <span
-                            className={`text-xs font-bold px-2.5 py-1 rounded-md ${
-                              req.incident?.triage_color === "RED"
+                            className={`text-xs font-bold px-2.5 py-1 rounded-md ${req.incident?.triage_color === "RED"
                                 ? "bg-red-100 text-red-800"
                                 : req.incident?.triage_color === "YELLOW"
-                                ? "bg-amber-100 text-amber-800"
-                                : "bg-emerald-100 text-emerald-800"
-                            }`}
+                                  ? "bg-amber-100 text-amber-800"
+                                  : "bg-emerald-100 text-emerald-800"
+                              }`}
                           >
                             {req.incident?.triage_level || "Priority 1"}
                           </span>
@@ -1782,25 +1892,22 @@ export default function HospitalPortalPage() {
                 <div className="flex flex-wrap items-center gap-1.5 bg-white p-1 rounded-lg border border-slate-200">
                   <button
                     onClick={() => setPatientsFilter("ALL")}
-                    className={`text-xs px-2.5 py-1 rounded font-semibold ${
-                      patientsFilter === "ALL" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
-                    }`}
+                    className={`text-xs px-2.5 py-1 rounded font-semibold ${patientsFilter === "ALL" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
+                      }`}
                   >
                     All ({activeInboundPatients.length})
                   </button>
                   <button
                     onClick={() => setPatientsFilter("PRIORITY_1")}
-                    className={`text-xs px-2.5 py-1 rounded font-semibold ${
-                      patientsFilter === "PRIORITY_1" ? "bg-red-600 text-white" : "text-slate-600 hover:bg-slate-100"
-                    }`}
+                    className={`text-xs px-2.5 py-1 rounded font-semibold ${patientsFilter === "PRIORITY_1" ? "bg-red-600 text-white" : "text-slate-600 hover:bg-slate-100"
+                      }`}
                   >
                     Priority 1
                   </button>
                   <button
                     onClick={() => setPatientsFilter("ARRIVING_SOON")}
-                    className={`text-xs px-2.5 py-1 rounded font-semibold ${
-                      patientsFilter === "ARRIVING_SOON" ? "bg-amber-600 text-white" : "text-slate-600 hover:bg-slate-100"
-                    }`}
+                    className={`text-xs px-2.5 py-1 rounded font-semibold ${patientsFilter === "ARRIVING_SOON" ? "bg-amber-600 text-white" : "text-slate-600 hover:bg-slate-100"
+                      }`}
                   >
                     Arriving Soon
                   </button>
@@ -1816,8 +1923,8 @@ export default function HospitalPortalPage() {
                     {patientsFilter === "ALL"
                       ? "No Active Inbound Patients"
                       : patientsFilter === "PRIORITY_1"
-                      ? "No Priority 1 Inbound Patients"
-                      : "No Patients Arriving Soon"}
+                        ? "No Priority 1 Inbound Patients"
+                        : "No Patients Arriving Soon"}
                   </h3>
                   <p className="text-xs text-slate-500 max-w-sm mx-auto">
                     {patientsFilter === "ALL"
@@ -1836,11 +1943,10 @@ export default function HospitalPortalPage() {
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
                           <div className="flex items-center gap-2">
                             <span
-                              className={`text-xs font-bold px-2 py-0.5 rounded ${
-                                disp.incident?.triage_color === "RED"
+                              className={`text-xs font-bold px-2 py-0.5 rounded ${disp.incident?.triage_color === "RED"
                                   ? "bg-red-100 text-red-800"
                                   : "bg-amber-100 text-amber-800"
-                              }`}
+                                }`}
                             >
                               {disp.incident?.triage_level || "Priority 1"}
                             </span>
@@ -1975,11 +2081,10 @@ export default function HospitalPortalPage() {
                           <button
                             onClick={() => handleConfirmArrival(disp.id)}
                             disabled={isArrived && !!disp.patient_arrived_hospital_confirmed_at}
-                            className={`text-xs px-4 py-1.5 rounded-lg font-bold shadow-sm ${
-                              isArrived
+                            className={`text-xs px-4 py-1.5 rounded-lg font-bold shadow-sm ${isArrived
                                 ? "bg-emerald-100 text-emerald-800 border border-emerald-300 cursor-default"
                                 : "bg-emerald-600 hover:bg-emerald-700 text-white"
-                            }`}
+                              }`}
                           >
                             {disp.patient_arrived_hospital_confirmed_at ? "Arrival Confirmed ✓" : "Confirm ER Arrival"}
                           </button>
@@ -2116,15 +2221,14 @@ export default function HospitalPortalPage() {
                             </td>
                             <td className="p-3">
                               <span
-                                className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                                  doc.effective_status === "AVAILABLE"
+                                className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${doc.effective_status === "AVAILABLE"
                                     ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                                     : doc.effective_status === "BUSY"
-                                    ? "bg-amber-50 text-amber-700 border-amber-200"
-                                    : doc.effective_status === "ON_LEAVE"
-                                    ? "bg-purple-50 text-purple-700 border-purple-200"
-                                    : "bg-slate-100 text-slate-600 border-slate-200"
-                                }`}
+                                      ? "bg-amber-50 text-amber-700 border-amber-200"
+                                      : doc.effective_status === "ON_LEAVE"
+                                        ? "bg-purple-50 text-purple-700 border-purple-200"
+                                        : "bg-slate-100 text-slate-600 border-slate-200"
+                                  }`}
                               >
                                 {doc.effective_status || doc.status}
                               </span>
@@ -2218,13 +2322,12 @@ export default function HospitalPortalPage() {
                         <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                           <span className="font-bold text-slate-900 text-sm">{catData.name || catKey}</span>
                           <span
-                            className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                              available === 0
+                            className={`text-xs font-bold px-2 py-0.5 rounded-full ${available === 0
                                 ? "bg-red-50 text-red-700 border border-red-200"
                                 : available <= 2
-                                ? "bg-amber-50 text-amber-700 border border-amber-200"
-                                : "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                            }`}
+                                  ? "bg-amber-50 text-amber-700 border border-amber-200"
+                                  : "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                              }`}
                           >
                             {available} Available
                           </span>
@@ -2342,17 +2445,15 @@ export default function HospitalPortalPage() {
                 <div className="flex items-center gap-1 bg-white p-1 rounded-lg border border-slate-200">
                   <button
                     onClick={() => setCapabilitiesTab("DEPARTMENTS")}
-                    className={`text-xs px-3 py-1.5 rounded font-semibold ${
-                      capabilitiesTab === "DEPARTMENTS" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
-                    }`}
+                    className={`text-xs px-3 py-1.5 rounded font-semibold ${capabilitiesTab === "DEPARTMENTS" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
+                      }`}
                   >
                     Departments ({hospital?.departments?.length || 0})
                   </button>
                   <button
                     onClick={() => setCapabilitiesTab("CAPABILITIES")}
-                    className={`text-xs px-3 py-1.5 rounded font-semibold ${
-                      capabilitiesTab === "CAPABILITIES" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
-                    }`}
+                    className={`text-xs px-3 py-1.5 rounded font-semibold ${capabilitiesTab === "CAPABILITIES" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
+                      }`}
                   >
                     Facility Indicators
                   </button>
@@ -2367,13 +2468,12 @@ export default function HospitalPortalPage() {
                       <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                         <div className="font-bold text-sm text-slate-900">{dept.name}</div>
                         <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                            dept.operational_status === "ACTIVE"
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${dept.operational_status === "ACTIVE"
                               ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                               : dept.operational_status === "LIMITED"
-                              ? "bg-amber-50 text-amber-700 border-amber-200"
-                              : "bg-red-50 text-red-700 border-red-200"
-                          }`}
+                                ? "bg-amber-50 text-amber-700 border-amber-200"
+                                : "bg-red-50 text-red-700 border-red-200"
+                            }`}
                         >
                           {dept.operational_status}
                         </span>
@@ -2436,13 +2536,12 @@ export default function HospitalPortalPage() {
                           <select
                             value={currentVal}
                             onChange={(e) => handleUpdateCapability(key, e.target.value)}
-                            className={`text-xs px-2.5 py-1 rounded font-bold border ${
-                              currentVal === "AVAILABLE"
+                            className={`text-xs px-2.5 py-1 rounded font-bold border ${currentVal === "AVAILABLE"
                                 ? "bg-emerald-50 text-emerald-800 border-emerald-300"
                                 : currentVal === "LIMITED"
-                                ? "bg-amber-50 text-amber-800 border-amber-300"
-                                : "bg-red-50 text-red-800 border-red-300"
-                            }`}
+                                  ? "bg-amber-50 text-amber-800 border-amber-300"
+                                  : "bg-red-50 text-red-800 border-red-300"
+                              }`}
                           >
                             <option value="AVAILABLE">AVAILABLE</option>
                             <option value="LIMITED">LIMITED</option>
@@ -2471,17 +2570,15 @@ export default function HospitalPortalPage() {
                 <div className="flex items-center gap-1 bg-white p-1 rounded-lg border border-slate-200">
                   <button
                     onClick={() => setHistoryTab("HANDOVERS")}
-                    className={`text-xs px-3 py-1.5 rounded font-semibold ${
-                      historyTab === "HANDOVERS" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
-                    }`}
+                    className={`text-xs px-3 py-1.5 rounded font-semibold ${historyTab === "HANDOVERS" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
+                      }`}
                   >
                     Active Handovers
                   </button>
                   <button
                     onClick={() => setHistoryTab("HISTORY")}
-                    className={`text-xs px-3 py-1.5 rounded font-semibold ${
-                      historyTab === "HISTORY" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
-                    }`}
+                    className={`text-xs px-3 py-1.5 rounded font-semibold ${historyTab === "HISTORY" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
+                      }`}
                   >
                     Historical Records ({completedIncidents.length})
                   </button>
@@ -2872,11 +2969,10 @@ export default function HospitalPortalPage() {
                             const upd = isSel ? cur.filter((d) => d !== day) : [...cur, day];
                             setDoctorForm({ ...doctorForm, working_days: upd });
                           }}
-                          className={`text-xs px-2.5 py-1 rounded font-bold border ${
-                            isSel
+                          className={`text-xs px-2.5 py-1 rounded font-bold border ${isSel
                               ? "bg-blue-600 text-white border-blue-600"
                               : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
-                          }`}
+                            }`}
                         >
                           {day}
                         </button>
@@ -3284,11 +3380,10 @@ export default function HospitalPortalPage() {
                         await handleOpenHandover(activeHandoverModal.dispatch_id);
                       }}
                       disabled={actionLoading || isArrived}
-                      className={`px-3 py-2 rounded-lg text-xs font-bold shadow-xs flex items-center gap-1.5 transition ${
-                        isArrived
+                      className={`px-3 py-2 rounded-lg text-xs font-bold shadow-xs flex items-center gap-1.5 transition ${isArrived
                           ? "bg-emerald-50 text-emerald-800 border border-emerald-300 cursor-default"
                           : "bg-emerald-600 hover:bg-emerald-700 text-white"
-                      }`}
+                        }`}
                     >
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       <span>{isArrived ? "Arrival Confirmed ✓" : "Confirm ER Arrival"}</span>
@@ -3343,11 +3438,10 @@ export default function HospitalPortalPage() {
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-slate-500">Triage Priority:</span>
                 <span
-                  className={`font-bold px-2 py-0.5 rounded ${
-                    selectedIncidentModal.incident?.triage_color === "RED"
+                  className={`font-bold px-2 py-0.5 rounded ${selectedIncidentModal.incident?.triage_color === "RED"
                       ? "bg-red-100 text-red-800"
                       : "bg-amber-100 text-amber-800"
-                  }`}
+                    }`}
                 >
                   {selectedIncidentModal.incident?.triage_level || "Priority 1"}
                 </span>
