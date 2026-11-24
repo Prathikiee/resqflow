@@ -43,6 +43,7 @@ def create_event_envelope(
     return {
         "event_id": event_id or f"evt_{uuid.uuid4().hex[:12]}",
         "event": event_type,
+        "event_type": event_type,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "entity_type": resolved_entity_type,
         "entity_id": resolved_entity_id,

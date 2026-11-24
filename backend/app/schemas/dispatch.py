@@ -1,6 +1,7 @@
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
+from backend.app.schemas.vitals import VitalsOut
 
 class DispatchRequest(BaseModel):
     incident_id: int
@@ -92,6 +93,12 @@ class HandoverPacketOut(BaseModel):
     estimated_arrival_eta_seconds: Optional[float] = None
     route_distance_meters: Optional[float] = None
 
+    # Pre-hospital Clinical Vitals & Mission Status
+    latest_vitals: Optional[VitalsOut] = None
+    vitals: List[VitalsOut] = []
+    mission_status: Optional[str] = None
+    incident_status: Optional[str] = None
+
     created_at: datetime
     updated_at: datetime
 
@@ -126,6 +133,10 @@ class DispatchOut(BaseModel):
     # Emergency Handover Packet
     handover_packet: Optional[HandoverPacketOut] = None
 
+    # Patient Vitals Telemetry
+    vitals: List[VitalsOut] = []
+    latest_vitals: Optional[VitalsOut] = None
+
     # Embedded location coordinates for turn-by-turn navigation
     incident_latitude: Optional[float] = None
     incident_longitude: Optional[float] = None
@@ -135,6 +146,9 @@ class DispatchOut(BaseModel):
     destination_hospital_latitude: Optional[float] = None
     destination_hospital_longitude: Optional[float] = None
     ambulance_call_sign: Optional[str] = None
+    ambulance_vehicle_type: Optional[str] = None
+    ambulance_current_latitude: Optional[float] = None
+    ambulance_current_longitude: Optional[float] = None
 
     dispatched_at: datetime
     arrived_incident_at: Optional[datetime] = None

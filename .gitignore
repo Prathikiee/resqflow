@@ -235,3 +235,10 @@ yarn-error.log*
 *.db
 *.db-journal
 *.sqlite3
+
+# TypeScript generated build info
+*.tsbuildinfo
+
+# SQLite temporary sidecar files
+*.db-shm
+*.db-wal

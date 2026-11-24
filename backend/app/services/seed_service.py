@@ -1,6 +1,6 @@
 import logging
 from sqlalchemy.orm import Session
-from backend.app.models.entities import Ambulance, Hospital, Incident, Dispatch, HandoverPacket, WitnessReport, IncidentEvent, User
+from backend.app.models.entities import Ambulance, Hospital, Incident, Dispatch, HandoverPacket, WitnessReport, IncidentEvent, User, PatientVitals
 from backend.app.services.triage_engine import assess_incident_severity
 from backend.app.core.security import hash_password
 
@@ -369,6 +369,7 @@ def seed_database(db: Session, force: bool = False) -> dict:
     if force:
         db.query(IncidentEvent).delete()
         db.query(WitnessReport).delete()
+        db.query(PatientVitals).delete()
         db.query(HandoverPacket).delete()
         db.query(Dispatch).delete()
         db.query(Incident).delete()
@@ -647,6 +648,14 @@ DEMO_ACCOUNTS = [
         "role": "AMBULANCE_CREW",
         "ambulance_call_sign": "KA-19-ALS-102",
         "phone_number": "+91 94481 10102",
+        "password": "Lifelink@2026!",
+    },
+    {
+        "email": "als103@lifelink.demo",
+        "full_name": "Paramedic assigned to ALS-103",
+        "role": "AMBULANCE_CREW",
+        "ambulance_call_sign": "KA-19-ALS-103",
+        "phone_number": "+91 94481 10103",
         "password": "Lifelink@2026!",
     },
     {

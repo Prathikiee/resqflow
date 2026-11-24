@@ -477,6 +477,13 @@ class Dispatch(Base):
     ambulance = relationship("Ambulance", back_populates="dispatches")
     destination_hospital = relationship("Hospital", back_populates="dispatches")
     handover_packet = relationship("HandoverPacket", back_populates="dispatch", uselist=False, cascade="all, delete-orphan")
+    vitals = relationship("PatientVitals", back_populates="dispatch", order_by="PatientVitals.recorded_at.desc()", cascade="all, delete-orphan")
+
+    @property
+    def latest_vitals(self):
+        if self.vitals:
+            return self.vitals[0]
+        return None
 
     @property
     def allocation_breakdown(self) -> dict:
@@ -542,6 +549,18 @@ class Dispatch(Base):
     @property
     def ambulance_call_sign(self) -> Optional[str]:
         return self.ambulance.call_sign if self.ambulance else None
+
+    @property
+    def ambulance_vehicle_type(self) -> Optional[str]:
+        return self.ambulance.vehicle_type if self.ambulance else None
+
+    @property
+    def ambulance_current_latitude(self) -> Optional[float]:
+        return self.ambulance.current_latitude if self.ambulance else None
+
+    @property
+    def ambulance_current_longitude(self) -> Optional[float]:
+        return self.ambulance.current_longitude if self.ambulance else None
 
 
 class HandoverPacket(Base):
@@ -623,6 +642,32 @@ class HandoverPacket(Base):
     @required_equipment.setter
     def required_equipment(self, val: List[str]):
         self.required_equipment_json = json.dumps(val or [])
+
+    @property
+    def latest_vitals(self):
+        if self.dispatch and self.dispatch.latest_vitals:
+            return self.dispatch.latest_vitals
+        return None
+
+    @property
+    def vitals(self):
+        if self.dispatch and self.dispatch.vitals:
+            return self.dispatch.vitals
+        return []
+
+    @property
+    def mission_status(self) -> Optional[str]:
+        if self.dispatch:
+            return self.dispatch.status
+        return None
+
+    @property
+    def incident_status(self) -> Optional[str]:
+        if self.incident:
+            return self.incident.status
+        if self.dispatch and self.dispatch.incident:
+            return self.dispatch.incident.status
+        return None
 
 
 class WitnessReport(Base):
@@ -779,4 +824,34 @@ class CrashAlert(Base):
     @sensor_data.setter
     def sensor_data(self, val: dict):
         self.sensor_data_json = json.dumps(val or {})
+
+
+class PatientVitals(Base):
+    __tablename__ = "patient_vitals"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    dispatch_id = Column(Integer, ForeignKey("dispatches.id", ondelete="CASCADE"), nullable=False, index=True)
+    incident_id = Column(Integer, ForeignKey("incidents.id", ondelete="CASCADE"), nullable=False, index=True)
+    recorded_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    heart_rate = Column(Integer, nullable=False)               # bpm (30-250)
+    blood_pressure_systolic = Column(Integer, nullable=False)   # mmHg (50-260)
+    blood_pressure_diastolic = Column(Integer, nullable=False)  # mmHg (30-160)
+    oxygen_saturation = Column(Integer, nullable=False)        # SpO2 % (50-100)
+    respiratory_rate = Column(Integer, nullable=False)         # breaths/min (5-60)
+    notes = Column(Text, nullable=True)                        # Paramedic notes / condition description
+
+    recorded_at = Column(DateTime, default=utc_now, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    # Relationships
+    dispatch = relationship("Dispatch", back_populates="vitals")
+    incident = relationship("Incident")
+    recorded_by = relationship("User")
+
+    @property
+    def blood_pressure_display(self) -> str:
+        return f"{self.blood_pressure_systolic}/{self.blood_pressure_diastolic}"
+
 

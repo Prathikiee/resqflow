@@ -10,13 +10,17 @@ import {
   Building2,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Clock,
   Compass,
+  Droplet,
   ExternalLink,
   Eye,
   FileText,
   Fuel,
+  Heart,
   History,
   LayoutDashboard,
   LogOut,
@@ -29,12 +33,29 @@ import {
   ShieldAlert,
   Sliders,
   User,
+  Wind,
   Wrench,
   X,
 } from "lucide-react";
 import Sidebar, { NavItem } from "@/components/layout/Sidebar";
 import TopNav from "@/components/layout/TopNav";
 import { formatDistance, formatDuration } from "@/lib/utils";
+
+interface VitalsRecord {
+  id: number;
+  dispatch_id: number;
+  incident_id: number;
+  recorded_by_user_id?: number;
+  heart_rate: number;
+  blood_pressure_systolic: number;
+  blood_pressure_diastolic: number;
+  oxygen_saturation: number;
+  respiratory_rate: number;
+  notes?: string | null;
+  blood_pressure_display?: string;
+  recorded_at: string;
+  created_at?: string;
+}
 
 interface DispatchRecord {
   id: number;
@@ -70,6 +91,8 @@ interface DispatchRecord {
     status: string;
   };
   handover_packet?: any;
+  vitals?: VitalsRecord[];
+  latest_vitals?: VitalsRecord;
 }
 
 const NEXT_LIFECYCLE_ACTION: Record<string, { nextStatus: string; label: string; icon: React.ElementType }> = {
@@ -77,6 +100,7 @@ const NEXT_LIFECYCLE_ACTION: Record<string, { nextStatus: string; label: string;
   EN_ROUTE_INCIDENT: { nextStatus: "ON_SCENE", label: "Confirm Arrived on Scene with Patient", icon: MapPin },
   ON_SCENE: { nextStatus: "EN_ROUTE_HOSPITAL", label: "Patient Onboard • Departing Scene towards Hospital ER", icon: Building2 },
   EN_ROUTE_HOSPITAL: { nextStatus: "COMPLETED", label: "Confirm Arrived at ER & Safe Handover", icon: CheckCircle2 },
+  AT_HOSPITAL: { nextStatus: "COMPLETED", label: "Complete ER Handover & Mark Unit Available", icon: CheckCircle2 },
 };
 
 export default function AmbulancePortalPage() {
@@ -91,12 +115,47 @@ export default function AmbulancePortalPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: "success" | "error" | "info" } | null>(null);
 
+  // Patient vitals state
+  const [missionVitals, setMissionVitals] = useState<VitalsRecord[]>([]);
+  const [vitalsLoading, setVitalsLoading] = useState(false);
+  const [vitalsSubmitting, setVitalsSubmitting] = useState(false);
+  const [vitalsError, setVitalsError] = useState<string | null>(null);
+  const [vitalsSuccess, setVitalsSuccess] = useState<string | null>(null);
+  const [showVitalsHistory, setShowVitalsHistory] = useState(false);
+  const [vitalsForm, setVitalsForm] = useState({
+    heartRate: "",
+    bpSystolic: "",
+    bpDiastolic: "",
+    oxygenSat: "",
+    respRate: "",
+    notes: "",
+  });
+
   // Reservation countdown state
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
 
   const isActionInProgressRef = useRef(false);
   const processedEventsRef = useRef<Set<string>>(new Set());
   const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  const fetchMissionVitals = useCallback(async (dispatchId: number) => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+    if (!token) return;
+    setVitalsLoading(true);
+    try {
+      const resp = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/vitals`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (resp.ok) {
+        const data: VitalsRecord[] = await resp.json();
+        setMissionVitals(data);
+      }
+    } catch (err) {
+      console.warn("Failed to fetch mission vitals:", err);
+    } finally {
+      setVitalsLoading(false);
+    }
+  }, [backendUrl]);
 
   const fetchAmbulanceData = useCallback(async () => {
     const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
@@ -171,6 +230,8 @@ export default function AmbulancePortalPage() {
                 setFeedbackMsg({ text: "Mission confirmation status synchronized with receiving hospital.", type: "success" });
               } else if (data.event === "HANDOVER_ACKNOWLEDGED") {
                 setFeedbackMsg({ text: "Receiving Hospital ER desk acknowledged digital handover packet!", type: "success" });
+              } else if (data.event === "PATIENT_VITALS_RECORDED") {
+                setFeedbackMsg({ text: "Patient vitals telemetry updated and synchronized.", type: "success" });
               }
               fetchAmbulanceData();
             }
@@ -195,10 +256,24 @@ export default function AmbulancePortalPage() {
     (d) => d.coordination_status === "PENDING_CONFIRMATIONS" && d.ambulance_confirmation_status === "PENDING"
   );
 
+  // Active dispatch accepted by ambulance but waiting for receiving hospital confirmation
+  const awaitingHospitalDispatch = dispatches.find(
+    (d) => d.coordination_status === "PENDING_CONFIRMATIONS" && d.ambulance_confirmation_status === "ACCEPTED"
+  );
+
   // Active confirmed or in-progress mission
   const activeMission = dispatches.find(
     (d) => d.coordination_status === "CONFIRMED" && d.status !== "COMPLETED" && d.status !== "CANCELLED"
   );
+
+  // Auto-fetch patient vitals whenever the active mission changes
+  useEffect(() => {
+    if (activeMission?.id) {
+      fetchMissionVitals(activeMission.id);
+    } else {
+      setMissionVitals([]);
+    }
+  }, [activeMission?.id, fetchMissionVitals]);
 
   // Calculate live reservation countdown
   useEffect(() => {
@@ -282,6 +357,92 @@ export default function AmbulancePortalPage() {
     } finally {
       isActionInProgressRef.current = false;
       setActionLoading(false);
+    }
+  };
+
+  const handleSubmitVitals = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeMission) return;
+
+    setVitalsError(null);
+    setVitalsSuccess(null);
+
+    const hr = parseInt(vitalsForm.heartRate, 10);
+    const sys = parseInt(vitalsForm.bpSystolic, 10);
+    const dia = parseInt(vitalsForm.bpDiastolic, 10);
+    const spo2 = parseInt(vitalsForm.oxygenSat, 10);
+    const rr = parseInt(vitalsForm.respRate, 10);
+
+    // Physiological input validation
+    if (isNaN(hr) || isNaN(sys) || isNaN(dia) || isNaN(spo2) || isNaN(rr)) {
+      setVitalsError("Please complete all numeric physiological vital fields.");
+      return;
+    }
+    if (hr < 30 || hr > 250) {
+      setVitalsError("Heart rate must be between 30 and 250 bpm.");
+      return;
+    }
+    if (sys < 50 || sys > 260) {
+      setVitalsError("Systolic BP must be between 50 and 260 mmHg.");
+      return;
+    }
+    if (dia < 30 || dia > 160) {
+      setVitalsError("Diastolic BP must be between 30 and 160 mmHg.");
+      return;
+    }
+    if (sys <= dia) {
+      setVitalsError("Systolic pressure must be higher than diastolic pressure.");
+      return;
+    }
+    if (spo2 < 50 || spo2 > 100) {
+      setVitalsError("Oxygen saturation (SpO2) must be between 50% and 100%.");
+      return;
+    }
+    if (rr < 5 || rr > 60) {
+      setVitalsError("Respiratory rate must be between 5 and 60 breaths/min.");
+      return;
+    }
+
+    setVitalsSubmitting(true);
+    const token = localStorage.getItem("lifelink_token");
+
+    try {
+      const resp = await fetch(`${backendUrl}/api/dispatch/${activeMission.id}/vitals`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          heart_rate: hr,
+          blood_pressure_systolic: sys,
+          blood_pressure_diastolic: dia,
+          oxygen_saturation: spo2,
+          respiratory_rate: rr,
+          notes: vitalsForm.notes.trim() || undefined,
+        }),
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to record patient vitals");
+      }
+
+      setVitalsSuccess("Patient vitals saved and transmitted to receiving hospital ER.");
+      setVitalsForm({
+        heartRate: "",
+        bpSystolic: "",
+        bpDiastolic: "",
+        oxygenSat: "",
+        respRate: "",
+        notes: "",
+      });
+      await fetchMissionVitals(activeMission.id);
+      await fetchAmbulanceData();
+    } catch (err: any) {
+      setVitalsError(err.message || "Network error while saving vitals");
+    } finally {
+      setVitalsSubmitting(false);
     }
   };
 
@@ -485,6 +646,41 @@ export default function AmbulancePortalPage() {
                 </div>
               )}
 
+              {/* CASE 1B: AMBULANCE ACCEPTED, AWAITING RECEIVING HOSPITAL CONFIRMATION */}
+              {awaitingHospitalDispatch && !pendingDispatch && !activeMission && (
+                <div className="bg-blue-50/70 border-2 border-blue-300 rounded-xl p-5 shadow-xs space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-blue-600 text-white flex items-center justify-center">
+                        <Clock className="w-5 h-5 animate-spin" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800">
+                            DISPATCH #{awaitingHospitalDispatch.id}
+                          </span>
+                          <span className="text-xs font-bold text-blue-900 uppercase">
+                            Unit Accepted • Awaiting Hospital ER Confirmation
+                          </span>
+                        </div>
+                        <h2 className="text-base font-bold text-slate-900 mt-0.5">
+                          Hospital Coordination in Progress
+                        </h2>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="bg-white border border-blue-100 rounded-lg p-4 text-xs space-y-2 text-slate-700">
+                    <p>
+                      Unit <strong>{ambulance?.call_sign}</strong> has accepted the dispatch for Incident #{awaitingHospitalDispatch.incident_id}.
+                      The Receiving Hospital (<strong>{awaitingHospitalDispatch.destination_hospital_name}</strong>) is currently verifying trauma bed & physician capacity.
+                    </p>
+                    <p className="text-[11px] text-slate-500">
+                      As soon as the receiving hospital confirms, your mission will automatically transition into active response mode.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* CASE 2: ACTIVE MISSION IN PROGRESS */}
               {activeMission ? (
                 <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-5">
@@ -569,6 +765,301 @@ export default function AmbulancePortalPage() {
                     </div>
                   </div>
 
+                  {/* PATIENT VITALS & CLINICAL TELEMETRY SECTION */}
+                  <div className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5 shadow-2xs space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                      <div className="flex items-center gap-2">
+                        <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 border border-rose-200 flex items-center justify-center">
+                          <Activity className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                            <span>Patient Vitals Telemetry</span>
+                            {missionVitals.length > 0 && (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                {missionVitals.length} recorded
+                              </span>
+                            )}
+                          </h3>
+                          <p className="text-[11px] text-slate-500">
+                            Real-time physiological metrics synchronized with receiving hospital ER
+                          </p>
+                        </div>
+                      </div>
+
+                      {missionVitals.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowVitalsHistory(!showVitalsHistory)}
+                          className="text-xs font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1 transition"
+                        >
+                          <span>{showVitalsHistory ? "Hide Vitals Log" : "View Vitals Log"}</span>
+                          {showVitalsHistory ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* LATEST RECORDED VITALS SNAPSHOT (if available) */}
+                    {missionVitals.length > 0 && (
+                      <div className="space-y-2">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                          Latest Reading ({new Date(missionVitals[0].recorded_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})
+                        </span>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                          {/* Heart Rate */}
+                          <div className="p-3 rounded-lg bg-rose-50/60 border border-rose-200/80">
+                            <div className="flex items-center justify-between text-rose-700 text-[11px] font-bold">
+                              <span>Heart Rate</span>
+                              <Heart className="w-3.5 h-3.5" />
+                            </div>
+                            <div className="mt-1 flex items-baseline gap-1">
+                              <span className="text-xl font-black text-rose-950 font-mono">
+                                {missionVitals[0].heart_rate}
+                              </span>
+                              <span className="text-[10px] text-rose-600 font-medium">bpm</span>
+                            </div>
+                          </div>
+
+                          {/* Blood Pressure */}
+                          <div className="p-3 rounded-lg bg-indigo-50/60 border border-indigo-200/80">
+                            <div className="flex items-center justify-between text-indigo-700 text-[11px] font-bold">
+                              <span>Blood Pressure</span>
+                              <Droplet className="w-3.5 h-3.5" />
+                            </div>
+                            <div className="mt-1 flex items-baseline gap-1">
+                              <span className="text-xl font-black text-indigo-950 font-mono">
+                                {missionVitals[0].blood_pressure_systolic}/{missionVitals[0].blood_pressure_diastolic}
+                              </span>
+                              <span className="text-[10px] text-indigo-600 font-medium">mmHg</span>
+                            </div>
+                          </div>
+
+                          {/* Oxygen Saturation */}
+                          <div className="p-3 rounded-lg bg-sky-50/60 border border-sky-200/80">
+                            <div className="flex items-center justify-between text-sky-700 text-[11px] font-bold">
+                              <span>Oxygen (SpO2)</span>
+                              <Wind className="w-3.5 h-3.5" />
+                            </div>
+                            <div className="mt-1 flex items-baseline gap-1">
+                              <span className="text-xl font-black text-sky-950 font-mono">
+                                {missionVitals[0].oxygen_saturation}%
+                              </span>
+                              <span className="text-[10px] text-sky-600 font-medium">sat</span>
+                            </div>
+                          </div>
+
+                          {/* Respiratory Rate */}
+                          <div className="p-3 rounded-lg bg-emerald-50/60 border border-emerald-200/80">
+                            <div className="flex items-center justify-between text-emerald-700 text-[11px] font-bold">
+                              <span>Resp. Rate</span>
+                              <Activity className="w-3.5 h-3.5" />
+                            </div>
+                            <div className="mt-1 flex items-baseline gap-1">
+                              <span className="text-xl font-black text-emerald-950 font-mono">
+                                {missionVitals[0].respiratory_rate}
+                              </span>
+                              <span className="text-[10px] text-emerald-600 font-medium">/min</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {missionVitals[0].notes && (
+                          <div className="text-xs bg-slate-50 border border-slate-200 rounded-md p-2 text-slate-700">
+                            <span className="font-semibold text-slate-900">Crew Notes: </span>
+                            {missionVitals[0].notes}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* EXPANDABLE VITALS HISTORY LOG */}
+                    {showVitalsHistory && missionVitals.length > 1 && (
+                      <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50/50">
+                        <div className="px-3 py-2 bg-slate-100/70 border-b border-slate-200 text-[11px] font-bold text-slate-700">
+                          Mission Vitals Timeline ({missionVitals.length} records)
+                        </div>
+                        <div className="overflow-x-auto max-h-48">
+                          <table className="w-full text-left text-xs">
+                            <thead className="bg-slate-50 text-slate-500 text-[10px] uppercase font-mono border-b border-slate-200">
+                              <tr>
+                                <th className="py-2 px-3">Time</th>
+                                <th className="py-2 px-3">HR (bpm)</th>
+                                <th className="py-2 px-3">BP (mmHg)</th>
+                                <th className="py-2 px-3">SpO2</th>
+                                <th className="py-2 px-3">RR (/min)</th>
+                                <th className="py-2 px-3">Notes</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-200 bg-white">
+                              {missionVitals.map((v) => (
+                                <tr key={v.id} className="hover:bg-slate-50">
+                                  <td className="py-1.5 px-3 font-mono text-slate-600">
+                                    {new Date(v.recorded_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                                  </td>
+                                  <td className="py-1.5 px-3 font-mono font-bold text-rose-700">{v.heart_rate}</td>
+                                  <td className="py-1.5 px-3 font-mono font-semibold text-indigo-700">
+                                    {v.blood_pressure_systolic}/{v.blood_pressure_diastolic}
+                                  </td>
+                                  <td className="py-1.5 px-3 font-mono font-semibold text-sky-700">{v.oxygen_saturation}%</td>
+                                  <td className="py-1.5 px-3 font-mono text-emerald-700">{v.respiratory_rate}</td>
+                                  <td className="py-1.5 px-3 text-slate-600 truncate max-w-xs">{v.notes || "—"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* RECORD NEW VITALS FORM */}
+                    <form onSubmit={handleSubmitVitals} className="bg-slate-50 border border-slate-200 rounded-lg p-3.5 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-slate-900">
+                          {missionVitals.length === 0 ? "Record Initial Patient Vitals" : "Log Updated Patient Vitals"}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-medium">Physiological metrics validation active</span>
+                      </div>
+
+                      {/* Error & Success Feedback */}
+                      {vitalsError && (
+                        <div className="p-2 rounded bg-red-50 border border-red-200 text-xs text-red-700 font-medium flex items-center justify-between">
+                          <span>{vitalsError}</span>
+                          <button type="button" onClick={() => setVitalsError(null)} className="font-bold ml-2">✕</button>
+                        </div>
+                      )}
+                      {vitalsSuccess && (
+                        <div className="p-2 rounded bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-medium flex items-center justify-between">
+                          <span>{vitalsSuccess}</span>
+                          <button type="button" onClick={() => setVitalsSuccess(null)} className="font-bold ml-2">✕</button>
+                        </div>
+                      )}
+
+                      {/* 5 Compact Metric Inputs */}
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                        {/* Heart Rate */}
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-700 block mb-1">
+                            Heart Rate (bpm)*
+                          </label>
+                          <input
+                            type="number"
+                            min="30"
+                            max="250"
+                            required
+                            placeholder="75"
+                            value={vitalsForm.heartRate}
+                            onChange={(e) => setVitalsForm({ ...vitalsForm, heartRate: e.target.value })}
+                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                          />
+                        </div>
+
+                        {/* Systolic BP */}
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-700 block mb-1">
+                            BP Systolic*
+                          </label>
+                          <input
+                            type="number"
+                            min="50"
+                            max="260"
+                            required
+                            placeholder="120"
+                            value={vitalsForm.bpSystolic}
+                            onChange={(e) => setVitalsForm({ ...vitalsForm, bpSystolic: e.target.value })}
+                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                          />
+                        </div>
+
+                        {/* Diastolic BP */}
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-700 block mb-1">
+                            BP Diastolic*
+                          </label>
+                          <input
+                            type="number"
+                            min="30"
+                            max="160"
+                            required
+                            placeholder="80"
+                            value={vitalsForm.bpDiastolic}
+                            onChange={(e) => setVitalsForm({ ...vitalsForm, bpDiastolic: e.target.value })}
+                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                          />
+                        </div>
+
+                        {/* SpO2 */}
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-700 block mb-1">
+                            SpO2 (%)*
+                          </label>
+                          <input
+                            type="number"
+                            min="50"
+                            max="100"
+                            required
+                            placeholder="98"
+                            value={vitalsForm.oxygenSat}
+                            onChange={(e) => setVitalsForm({ ...vitalsForm, oxygenSat: e.target.value })}
+                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                          />
+                        </div>
+
+                        {/* Respiratory Rate */}
+                        <div>
+                          <label className="text-[10px] font-bold text-slate-700 block mb-1">
+                            Resp Rate (/min)*
+                          </label>
+                          <input
+                            type="number"
+                            min="5"
+                            max="60"
+                            required
+                            placeholder="16"
+                            value={vitalsForm.respRate}
+                            onChange={(e) => setVitalsForm({ ...vitalsForm, respRate: e.target.value })}
+                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Paramedic Notes */}
+                      <div>
+                        <label className="text-[10px] font-bold text-slate-700 block mb-1">
+                          Paramedic Observations / Patient Condition (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          maxLength={500}
+                          placeholder="e.g. Patient conscious, alert, mild tachycardia on arrival"
+                          value={vitalsForm.notes}
+                          onChange={(e) => setVitalsForm({ ...vitalsForm, notes: e.target.value })}
+                          className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                      </div>
+
+                      {/* Submit Button */}
+                      <div className="flex items-center justify-end pt-1">
+                        <button
+                          type="submit"
+                          disabled={vitalsSubmitting}
+                          className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs shadow-xs transition flex items-center gap-1.5 disabled:opacity-50"
+                        >
+                          {vitalsSubmitting ? (
+                            <>
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              <span>Saving Vitals Telemetry...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Heart className="w-3.5 h-3.5" />
+                              <span>Save & Transmit Vitals</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+
                   {/* 4-STAGE LIFECYCLE STEPPER & CONTROL BUTTON */}
                   <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-3">
                     <div className="flex items-center justify-between text-xs font-bold text-slate-900">
@@ -578,26 +1069,35 @@ export default function AmbulancePortalPage() {
 
                     {/* Progress Track */}
                     <div className="grid grid-cols-4 gap-2 text-center text-xs">
-                      {[
-                        { id: "ASSIGNED", label: "1. Assigned" },
-                        { id: "EN_ROUTE_INCIDENT", label: "2. En Route Scene" },
-                        { id: "ON_SCENE", label: "3. On Scene" },
-                        { id: "EN_ROUTE_HOSPITAL", label: "4. En Route ER" },
-                      ].map((step, idx) => {
-                        const isCurrent = activeMission.status === step.id;
-                        return (
-                          <div
-                            key={step.id}
-                            className={`p-2 rounded-lg border text-xs font-semibold ${
-                              isCurrent
-                                ? "bg-blue-600 text-white border-blue-600 shadow-xs"
-                                : "bg-white text-slate-600 border-slate-200"
-                            }`}
-                          >
-                            {step.label}
-                          </div>
-                        );
-                      })}
+                      {(() => {
+                        const LIFECYCLE_ORDER = ["ASSIGNED", "EN_ROUTE_INCIDENT", "ON_SCENE", "EN_ROUTE_HOSPITAL", "AT_HOSPITAL", "COMPLETED"];
+                        const currentIdx = LIFECYCLE_ORDER.indexOf(activeMission.status);
+                        return [
+                          { id: "ASSIGNED", label: "1. Assigned" },
+                          { id: "EN_ROUTE_INCIDENT", label: "2. En Route Scene" },
+                          { id: "ON_SCENE", label: "3. On Scene" },
+                          { id: "EN_ROUTE_HOSPITAL", label: "4. En Route ER" },
+                        ].map((step) => {
+                          const stepIdx = LIFECYCLE_ORDER.indexOf(step.id);
+                          const isCompleted = currentIdx > stepIdx;
+                          const isCurrent = activeMission.status === step.id;
+                          return (
+                            <div
+                              key={step.id}
+                              className={`p-2 rounded-lg border text-xs font-semibold flex items-center justify-center gap-1 ${
+                                isCompleted
+                                  ? "bg-emerald-50 text-emerald-800 border-emerald-300"
+                                  : isCurrent
+                                  ? "bg-blue-600 text-white border-blue-600 shadow-xs"
+                                  : "bg-white text-slate-500 border-slate-200"
+                              }`}
+                            >
+                              {isCompleted && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />}
+                              <span>{step.label}</span>
+                            </div>
+                          );
+                        });
+                      })()}
                     </div>
 
                     {/* Prominent Next Action Button */}
@@ -620,7 +1120,7 @@ export default function AmbulancePortalPage() {
               ) : null}
 
               {/* CASE 3: NO ACTIVE MISSION — STANDBY / READINESS STATE */}
-              {!pendingDispatch && !activeMission && (
+              {!pendingDispatch && !awaitingHospitalDispatch && !activeMission && (
                 <div className="bg-white border border-slate-200 rounded-xl p-8 shadow-2xs text-center space-y-4 max-w-xl mx-auto">
                   <div className="w-14 h-14 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 mx-auto">
                     <Ambulance className="w-7 h-7" />
@@ -667,6 +1167,7 @@ export default function AmbulancePortalPage() {
                       <th className="py-2.5 px-3">Hospital Destination</th>
                       <th className="py-2.5 px-3">Confirmation Status</th>
                       <th className="py-2.5 px-3">Mission Status</th>
+                      <th className="py-2.5 px-3">Vitals Logged</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -682,6 +1183,15 @@ export default function AmbulancePortalPage() {
                         </td>
                         <td className="py-3 px-3">
                           <span className="font-mono text-slate-700">{disp.status}</span>
+                        </td>
+                        <td className="py-3 px-3">
+                          {disp.latest_vitals ? (
+                            <span className="text-[11px] font-mono font-semibold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded">
+                              HR {disp.latest_vitals.heart_rate} • {disp.latest_vitals.blood_pressure_systolic}/{disp.latest_vitals.blood_pressure_diastolic} • SpO2 {disp.latest_vitals.oxygen_saturation}%
+                            </span>
+                          ) : (
+                            <span className="text-slate-400 font-mono text-[11px]">—</span>
+                          )}
                         </td>
                       </tr>
                     ))}

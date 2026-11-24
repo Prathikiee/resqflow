@@ -2,7 +2,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status as http_status
 from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
-from backend.app.models.entities import Ambulance, User
+from backend.app.models.entities import Ambulance, User, Dispatch, Incident
 from backend.app.schemas.ambulance import AmbulanceOut, AmbulanceLocationUpdate
 from backend.app.core.auth import (
     get_optional_current_user,
@@ -70,6 +70,15 @@ def update_ambulance_status(
     db.commit()
     db.refresh(amb)
 
+    # Look up active dispatch to notify assigned citizen reporter via WebSocket
+    active_disp = db.query(Dispatch).filter(
+        Dispatch.ambulance_id == amb.id,
+        Dispatch.status.notin_(["COMPLETED", "CANCELLED"]),
+    ).first()
+    reporter_uid = None
+    if active_disp and active_disp.incident:
+        reporter_uid = active_disp.incident.reporter_user_id
+
     broadcast_sync(
         "AMBULANCE_STATUS_UPDATED",
         {
@@ -78,8 +87,10 @@ def update_ambulance_status(
             "status": amb.status,
             "current_latitude": amb.current_latitude,
             "current_longitude": amb.current_longitude,
+            "dispatch_id": active_disp.id if active_disp else None,
         },
         ambulance_id=amb.id,
+        reporter_user_id=reporter_uid,
         entity_type="ambulance",
         entity_id=amb.id,
     )
@@ -123,6 +134,15 @@ def update_ambulance_telemetry(
     db.commit()
     db.refresh(amb)
 
+    # Look up active dispatch to notify assigned citizen reporter via WebSocket
+    active_disp = db.query(Dispatch).filter(
+        Dispatch.ambulance_id == amb.id,
+        Dispatch.status.notin_(["COMPLETED", "CANCELLED"]),
+    ).first()
+    reporter_uid = None
+    if active_disp and active_disp.incident:
+        reporter_uid = active_disp.incident.reporter_user_id
+
     broadcast_sync(
         "AMBULANCE_STATUS_UPDATED",
         {
@@ -131,8 +151,10 @@ def update_ambulance_telemetry(
             "status": amb.status,
             "current_latitude": amb.current_latitude,
             "current_longitude": amb.current_longitude,
+            "dispatch_id": active_disp.id if active_disp else None,
         },
         ambulance_id=amb.id,
+        reporter_user_id=reporter_uid,
         entity_type="ambulance",
         entity_id=amb.id,
     )
