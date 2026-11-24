@@ -18,6 +18,7 @@ import {
   ChevronUp,
   Clock,
   Droplet,
+  ExternalLink,
   Eye,
   FileText,
   Filter,
@@ -117,6 +118,23 @@ interface CrashAlertRecord {
   created_at: string;
 }
 
+interface CollisionAlertRecord {
+  id: number;
+  caller_name: string;
+  caller_phone?: string;
+  location_address: string;
+  latitude: number;
+  longitude: number;
+  chief_complaint: string;
+  triage_level: string;
+  triage_color: string;
+  status: string;
+  is_collision_alert?: boolean;
+  incident_source?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 interface VitalsRecord {
   id: number;
   dispatch_id: number;
@@ -185,6 +203,7 @@ export default function HospitalPortalPage() {
   const [hospital, setHospital] = useState<any>(null);
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([]);
   const [crashAlerts, setCrashAlerts] = useState<CrashAlertRecord[]>([]);
+  const [collisionAlerts, setCollisionAlerts] = useState<CollisionAlertRecord[]>([]);
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [currentNav, setCurrentNav] = useState<string>("overview");
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -329,6 +348,18 @@ export default function HospitalPortalPage() {
         if (crashResp.ok) {
           setCrashAlerts(await crashResp.json());
         }
+
+        // 5. Fetch Dedicated Ambulance Collision Alerts (ESP32 Simulator)
+        try {
+          const colResp = await fetch(`${backendUrl}/api/incidents/collision-alerts`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (colResp.ok) {
+            setCollisionAlerts(await colResp.json());
+          }
+        } catch (colErr) {
+          console.warn("Collision alerts fetch error:", colErr);
+        }
       }
     } catch (err: any) {
       console.warn("Hospital data fetch error:", err);
@@ -377,6 +408,8 @@ export default function HospitalPortalPage() {
             "HANDOVER_COMPLETED",
             "PATIENT_VITALS_RECORDED",
             "AMBULANCE_CRASH_DETECTED",
+            "AMBULANCE_COLLISION_ALERT",
+            "INCIDENT_CREATED",
           ];
           if (relevantTypes.includes(type)) {
             fetchHospitalData();
@@ -396,7 +429,7 @@ export default function HospitalPortalPage() {
 
     connect();
 
-    const pollInterval = setInterval(fetchHospitalData, 7000);
+    const pollInterval = setInterval(fetchHospitalData, 5000);
 
     return () => {
       clearInterval(pollInterval);
@@ -1219,6 +1252,130 @@ export default function HospitalPortalPage() {
                     {availableDoctors.length} currently available
                   </div>
                 </div>
+              </div>
+
+              {/* Dedicated AMBULANCE COLLISION ALERTS Section */}
+              <div className="bg-white rounded-xl border border-red-200 shadow-sm p-4 space-y-3">
+                <div className="flex items-center justify-between border-b border-red-100 pb-2">
+                  <div className="flex items-center gap-2 text-red-700 font-bold text-sm">
+                    <ShieldAlert className="w-4 h-4 text-red-600 animate-pulse" />
+                    <span>AMBULANCE COLLISION ALERTS</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold px-2 py-0.5 bg-amber-100 text-amber-900 border border-amber-300 rounded-full tracking-wide">
+                      SIMULATED
+                    </span>
+                    <span className="text-xs font-semibold px-2 py-0.5 bg-red-100 text-red-800 rounded-full">
+                      {collisionAlerts.length} Event{collisionAlerts.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                </div>
+
+                {collisionAlerts.length === 0 ? (
+                  <div className="p-4 bg-slate-50 border border-dashed border-slate-200 rounded-lg text-center text-slate-500 text-xs">
+                    <Radio className="w-4 h-4 text-slate-400 mx-auto mb-1 animate-pulse" />
+                    No active ambulance collision alerts detected. System is actively listening for ESP32 hardware triggers.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {collisionAlerts.map((alert) => {
+                      const detectedDate = new Date(alert.created_at);
+                      const formattedDate = detectedDate.toLocaleDateString([], {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                      });
+                      const formattedTime = detectedDate.toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                        hour12: true,
+                      });
+                      const mapUrl = `https://www.google.com/maps?q=${alert.latitude},${alert.longitude}`;
+                      const osmUrl = `https://www.openstreetmap.org/?mlat=${alert.latitude}&mlon=${alert.longitude}#map=16/${alert.latitude}/${alert.longitude}`;
+
+                      return (
+                        <div
+                          key={alert.id}
+                          className="p-4 bg-gradient-to-r from-red-50/80 via-white to-red-50/40 rounded-xl border-2 border-red-300 shadow-sm space-y-3"
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-red-100 pb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-lg">🚨</span>
+                              <span className="text-sm font-extrabold text-red-900 tracking-tight">
+                                Ambulance Collision Detected
+                              </span>
+                              <span className="text-[11px] font-black px-2 py-0.5 bg-amber-200 text-amber-950 border border-amber-400 rounded uppercase tracking-wider">
+                                SIMULATED
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-mono font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                                Incident ID: #{alert.id}
+                              </span>
+                              <span className="text-xs font-bold px-2 py-0.5 bg-red-600 text-white rounded">
+                                {alert.status}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                            <div className="space-y-1 bg-white/80 p-2.5 rounded-lg border border-red-100">
+                              <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                                Detection Date & Time
+                              </div>
+                              <div className="font-semibold text-slate-800 flex items-center gap-1.5">
+                                <Clock className="w-3.5 h-3.5 text-red-600" />
+                                <span>{formattedDate} at {formattedTime}</span>
+                              </div>
+                              <div className="text-[11px] text-slate-500">
+                                Source: {alert.caller_name || "ESP32 Collision Simulator"}
+                              </div>
+                            </div>
+
+                            <div className="space-y-1 bg-white/80 p-2.5 rounded-lg border border-red-100">
+                              <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                                Fixed Collision Coordinates & Site
+                              </div>
+                              <div className="font-semibold text-slate-900 flex items-center gap-1.5">
+                                <MapPin className="w-3.5 h-3.5 text-red-600" />
+                                <span>{alert.location_address || "Canara Engineering College"}</span>
+                              </div>
+                              <div className="flex items-center justify-between text-[11px] text-slate-600">
+                                <span className="font-mono">Lat: {alert.latitude.toFixed(6)}, Lon: {alert.longitude.toFixed(6)}</span>
+                                <div className="flex items-center gap-2">
+                                  <a
+                                    href={mapUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="font-bold text-blue-600 hover:text-blue-800 underline flex items-center gap-0.5"
+                                  >
+                                    Google Maps <ExternalLink className="w-3 h-3 inline" />
+                                  </a>
+                                  <span className="text-slate-300">•</span>
+                                  <a
+                                    href={osmUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="font-bold text-blue-600 hover:text-blue-800 underline flex items-center gap-0.5"
+                                  >
+                                    OSM <ExternalLink className="w-3 h-3 inline" />
+                                  </a>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {alert.chief_complaint && (
+                            <div className="text-xs bg-red-100/60 p-2 rounded-lg text-red-950 font-medium border border-red-200/60">
+                              {alert.chief_complaint}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* Crash Alerts Telemetry Card if present */}

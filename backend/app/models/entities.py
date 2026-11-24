@@ -53,6 +53,10 @@ class Incident(Base):
     # Citizen Reporter linkage (nullable for walk-ins / legacy / anonymous calls)
     reporter_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
 
+    # Collision Alert Identification (e.g. ESP32 Ambulance Collision Simulator)
+    is_collision_alert = Column(Boolean, default=False, index=True)
+    incident_source = Column(String(50), default="MANUAL")
+
     created_at = Column(DateTime, default=utc_now, nullable=False)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 

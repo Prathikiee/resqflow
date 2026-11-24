@@ -56,6 +56,15 @@ def upgrade_schema(target_engine=None):
                 if "reporter_user_id" not in inc_cols:
                     conn.execute(text("ALTER TABLE incidents ADD COLUMN reporter_user_id INTEGER"))
                     conn.commit()
+                if "is_collision_alert" not in inc_cols:
+                    conn.execute(text("ALTER TABLE incidents ADD COLUMN is_collision_alert BOOLEAN DEFAULT FALSE"))
+                    conn.commit()
+                if "incident_source" not in inc_cols:
+                    conn.execute(text("ALTER TABLE incidents ADD COLUMN incident_source VARCHAR(50) DEFAULT 'MANUAL'"))
+                    conn.commit()
+                # Backfill any existing ESP32 collision records if present
+                conn.execute(text("UPDATE incidents SET is_collision_alert = TRUE, incident_source = 'ESP32_SIMULATOR' WHERE caller_name = 'ESP32 Collision Simulator' OR chief_complaint LIKE '%SIMULATED AMBULANCE COLLISION%'"))
+                conn.commit()
 
             if "ambulances" in table_names:
                 amb_cols = [c["name"] for c in inspector.get_columns("ambulances")]
@@ -109,14 +118,15 @@ def upgrade_schema(target_engine=None):
 
             if "dispatches" in table_names:
                 disp_cols = [c["name"] for c in inspector.get_columns("dispatches")]
+                dt_type = "TIMESTAMP" if "postgres" in str(eng.url).lower() else "DATETIME"
                 if "hospital_preparation_status" not in disp_cols:
                     conn.execute(text("ALTER TABLE dispatches ADD COLUMN hospital_preparation_status VARCHAR(40) DEFAULT 'NOT_STARTED'"))
                 if "hospital_preparation_notes" not in disp_cols:
                     conn.execute(text("ALTER TABLE dispatches ADD COLUMN hospital_preparation_notes TEXT"))
                 if "hospital_acknowledged_at" not in disp_cols:
-                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN hospital_acknowledged_at DATETIME"))
+                    conn.execute(text(f"ALTER TABLE dispatches ADD COLUMN hospital_acknowledged_at {dt_type}"))
                 if "patient_arrived_hospital_confirmed_at" not in disp_cols:
-                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN patient_arrived_hospital_confirmed_at DATETIME"))
+                    conn.execute(text(f"ALTER TABLE dispatches ADD COLUMN patient_arrived_hospital_confirmed_at {dt_type}"))
                 if "coordination_status" not in disp_cols:
                     conn.execute(text("ALTER TABLE dispatches ADD COLUMN coordination_status VARCHAR(40) DEFAULT 'PENDING_CONFIRMATIONS'"))
                 if "ambulance_confirmation_status" not in disp_cols:
@@ -124,13 +134,13 @@ def upgrade_schema(target_engine=None):
                 if "hospital_confirmation_status" not in disp_cols:
                     conn.execute(text("ALTER TABLE dispatches ADD COLUMN hospital_confirmation_status VARCHAR(20) DEFAULT 'PENDING'"))
                 if "reservation_expires_at" not in disp_cols:
-                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN reservation_expires_at DATETIME"))
+                    conn.execute(text(f"ALTER TABLE dispatches ADD COLUMN reservation_expires_at {dt_type}"))
                 if "ambulance_confirmed_at" not in disp_cols:
-                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN ambulance_confirmed_at DATETIME"))
+                    conn.execute(text(f"ALTER TABLE dispatches ADD COLUMN ambulance_confirmed_at {dt_type}"))
                 if "hospital_confirmed_at" not in disp_cols:
-                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN hospital_confirmed_at DATETIME"))
+                    conn.execute(text(f"ALTER TABLE dispatches ADD COLUMN hospital_confirmed_at {dt_type}"))
                 if "confirmed_at" not in disp_cols:
-                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN confirmed_at DATETIME"))
+                    conn.execute(text(f"ALTER TABLE dispatches ADD COLUMN confirmed_at {dt_type}"))
                 if "rejection_source" not in disp_cols:
                     conn.execute(text("ALTER TABLE dispatches ADD COLUMN rejection_source VARCHAR(30)"))
                 if "rejection_reason" not in disp_cols:

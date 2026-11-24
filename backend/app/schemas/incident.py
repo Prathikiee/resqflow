@@ -21,6 +21,10 @@ class IncidentCreate(BaseModel):
     suspected_stroke: bool = False
     severe_trauma: bool = False
 
+    # Collision alert flags (optional - also auto-detected via caller_name / chief_complaint)
+    is_collision_alert: Optional[bool] = False
+    incident_source: Optional[str] = None
+
 class TriagePreviewRequest(BaseModel):
     chief_complaint: str
     consciousness_level: str = "Alert"
@@ -67,6 +71,8 @@ class IncidentOut(BaseModel):
     triage_justifications: List[str]
     required_ambulance_type: str
     status: str
+    is_collision_alert: bool = False
+    incident_source: Optional[str] = "MANUAL"
     witness_count: int = 0
     created_at: datetime
     updated_at: datetime

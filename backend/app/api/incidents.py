@@ -117,8 +117,30 @@ def create_incident(
     Emergency Registration & Triage:
     Registers incoming incident, executes transparent rule-based triage,
     attaches clinical justification tags, and persists to database.
+    Supports ESP32 ambulance collision telemetry integration with fixed demo location.
     """
     auth_user = current_user if isinstance(current_user, User) else None
+
+    # Detect ESP32 Collision Simulator payload
+    is_esp32_collision = (
+        bool(getattr(payload, "is_collision_alert", False))
+        or payload.caller_name == "ESP32 Collision Simulator"
+        or "SIMULATED AMBULANCE COLLISION" in (payload.chief_complaint or "")
+    )
+
+    # Use fixed demo coordinates for ESP32 collision alerts if detected
+    if is_esp32_collision:
+        loc_address = "Canara Engineering College"
+        lat = 12.899259
+        lon = 74.984388
+        is_col_flag = True
+        inc_src = "ESP32_SIMULATOR"
+    else:
+        loc_address = payload.location_address
+        lat = payload.latitude
+        lon = payload.longitude
+        is_col_flag = bool(getattr(payload, "is_collision_alert", False))
+        inc_src = getattr(payload, "incident_source", None) or "MANUAL"
 
     triage = assess_incident_severity(
         chief_complaint=payload.chief_complaint,
@@ -134,9 +156,9 @@ def create_incident(
     incident = Incident(
         caller_name=payload.caller_name,
         caller_phone=payload.caller_phone,
-        location_address=payload.location_address,
-        latitude=payload.latitude,
-        longitude=payload.longitude,
+        location_address=loc_address,
+        latitude=lat,
+        longitude=lon,
         chief_complaint=payload.chief_complaint,
         patient_age=payload.patient_age,
         patient_gender=payload.patient_gender,
@@ -152,6 +174,8 @@ def create_incident(
         required_ambulance_type=triage.required_ambulance_type,
         status="TRIAGED",
         reporter_user_id=auth_user.id if auth_user else None,
+        is_collision_alert=is_col_flag,
+        incident_source=inc_src,
     )
     incident.triage_justifications = triage.justifications
 
@@ -159,7 +183,7 @@ def create_incident(
     db.commit()
     db.refresh(incident)
 
-    # FEATURE 5 — Log incident registration and triage events
+    # Log incident registration and triage events
     log_incident_event(
         db=db,
         incident_id=incident.id,
@@ -172,6 +196,8 @@ def create_incident(
             "caller_name": incident.caller_name,
             "location_address": incident.location_address,
             "coordinates": [incident.latitude, incident.longitude],
+            "is_collision_alert": incident.is_collision_alert,
+            "incident_source": incident.incident_source,
         },
     )
     log_incident_event(
@@ -191,25 +217,88 @@ def create_incident(
         },
     )
 
+    if incident.is_collision_alert:
+        log_incident_event(
+            db=db,
+            incident_id=incident.id,
+            event_type="AMBULANCE_COLLISION_ALERT",
+            event_title="Ambulance Collision Detected (SIMULATED)",
+            event_description=f"Hardware collision trigger received from {incident.caller_name} at {incident.location_address} ({incident.latitude}, {incident.longitude}).",
+            actor_type="SYSTEM",
+            actor_reference="ESP32 Collision Simulator",
+            metadata={
+                "caller_name": incident.caller_name,
+                "location_address": incident.location_address,
+                "coordinates": [incident.latitude, incident.longitude],
+                "is_collision_alert": True,
+                "incident_source": incident.incident_source,
+                "simulated": True,
+            },
+        )
+
+    broadcast_payload = {
+        "incident_id": incident.id,
+        "caller_name": incident.caller_name,
+        "triage_level": incident.triage_level,
+        "triage_color": incident.triage_color,
+        "status": incident.status,
+        "reporter_user_id": incident.reporter_user_id,
+        "chief_complaint": incident.chief_complaint,
+        "location_address": incident.location_address,
+        "latitude": incident.latitude,
+        "longitude": incident.longitude,
+        "is_collision_alert": incident.is_collision_alert,
+        "incident_source": incident.incident_source,
+        "created_at": incident.created_at.isoformat() if incident.created_at else None,
+    }
+
     broadcast_sync(
         "INCIDENT_CREATED",
-        {
-            "incident_id": incident.id,
-            "caller_name": incident.caller_name,
-            "triage_level": incident.triage_level,
-            "triage_color": incident.triage_color,
-            "status": incident.status,
-            "reporter_user_id": incident.reporter_user_id,
-            "chief_complaint": incident.chief_complaint,
-            "location_address": incident.location_address,
-        },
+        broadcast_payload,
         reporter_user_id=incident.reporter_user_id,
-        target_roles=[ROLE_DISPATCHER, ROLE_SUPER_ADMIN],
+        broadcast_to_all=True,
         entity_type="incident",
         entity_id=incident.id,
     )
 
+    if incident.is_collision_alert:
+        broadcast_sync(
+            "AMBULANCE_COLLISION_ALERT",
+            broadcast_payload,
+            broadcast_to_all=True,
+            entity_type="collision_alert",
+            entity_id=incident.id,
+        )
+        broadcast_sync(
+            "AMBULANCE_CRASH_DETECTED",
+            broadcast_payload,
+            broadcast_to_all=True,
+            entity_type="crash_alert",
+            entity_id=incident.id,
+        )
+
     return incident
+
+@router.get("/collision-alerts", response_model=List[IncidentOut])
+def list_collision_alerts(
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Returns dedicated list of ambulance collision alerts (e.g. from ESP32 simulator).
+    Accessible to Hospital Staff, Dispatchers, and Admins.
+    """
+    alerts = (
+        db.query(Incident)
+        .filter(
+            (Incident.is_collision_alert == True)
+            | (Incident.caller_name == "ESP32 Collision Simulator")
+            | (Incident.chief_complaint.like("%SIMULATED AMBULANCE COLLISION%"))
+        )
+        .order_by(Incident.created_at.desc())
+        .all()
+    )
+    return alerts
 
 @router.get("", response_model=List[IncidentOut])
 def list_incidents(
@@ -230,9 +319,14 @@ def list_incidents(
         elif auth_user.role == ROLE_HOSPITAL_STAFF:
             if not auth_user.hospital_id:
                 return []
-            query = query.join(Dispatch, Dispatch.incident_id == Incident.id).filter(
-                Dispatch.destination_hospital_id == auth_user.hospital_id
-            ).distinct()
+            query = query.filter(
+                (Incident.id.in_(
+                    db.query(Dispatch.incident_id).filter(Dispatch.destination_hospital_id == auth_user.hospital_id)
+                ))
+                | (Incident.is_collision_alert == True)
+                | (Incident.caller_name == "ESP32 Collision Simulator")
+                | (Incident.chief_complaint.like("%SIMULATED AMBULANCE COLLISION%"))
+            )
 
     return query.order_by(Incident.triage_score.desc(), Incident.created_at.desc()).all()
 
