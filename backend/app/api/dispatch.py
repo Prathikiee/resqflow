@@ -17,6 +17,7 @@ from backend.app.schemas.dispatch import (
     HandoverCompleteRequest,
     HandoverPacketOut,
     HospitalPreparationUpdate,
+    MissionAssistanceRequest,
 )
 from backend.app.services.allocation_engine import score_and_rank_ambulances
 from backend.app.services.hospital_engine import rank_suitable_hospitals
@@ -2205,6 +2206,153 @@ def confirm_patient_arrival_at_hospital(
     )
 
     return dispatch
+
+@router.post("/{dispatch_id}/confirm-patient-pickup", response_model=DispatchOut)
+def confirm_patient_pickup(
+    dispatch_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Driver explicitly confirms that the patient is physically inside the ambulance
+    and secured for transport. Advances the dispatch status to EN_ROUTE_HOSPITAL,
+    marks incident and ambulance as TRANSPORTING, calculates the hospital route,
+    logs the PATIENT_PICKED_UP event, and broadcasts real-time updates.
+    """
+    begin_immediate_if_sqlite(db)
+    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot confirm patient pickup")
+        if auth_user.role == ROLE_AMBULANCE_CREW and auth_user.ambulance_id != dispatch.ambulance_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot confirm patient pickup for another unit")
+
+    if dispatch.status != "ON_SCENE":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot confirm patient pickup: Unit must be ON_SCENE (current status: '{dispatch.status}').",
+        )
+
+    now = get_utc_now()
+    dispatch.status = "EN_ROUTE_HOSPITAL"
+    dispatch.departed_incident_at = now
+
+    incident = db.query(Incident).filter(Incident.id == dispatch.incident_id).first()
+    ambulance = db.query(Ambulance).filter(Ambulance.id == dispatch.ambulance_id).first()
+
+    if incident:
+        incident.status = "TRANSPORTING"
+    if ambulance:
+        ambulance.status = "TRANSPORTING"
+
+    # Calculate and attach route to destination hospital
+    if dispatch.destination_hospital_id and incident:
+        hospital = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id).first()
+        if hospital:
+            h_route = calculate_route(
+                start_lat=incident.latitude,
+                start_lon=incident.longitude,
+                dest_lat=hospital.latitude,
+                dest_lon=hospital.longitude,
+            )
+            dispatch.route_geometry = h_route.get("geometry", [])
+            dispatch.estimated_eta_seconds = h_route.get("duration_seconds")
+            dispatch.route_distance_meters = h_route.get("distance_meters")
+
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="PATIENT_PICKED_UP",
+        event_title="Patient Picked Up On Scene",
+        event_description=f"Ambulance crew {ambulance.call_sign if ambulance else 'unit'} confirmed patient is safely boarded and departing towards {dispatch.destination_hospital_name or 'the hospital'}.",
+        actor_type="AMBULANCE_CREW",
+        actor_reference=ambulance.call_sign if ambulance else "Unit Crew",
+        metadata={"status": dispatch.status, "hospital_id": dispatch.destination_hospital_id},
+        commit=False,
+    )
+
+    if dispatch.handover_packet:
+        generate_or_update_handover_packet(dispatch, db, commit=False)
+
+    db.commit()
+    db.refresh(dispatch)
+
+    broadcast_sync(
+        "PATIENT_PICKED_UP",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "ambulance_id": dispatch.ambulance_id,
+            "destination_hospital_id": dispatch.destination_hospital_id,
+            "status": dispatch.status,
+            "incident_status": incident.status if incident else "TRANSPORTING",
+            "ambulance_status": ambulance.status if ambulance else "TRANSPORTING",
+            "estimated_eta_seconds": dispatch.estimated_eta_seconds,
+        },
+        ambulance_id=dispatch.ambulance_id,
+        hospital_id=dispatch.destination_hospital_id,
+        reporter_user_id=incident.reporter_user_id if incident else None,
+        entity_type="dispatch",
+        entity_id=dispatch.id,
+    )
+
+    return dispatch
+
+@router.post("/{dispatch_id}/request-assistance")
+def request_mission_assistance(
+    dispatch_id: int,
+    payload: Optional[MissionAssistanceRequest] = None,
+    assistance_type: Optional[str] = None,
+    notes: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Paramedic crew requests operational assistance (Police backup, Fire rescue, or Dispatcher callback).
+    """
+    final_type = (payload.assistance_type if payload and payload.assistance_type else assistance_type) or "CONTROL_ROOM"
+    final_notes = (payload.notes if payload and payload.notes is not None else notes)
+
+    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    ambulance = db.query(Ambulance).filter(Ambulance.id == dispatch.ambulance_id).first()
+
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="ASSISTANCE_REQUESTED",
+        event_title=f"Operational Assistance Requested: {final_type.replace('_', ' ').title()}",
+        event_description=f"Ambulance {ambulance.call_sign if ambulance else 'crew'} requested {final_type}. Notes: {final_notes or 'Immediate assistance requested on active mission.'}",
+        actor_type="AMBULANCE_CREW",
+        actor_reference=ambulance.call_sign if ambulance else "Unit Crew",
+        metadata={"dispatch_id": dispatch.id, "assistance_type": final_type, "notes": final_notes},
+    )
+
+    broadcast_sync(
+        "ASSISTANCE_REQUESTED",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "ambulance_id": dispatch.ambulance_id,
+            "call_sign": ambulance.call_sign if ambulance else None,
+            "assistance_type": final_type,
+            "notes": final_notes,
+        },
+        ambulance_id=dispatch.ambulance_id,
+        hospital_id=dispatch.destination_hospital_id,
+        entity_type="assistance_request",
+        entity_id=dispatch.id,
+    )
+
+    return {"status": "ok", "message": f"Assistance request for {final_type} transmitted to Control Room"}
 
 @router.get("/route/preview")
 def preview_route(

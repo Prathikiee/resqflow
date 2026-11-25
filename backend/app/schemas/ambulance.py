@@ -23,3 +23,9 @@ class AmbulanceLocationUpdate(BaseModel):
     latitude: float = Field(..., ge=-90.0, le=90.0)
     longitude: float = Field(..., ge=-180.0, le=180.0)
     status: Optional[str] = None
+
+class AmbulanceIssueReport(BaseModel):
+    issue_type: str = Field(..., description="MECHANICAL, MEDICAL_EQUIPMENT, FUEL, COMMUNICATIONS, OTHER")
+    notes: Optional[str] = None
+    mark_maintenance: bool = False
+

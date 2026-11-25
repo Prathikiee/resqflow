@@ -4,57 +4,59 @@ import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
   Activity,
+  AlertOctagon,
   AlertTriangle,
   Ambulance,
   ArrowRight,
+  Battery,
+  Bell,
   Building2,
   Check,
   CheckCircle2,
-  ChevronDown,
   ChevronRight,
-  ChevronUp,
   Clock,
   Compass,
-  Droplet,
+  Copy,
   ExternalLink,
-  Eye,
   FileText,
   Fuel,
   Heart,
   History,
-  LayoutDashboard,
+  LifeBuoy,
   LogOut,
   MapPin,
   Navigation,
   Phone,
+  PhoneCall,
   Radio,
   RefreshCw,
+  Send,
   Shield,
   ShieldAlert,
-  Sliders,
+  ShieldCheck,
+  Stethoscope,
+  Truck,
   User,
+  Volume2,
+  VolumeX,
   Wind,
   Wrench,
   X,
 } from "lucide-react";
-import Sidebar, { NavItem } from "@/components/layout/Sidebar";
-import TopNav from "@/components/layout/TopNav";
 import { formatDistance, formatDuration } from "@/lib/utils";
+import AmbulanceMapWrapper from "@/components/AmbulanceMapWrapper";
 
 interface VitalsRecord {
   id: number;
   dispatch_id: number;
   incident_id: number;
-  recorded_by_user_id?: number;
   heart_rate: number;
   blood_pressure_systolic: number;
   blood_pressure_diastolic: number;
   oxygen_saturation: number;
   respiratory_rate: number;
   notes?: string | null;
-  blood_pressure_display?: string;
   recorded_at: string;
-  created_at?: string;
 }
 
 interface DispatchRecord {
@@ -92,36 +94,122 @@ interface DispatchRecord {
   };
   handover_packet?: any;
   vitals?: VitalsRecord[];
-  latest_vitals?: VitalsRecord;
 }
 
-const NEXT_LIFECYCLE_ACTION: Record<string, { nextStatus: string; label: string; icon: React.ElementType }> = {
-  ASSIGNED: { nextStatus: "EN_ROUTE_INCIDENT", label: "Confirm En Route to Incident Scene", icon: Navigation },
-  EN_ROUTE_INCIDENT: { nextStatus: "ON_SCENE", label: "Confirm Arrived on Scene with Patient", icon: MapPin },
-  ON_SCENE: { nextStatus: "EN_ROUTE_HOSPITAL", label: "Patient Onboard • Departing Scene towards Hospital ER", icon: Building2 },
-  EN_ROUTE_HOSPITAL: { nextStatus: "COMPLETED", label: "Confirm Arrived at ER & Safe Handover", icon: CheckCircle2 },
-  AT_HOSPITAL: { nextStatus: "COMPLETED", label: "Complete ER Handover & Mark Unit Available", icon: CheckCircle2 },
-};
+interface AmbulanceEntity {
+  id: number;
+  call_sign: string;
+  vehicle_type: string;
+  equipment: string[];
+  paramedic_level: string;
+  status: string;
+  base_station: string;
+  current_latitude: number;
+  current_longitude: number;
+  fuel_level_percent: number;
+  is_active: boolean;
+}
+
+// -------------------------------------------------------------
+// Web Audio API Emergency Alarm (3-beep sequence)
+// -------------------------------------------------------------
+function playEmergencyAlarm(durationSeconds = 3): () => void {
+  try {
+    const AudioContextClass =
+      window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextClass) return () => {};
+    const audioCtx = new AudioContextClass();
+
+    let isStopped = false;
+    let timerId: any = null;
+
+    const stopAlarm = () => {
+      isStopped = true;
+      if (timerId) clearTimeout(timerId);
+      try {
+        if (audioCtx.state !== "closed") {
+          audioCtx.close();
+        }
+      } catch (_) {}
+    };
+
+    const playBeepTriple = (timeOffset: number) => {
+      if (isStopped) return;
+      [0, 0.28, 0.56].forEach((delay, idx) => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        const freq = idx === 2 ? 1046.5 : 880;
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(
+          freq,
+          audioCtx.currentTime + timeOffset + delay
+        );
+        gain.gain.setValueAtTime(
+          0.25,
+          audioCtx.currentTime + timeOffset + delay
+        );
+        gain.gain.exponentialRampToValueAtTime(
+          0.005,
+          audioCtx.currentTime + timeOffset + delay + 0.18
+        );
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(audioCtx.currentTime + timeOffset + delay);
+        osc.stop(audioCtx.currentTime + timeOffset + delay + 0.2);
+      });
+    };
+
+    playBeepTriple(0);
+    playBeepTriple(1.1);
+    playBeepTriple(2.2);
+
+    timerId = setTimeout(stopAlarm, durationSeconds * 1000);
+    return stopAlarm;
+  } catch (err) {
+    console.warn("Autoplay audio blocked or AudioContext unavailable:", err);
+    return () => {};
+  }
+}
 
 export default function AmbulancePortalPage() {
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
-  const [ambulance, setAmbulance] = useState<any>(null);
+  const [ambulance, setAmbulance] = useState<AmbulanceEntity | null>(null);
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([]);
-  const [currentNav, setCurrentNav] = useState<string>("overview");
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [currentTab, setCurrentTab] = useState<
+    "home" | "missions" | "vehicle" | "support"
+  >("home");
   const [isLoading, setIsLoading] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
-  const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: "success" | "error" | "info" } | null>(null);
+  const [feedbackMsg, setFeedbackMsg] = useState<{
+    text: string;
+    type: "success" | "error" | "info";
+  } | null>(null);
+
+  // Modals state
+  const [showPickupModal, setShowPickupModal] = useState(false);
+  const [showAssistanceModal, setShowAssistanceModal] = useState(false);
+  const [showReportIssueModal, setShowReportIssueModal] = useState(false);
+  const [selectedMissionDetails, setSelectedMissionDetails] =
+    useState<DispatchRecord | null>(null);
+
+  // Assistance form state
+  const [assistanceType, setAssistanceType] = useState<string>("POLICE");
+  const [assistanceNotes, setAssistanceNotes] = useState<string>("");
+
+  // Report issue form state
+  const [issueType, setIssueType] = useState<string>("MECHANICAL");
+  const [issueNotes, setIssueNotes] = useState<string>("");
+  const [issueMarkMaintenance, setIssueMarkMaintenance] =
+    useState<boolean>(false);
 
   // Patient vitals state
   const [missionVitals, setMissionVitals] = useState<VitalsRecord[]>([]);
-  const [vitalsLoading, setVitalsLoading] = useState(false);
+  const [showVitalsForm, setShowVitalsForm] = useState(false);
   const [vitalsSubmitting, setVitalsSubmitting] = useState(false);
   const [vitalsError, setVitalsError] = useState<string | null>(null);
   const [vitalsSuccess, setVitalsSuccess] = useState<string | null>(null);
-  const [showVitalsHistory, setShowVitalsHistory] = useState(false);
   const [vitalsForm, setVitalsForm] = useState({
     heartRate: "",
     bpSystolic: "",
@@ -131,34 +219,49 @@ export default function AmbulancePortalPage() {
     notes: "",
   });
 
-  // Reservation countdown state
+  // Countdown state for incoming pending assignment
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
+
+  // Toast / copy feedback
+  const [copyToast, setCopyToast] = useState<string | null>(null);
 
   const isActionInProgressRef = useRef(false);
   const processedEventsRef = useRef<Set<string>>(new Set());
+  const alertedDispatchIdsRef = useRef<Set<number>>(new Set());
+  const alarmStopRef = useRef<(() => void) | null>(null);
   const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-  const fetchMissionVitals = useCallback(async (dispatchId: number) => {
-    const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
-    if (!token) return;
-    setVitalsLoading(true);
-    try {
-      const resp = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/vitals`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (resp.ok) {
-        const data: VitalsRecord[] = await resp.json();
-        setMissionVitals(data);
+  // Data fetching
+  const fetchMissionVitals = useCallback(
+    async (dispatchId: number) => {
+      const token =
+        typeof window !== "undefined"
+          ? localStorage.getItem("lifelink_token")
+          : null;
+      if (!token) return;
+      try {
+        const resp = await fetch(
+          `${backendUrl}/api/dispatch/${dispatchId}/vitals`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+        if (resp.ok) {
+          const data: VitalsRecord[] = await resp.json();
+          setMissionVitals(data);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch mission vitals:", err);
       }
-    } catch (err) {
-      console.warn("Failed to fetch mission vitals:", err);
-    } finally {
-      setVitalsLoading(false);
-    }
-  }, [backendUrl]);
+    },
+    [backendUrl]
+  );
 
   const fetchAmbulanceData = useCallback(async () => {
-    const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+    const token =
+      typeof window !== "undefined"
+        ? localStorage.getItem("lifelink_token")
+        : null;
     if (!token) {
       router.push("/login");
       return;
@@ -173,9 +276,12 @@ export default function AmbulancePortalPage() {
       setUser(userData);
 
       if (userData.ambulance_id) {
-        const ambResp = await fetch(`${backendUrl}/api/ambulances/${userData.ambulance_id}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const ambResp = await fetch(
+          `${backendUrl}/api/ambulances/${userData.ambulance_id}`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
         if (ambResp.ok) {
           setAmbulance(await ambResp.json());
         }
@@ -186,7 +292,9 @@ export default function AmbulancePortalPage() {
       });
       if (dispResp.ok) {
         const allDispatches: DispatchRecord[] = await dispResp.json();
-        const myDispatches = allDispatches.filter((d) => d.ambulance_id === userData.ambulance_id);
+        const myDispatches = allDispatches.filter(
+          (d) => d.ambulance_id === userData.ambulance_id
+        );
         setDispatches(myDispatches);
       }
     } catch (err: any) {
@@ -196,14 +304,19 @@ export default function AmbulancePortalPage() {
     }
   }, [backendUrl, router]);
 
-  // WebSocket Subscription
+  // WebSocket Live Subscription
   useEffect(() => {
     fetchAmbulanceData();
 
-    const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+    const token =
+      typeof window !== "undefined"
+        ? localStorage.getItem("lifelink_token")
+        : null;
     if (!token) return;
 
-    const wsUrl = backendUrl.replace(/^http/, "ws") + `/ws/live?token=${encodeURIComponent(token)}`;
+    const wsUrl =
+      backendUrl.replace(/^http/, "ws") +
+      `/ws/live?token=${encodeURIComponent(token)}`;
     let ws: WebSocket | null = null;
     let reconnectTimeout: NodeJS.Timeout | null = null;
 
@@ -223,15 +336,31 @@ export default function AmbulancePortalPage() {
               if (processedEventsRef.current.has(data.event_id)) return;
               processedEventsRef.current.add(data.event_id);
             }
-            if (data.event && data.event !== "PONG" && data.event !== "HANDSHAKE") {
+            if (
+              data.event &&
+              data.event !== "PONG" &&
+              data.event !== "HANDSHAKE"
+            ) {
               if (data.event === "DISPATCH_CREATED") {
-                setFeedbackMsg({ text: "Incoming Emergency Mission Assignment received!", type: "info" });
-              } else if (data.event === "DISPATCH_CONFIRMATION_UPDATED") {
-                setFeedbackMsg({ text: "Mission confirmation status synchronized with receiving hospital.", type: "success" });
-              } else if (data.event === "HANDOVER_ACKNOWLEDGED") {
-                setFeedbackMsg({ text: "Receiving Hospital ER desk acknowledged digital handover packet!", type: "success" });
-              } else if (data.event === "PATIENT_VITALS_RECORDED") {
-                setFeedbackMsg({ text: "Patient vitals telemetry updated and synchronized.", type: "success" });
+                setFeedbackMsg({
+                  text: "Incoming Emergency Mission Assignment received!",
+                  type: "info",
+                });
+              } else if (data.event === "PATIENT_PICKED_UP") {
+                setFeedbackMsg({
+                  text: "Patient pickup confirmed. En route to receiving hospital ER.",
+                  type: "success",
+                });
+              } else if (data.event === "PATIENT_ARRIVED_HOSPITAL") {
+                setFeedbackMsg({
+                  text: "Patient arrival at hospital trauma bay registered.",
+                  type: "success",
+                });
+              } else if (data.event === "ASSISTANCE_REQUESTED") {
+                setFeedbackMsg({
+                  text: "Operational assistance request broadcasted to Control Room.",
+                  type: "info",
+                });
               }
               fetchAmbulanceData();
             }
@@ -241,49 +370,63 @@ export default function AmbulancePortalPage() {
     }
 
     connect();
-
-    const pollInterval = setInterval(fetchAmbulanceData, 7000);
+    const pollInterval = setInterval(fetchAmbulanceData, 6000);
 
     return () => {
       clearInterval(pollInterval);
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) ws.close();
+      if (alarmStopRef.current) {
+        alarmStopRef.current();
+        alarmStopRef.current = null;
+      }
     };
   }, [backendUrl, fetchAmbulanceData]);
 
-  // Active provisional dispatch requiring confirmation
+  // Dispatches classifications
   const pendingDispatch = dispatches.find(
-    (d) => d.coordination_status === "PENDING_CONFIRMATIONS" && d.ambulance_confirmation_status === "PENDING"
+    (d) =>
+      d.coordination_status === "PENDING_CONFIRMATIONS" &&
+      d.ambulance_confirmation_status === "PENDING"
   );
 
-  // Active dispatch accepted by ambulance but waiting for receiving hospital confirmation
   const awaitingHospitalDispatch = dispatches.find(
-    (d) => d.coordination_status === "PENDING_CONFIRMATIONS" && d.ambulance_confirmation_status === "ACCEPTED"
+    (d) =>
+      d.coordination_status === "PENDING_CONFIRMATIONS" &&
+      d.ambulance_confirmation_status === "ACCEPTED"
   );
 
-  // Active confirmed or in-progress mission
   const activeMission = dispatches.find(
-    (d) => d.coordination_status === "CONFIRMED" && d.status !== "COMPLETED" && d.status !== "CANCELLED"
+    (d) =>
+      d.coordination_status === "CONFIRMED" &&
+      d.status !== "COMPLETED" &&
+      d.status !== "CANCELLED"
   );
 
-  // Auto-fetch patient vitals whenever the active mission changes
+  // Incoming alert audio trigger
   useEffect(() => {
-    if (activeMission?.id) {
-      fetchMissionVitals(activeMission.id);
-    } else {
-      setMissionVitals([]);
+    if (pendingDispatch && !alertedDispatchIdsRef.current.has(pendingDispatch.id)) {
+      alertedDispatchIdsRef.current.add(pendingDispatch.id);
+      const stop = playEmergencyAlarm(3.5);
+      alarmStopRef.current = stop;
     }
-  }, [activeMission?.id, fetchMissionVitals]);
+  }, [pendingDispatch]);
 
-  // Calculate live reservation countdown
+  // Reservation countdown
   useEffect(() => {
-    if (!pendingDispatch || !pendingDispatch.reservation_expires_at) {
+    if (!pendingDispatch) {
       setRemainingSeconds(null);
       return;
     }
 
     const updateTimer = () => {
-      const expiresMs = new Date(pendingDispatch.reservation_expires_at!).getTime();
+      if (!pendingDispatch.reservation_expires_at) {
+        setRemainingSeconds(45);
+        return;
+      }
+      const expiresMs = new Date(
+        pendingDispatch.reservation_expires_at
+      ).getTime();
       const diffSecs = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
       setRemainingSeconds(diffSecs);
     };
@@ -293,7 +436,31 @@ export default function AmbulancePortalPage() {
     return () => clearInterval(timer);
   }, [pendingDispatch]);
 
-  const handleConfirmMission = async (dispatchId: number, decision: "ACCEPTED" | "REJECTED") => {
+  // Auto-fetch vitals on active mission change
+  useEffect(() => {
+    if (activeMission?.id) {
+      fetchMissionVitals(activeMission.id);
+    } else {
+      setMissionVitals([]);
+    }
+  }, [activeMission?.id, fetchMissionVitals]);
+
+  // Handlers
+  const handleCopy = (textToCopy: string, label: string) => {
+    navigator.clipboard?.writeText(textToCopy);
+    setCopyToast(`${label} copied to clipboard!`);
+    setTimeout(() => setCopyToast(null), 3000);
+  };
+
+  const handleConfirmMission = async (
+    dispatchId: number,
+    decision: "ACCEPTED" | "REJECTED"
+  ) => {
+    if (alarmStopRef.current) {
+      alarmStopRef.current();
+      alarmStopRef.current = null;
+    }
+
     if (isActionInProgressRef.current) return;
     isActionInProgressRef.current = true;
     setActionLoading(true);
@@ -301,14 +468,17 @@ export default function AmbulancePortalPage() {
     const token = localStorage.getItem("lifelink_token");
 
     try {
-      const resp = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/confirm/ambulance`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ decision }),
-      });
+      const resp = await fetch(
+        `${backendUrl}/api/dispatch/${dispatchId}/confirm/ambulance`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ decision }),
+        }
+      );
 
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
@@ -316,12 +486,17 @@ export default function AmbulancePortalPage() {
       }
 
       setFeedbackMsg({
-        text: `Mission assignment #${dispatchId} successfully ${decision.toLowerCase()}!`,
+        text: `Mission assignment #${dispatchId} ${
+          decision === "ACCEPTED" ? "acknowledged" : "declined"
+        }.`,
         type: decision === "ACCEPTED" ? "success" : "info",
       });
       await fetchAmbulanceData();
     } catch (err: any) {
-      setFeedbackMsg({ text: `Confirmation error: ${err.message}`, type: "error" });
+      setFeedbackMsg({
+        text: `Confirmation error: ${err.message}`,
+        type: "error",
+      });
     } finally {
       isActionInProgressRef.current = false;
       setActionLoading(false);
@@ -336,10 +511,13 @@ export default function AmbulancePortalPage() {
     const token = localStorage.getItem("lifelink_token");
 
     try {
-      const resp = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/step`, {
-        method: "PATCH",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const resp = await fetch(
+        `${backendUrl}/api/dispatch/${dispatchId}/step`,
+        {
+          method: "PATCH",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
 
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
@@ -348,15 +526,219 @@ export default function AmbulancePortalPage() {
 
       const updated = await resp.json();
       setFeedbackMsg({
-        text: `Mission #${dispatchId} advanced to stage: ${updated.status}`,
+        text: `Mission stage updated to: ${updated.status.replace(/_/g, " ")}`,
         type: "success",
       });
       await fetchAmbulanceData();
     } catch (err: any) {
-      setFeedbackMsg({ text: `Lifecycle error: ${err.message}`, type: "error" });
+      setFeedbackMsg({
+        text: `Lifecycle error: ${err.message}`,
+        type: "error",
+      });
     } finally {
       isActionInProgressRef.current = false;
       setActionLoading(false);
+    }
+  };
+
+  const handleConfirmPatientPickup = async () => {
+    if (!activeMission) return;
+    if (isActionInProgressRef.current) return;
+    isActionInProgressRef.current = true;
+    setActionLoading(true);
+    setShowPickupModal(false);
+    setFeedbackMsg(null);
+    const token = localStorage.getItem("lifelink_token");
+
+    try {
+      const resp = await fetch(
+        `${backendUrl}/api/dispatch/${activeMission.id}/confirm-patient-pickup`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to confirm patient pickup");
+      }
+
+      setFeedbackMsg({
+        text: "Patient pickup confirmed. En route to receiving hospital ER.",
+        type: "success",
+      });
+      await fetchAmbulanceData();
+    } catch (err: any) {
+      setFeedbackMsg({
+        text: `Pickup confirmation error: ${err.message}`,
+        type: "error",
+      });
+    } finally {
+      isActionInProgressRef.current = false;
+      setActionLoading(false);
+    }
+  };
+
+  const handleConfirmArrivalHospital = async () => {
+    if (!activeMission) return;
+    if (isActionInProgressRef.current) return;
+    isActionInProgressRef.current = true;
+    setActionLoading(true);
+    setFeedbackMsg(null);
+    const token = localStorage.getItem("lifelink_token");
+
+    try {
+      const resp = await fetch(
+        `${backendUrl}/api/dispatch/${activeMission.id}/confirm-arrival`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to confirm hospital arrival");
+      }
+
+      setFeedbackMsg({
+        text: "Ambulance arrived at Hospital ER trauma bay.",
+        type: "success",
+      });
+      await fetchAmbulanceData();
+    } catch (err: any) {
+      setFeedbackMsg({
+        text: `Hospital arrival error: ${err.message}`,
+        type: "error",
+      });
+    } finally {
+      isActionInProgressRef.current = false;
+      setActionLoading(false);
+    }
+  };
+
+  const handleToggleDutyStatus = async () => {
+    if (!ambulance?.id) return;
+    const isCurrentlyOnDuty = ambulance.status !== "OFF_DUTY";
+
+    if (isCurrentlyOnDuty && activeMission) {
+      setFeedbackMsg({
+        text: "Cannot go Off Duty while an active emergency mission is in progress.",
+        type: "error",
+      });
+      return;
+    }
+
+    const targetStatus = isCurrentlyOnDuty ? "OFF_DUTY" : "AVAILABLE";
+    const token = localStorage.getItem("lifelink_token");
+
+    try {
+      const resp = await fetch(
+        `${backendUrl}/api/ambulances/${ambulance.id}/status?status=${targetStatus}`,
+        {
+          method: "PATCH",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to update duty status");
+      }
+
+      const updated = await resp.json();
+      setAmbulance(updated);
+      setFeedbackMsg({
+        text:
+          targetStatus === "AVAILABLE"
+            ? "Unit is now On Duty & available for dispatch."
+            : "Unit marked Off Duty.",
+        type: "info",
+      });
+    } catch (err: any) {
+      setFeedbackMsg({ text: err.message, type: "error" });
+    }
+  };
+
+  const handleRequestAssistance = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeMission) return;
+    const token = localStorage.getItem("lifelink_token");
+
+    try {
+      const resp = await fetch(
+        `${backendUrl}/api/dispatch/${activeMission.id}/request-assistance`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            assistance_type: assistanceType,
+            notes: assistanceNotes.trim() || undefined,
+          }),
+        }
+      );
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to request assistance");
+      }
+
+      setShowAssistanceModal(false);
+      setAssistanceNotes("");
+      setFeedbackMsg({
+        text: `Emergency ${assistanceType.replace(
+          /_/g,
+          " "
+        )} backup requested. Control Room notified.`,
+        type: "success",
+      });
+    } catch (err: any) {
+      setFeedbackMsg({ text: err.message, type: "error" });
+    }
+  };
+
+  const handleReportIssue = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!ambulance?.id) return;
+    const token = localStorage.getItem("lifelink_token");
+
+    try {
+      const resp = await fetch(
+        `${backendUrl}/api/ambulances/${ambulance.id}/report-issue`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            issue_type: issueType,
+            notes: issueNotes.trim() || undefined,
+            mark_maintenance: issueMarkMaintenance,
+          }),
+        }
+      );
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to submit vehicle report");
+      }
+
+      setShowReportIssueModal(false);
+      setIssueNotes("");
+      setFeedbackMsg({
+        text: `Vehicle issue reported to Fleet Management.${
+          issueMarkMaintenance ? " Unit marked for Maintenance." : ""
+        }`,
+        type: "info",
+      });
+      await fetchAmbulanceData();
+    } catch (err: any) {
+      setFeedbackMsg({ text: err.message, type: "error" });
     }
   };
 
@@ -373,9 +755,8 @@ export default function AmbulancePortalPage() {
     const spo2 = parseInt(vitalsForm.oxygenSat, 10);
     const rr = parseInt(vitalsForm.respRate, 10);
 
-    // Physiological input validation
     if (isNaN(hr) || isNaN(sys) || isNaN(dia) || isNaN(spo2) || isNaN(rr)) {
-      setVitalsError("Please complete all numeric physiological vital fields.");
+      setVitalsError("Please fill out all numeric physiological vital fields.");
       return;
     }
     if (hr < 30 || hr > 250) {
@@ -391,11 +772,11 @@ export default function AmbulancePortalPage() {
       return;
     }
     if (sys <= dia) {
-      setVitalsError("Systolic pressure must be higher than diastolic pressure.");
+      setVitalsError("Systolic must be strictly greater than diastolic.");
       return;
     }
     if (spo2 < 50 || spo2 > 100) {
-      setVitalsError("Oxygen saturation (SpO2) must be between 50% and 100%.");
+      setVitalsError("SpO2 oxygen saturation must be between 50% and 100%.");
       return;
     }
     if (rr < 5 || rr > 60) {
@@ -407,28 +788,31 @@ export default function AmbulancePortalPage() {
     const token = localStorage.getItem("lifelink_token");
 
     try {
-      const resp = await fetch(`${backendUrl}/api/dispatch/${activeMission.id}/vitals`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          heart_rate: hr,
-          blood_pressure_systolic: sys,
-          blood_pressure_diastolic: dia,
-          oxygen_saturation: spo2,
-          respiratory_rate: rr,
-          notes: vitalsForm.notes.trim() || undefined,
-        }),
-      });
+      const resp = await fetch(
+        `${backendUrl}/api/dispatch/${activeMission.id}/vitals`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            heart_rate: hr,
+            blood_pressure_systolic: sys,
+            blood_pressure_diastolic: dia,
+            oxygen_saturation: spo2,
+            respiratory_rate: rr,
+            notes: vitalsForm.notes.trim() || undefined,
+          }),
+        }
+      );
 
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.detail || "Failed to record patient vitals");
       }
 
-      setVitalsSuccess("Patient vitals saved and transmitted to receiving hospital ER.");
+      setVitalsSuccess("Patient vitals saved and relayed to hospital ER.");
       setVitalsForm({
         heartRate: "",
         bpSystolic: "",
@@ -438,28 +822,11 @@ export default function AmbulancePortalPage() {
         notes: "",
       });
       await fetchMissionVitals(activeMission.id);
-      await fetchAmbulanceData();
     } catch (err: any) {
-      setVitalsError(err.message || "Network error while saving vitals");
+      setVitalsError(err.message || "Network error submitting vitals");
     } finally {
       setVitalsSubmitting(false);
     }
-  };
-
-  const handleToggleUnitStatus = async (newStatus: string) => {
-    if (!ambulance?.id) return;
-    const token = localStorage.getItem("lifelink_token");
-
-    try {
-      const resp = await fetch(`${backendUrl}/api/ambulances/${ambulance.id}/status?status=${newStatus}`, {
-        method: "PATCH",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (resp.ok) {
-        setAmbulance(await resp.json());
-        setFeedbackMsg({ text: `Unit operational status updated to ${newStatus}`, type: "success" });
-      }
-    } catch (_) {}
   };
 
   const handleLogout = () => {
@@ -469,791 +836,1579 @@ export default function AmbulancePortalPage() {
     router.push("/login");
   };
 
-  const completedMissions = dispatches.filter((d) => d.status === "COMPLETED");
-
-  const sidebarNavItems: NavItem[] = [
-    { id: "overview", label: "Current Mission", icon: LayoutDashboard },
-    { id: "history", label: "Mission History", icon: History, count: completedMissions.length },
-    { id: "fleet", label: "Vehicle Status", icon: Ambulance },
-    { id: "profile", label: "Crew Profile", icon: User },
-  ];
-
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-white flex items-center justify-center p-4">
-        <div className="flex flex-col items-center gap-3">
-          <RefreshCw className="w-8 h-8 animate-spin text-blue-600" />
-          <span className="text-xs font-bold text-slate-700">Connecting to Ambulance Telemetry...</span>
-        </div>
+      <div className="min-h-screen bg-white flex flex-col items-center justify-center p-6 space-y-3">
+        <RefreshCw className="w-8 h-8 animate-spin text-red-600" />
+        <p className="text-sm font-semibold text-slate-700">
+          Connecting to Ambulance Mobile Telemetry...
+        </p>
       </div>
     );
   }
 
-  // Navigation URLs
-  const patientLat = activeMission?.incident_latitude ?? activeMission?.incident?.latitude ?? 12.8700;
-  const patientLng = activeMission?.incident_longitude ?? activeMission?.incident?.longitude ?? 74.8400;
-  const hospLat = activeMission?.destination_hospital_latitude ?? 12.8710;
-  const hospLng = activeMission?.destination_hospital_longitude ?? 74.8450;
+  // Active mission targets & navigation
+  const isEnRouteHospital =
+    activeMission?.status === "EN_ROUTE_HOSPITAL" ||
+    activeMission?.status === "AT_HOSPITAL";
 
-  const gmapsSceneUrl = `https://www.google.com/maps/dir/?api=1&destination=${patientLat},${patientLng}&travelmode=driving`;
-  const osmSceneUrl = `https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=${ambulance?.current_latitude || 12.9815},${ambulance?.current_longitude || 74.7950};${patientLat},${patientLng}`;
+  const targetLat = isEnRouteHospital
+    ? activeMission?.destination_hospital_latitude
+    : activeMission?.incident_latitude ?? activeMission?.incident?.latitude;
 
-  const gmapsHospUrl = `https://www.google.com/maps/dir/?api=1&destination=${hospLat},${hospLng}&travelmode=driving`;
+  const targetLng = isEnRouteHospital
+    ? activeMission?.destination_hospital_longitude
+    : activeMission?.incident_longitude ?? activeMission?.incident?.longitude;
 
-  const nextActionConfig = activeMission ? NEXT_LIFECYCLE_ACTION[activeMission.status] : null;
-  const NextActionIcon = nextActionConfig ? nextActionConfig.icon : CheckCircle2;
+  const targetLabel = isEnRouteHospital
+    ? activeMission?.destination_hospital_name || "Receiving Hospital ER"
+    : activeMission?.incident_address ||
+      activeMission?.incident?.location_address ||
+      "Emergency Scene";
+
+  const targetType = isEnRouteHospital ? "hospital" : "incident";
+
+  const isOnDuty = ambulance?.status !== "OFF_DUTY";
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex font-sans">
-      {/* 1. LEFT SIDEBAR */}
-      <Sidebar
-        role="AMBULANCE"
-        roleLabel="Ambulance Paramedic"
-        user={user}
-        currentNav={currentNav}
-        onNavChange={setCurrentNav}
-        navItems={sidebarNavItems}
-        isOpenMobile={isMobileMenuOpen}
-        onCloseMobile={() => setIsMobileMenuOpen(false)}
-        onLogout={handleLogout}
-        entityName={ambulance?.call_sign ? `Unit ${ambulance.call_sign}` : "ALS Paramedic Crew"}
-      />
-
-      {/* 2. MAIN APPLICATION CONTENT AREA */}
-      <div className="flex-1 md:pl-64 flex flex-col min-w-0">
-        {/* Top Minimal Navigation */}
-        <TopNav
-          title={ambulance?.call_sign ? `Unit ${ambulance.call_sign}` : "Ambulance Console"}
-          subtitle={`${ambulance?.base_station || "Mangaluru Sector"} • ${ambulance?.vehicle_type || "ALS"}`}
-          wsConnected={wsConnected}
-          onMenuToggle={() => setIsMobileMenuOpen(true)}
-          actions={
-            <div className="flex items-center gap-1.5">
-              <span className="text-[11px] font-semibold text-slate-500 hidden sm:inline">Duty:</span>
-              <button
-                type="button"
-                onClick={() => handleToggleUnitStatus(ambulance?.status === "AVAILABLE" ? "MAINTENANCE" : "AVAILABLE")}
-                className={`px-2.5 py-1 rounded-md text-xs font-bold border transition ${
-                  ambulance?.status === "AVAILABLE"
-                    ? "bg-emerald-50 text-emerald-700 border-emerald-300"
-                    : "bg-amber-50 text-amber-700 border-amber-300"
-                }`}
-              >
-                {ambulance?.status || "AVAILABLE"}
-              </button>
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans">
+      {/* ------------------------------------------------------------- */}
+      {/* 1. TOP RESPONSIVE HEADER                                      */}
+      {/* ------------------------------------------------------------- */}
+      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-2xs">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
+          {/* Brand & Unit Badge */}
+          <div className="flex items-center space-x-3">
+            <div className="w-9 h-9 rounded-xl bg-red-600 flex items-center justify-center text-white font-black text-sm shadow-xs">
+              RF
             </div>
-          }
-        />
+            <div>
+              <div className="flex items-center space-x-2">
+                <span className="font-extrabold text-base tracking-tight text-slate-900">
+                  ResQFlow
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-red-50 text-red-700 border border-red-200 text-[10px] font-bold uppercase tracking-wider">
+                  Ambulance Crew
+                </span>
+              </div>
+              <p className="text-xs text-slate-500">
+                Paramedic:{" "}
+                <span className="font-semibold text-slate-700">
+                  {user?.full_name || user?.username || "Crew Member"}
+                </span>
+              </p>
+            </div>
+          </div>
 
-        {/* Feedback message banner */}
-        {feedbackMsg && (
-          <div
-            className={`px-4 py-2 text-xs font-semibold flex items-center justify-between border-b ${
-              feedbackMsg.type === "success"
-                ? "bg-emerald-50 border-emerald-200 text-emerald-800"
-                : feedbackMsg.type === "error"
-                ? "bg-red-50 border-red-200 text-red-800"
-                : "bg-blue-50 border-blue-200 text-blue-800"
+          {/* Unit Call Sign & Duty Toggle */}
+          <div className="flex items-center space-x-3 sm:space-x-4">
+            {ambulance && (
+              <div className="hidden sm:flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-slate-100 border border-slate-200 text-xs font-semibold text-slate-700">
+                <Truck className="w-3.5 h-3.5 text-blue-600" />
+                <span>Unit {ambulance.call_sign}</span>
+                <span className="text-[10px] px-1.5 py-0.2 rounded bg-white text-slate-500 border border-slate-200 uppercase font-mono">
+                  {ambulance.vehicle_type}
+                </span>
+              </div>
+            )}
+
+            {/* On Duty / Off Duty Toggle Switch */}
+            <button
+              onClick={handleToggleDutyStatus}
+              title={
+                isOnDuty
+                  ? "Click to go Off Duty"
+                  : "Click to go On Duty & Available"
+              }
+              className={`flex items-center space-x-2 px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors shadow-2xs ${
+                isOnDuty
+                  ? "bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300"
+                  : "bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-300"
+              }`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isOnDuty ? "bg-emerald-500 animate-pulse" : "bg-slate-400"
+                }`}
+              />
+              <span>{isOnDuty ? "On Duty" : "Off Duty"}</span>
+            </button>
+
+            {/* Live Telemetry Pulse */}
+            <div
+              className="flex items-center space-x-1.5 text-[11px] text-slate-500"
+              title={wsConnected ? "Telemetry Connected" : "Connecting..."}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  wsConnected ? "bg-emerald-500" : "bg-amber-400 animate-pulse"
+                }`}
+              />
+              <span className="hidden md:inline font-mono">
+                {wsConnected ? "Live" : "Syncing"}
+              </span>
+            </div>
+
+            {/* Sign Out */}
+            <button
+              onClick={handleLogout}
+              title="Sign Out"
+              className="p-1.5 rounded-xl text-slate-500 hover:text-red-600 hover:bg-slate-100 transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* ------------------------------------------------------------- */}
+        {/* 2. MINIMAL 4-TAB NAVIGATION BAR                              */}
+        {/* ------------------------------------------------------------- */}
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 pt-1 pb-2 flex items-center space-x-1 overflow-x-auto no-scrollbar">
+          <button
+            onClick={() => setCurrentTab("home")}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors ${
+              currentTab === "home"
+                ? "bg-slate-900 text-white shadow-2xs"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
             }`}
           >
-            <span>{feedbackMsg.text}</span>
-            <button onClick={() => setFeedbackMsg(null)} className="font-bold ml-2">✕</button>
-          </div>
-        )}
+            <Radio className="w-3.5 h-3.5" />
+            <span>Home</span>
+            {activeMission && (
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+            )}
+          </button>
 
-        {/* MAIN BODY WORKSPACE */}
-        <main className="flex-1 p-4 sm:p-6 overflow-x-hidden space-y-6">
-          {/* ============================================================== */}
-          {/* VIEW: OVERVIEW / CURRENT MISSION                               */}
-          {/* ============================================================== */}
-          {currentNav === "overview" && (
-            <div className="space-y-6">
-              {/* CASE 1: PROVISIONAL MISSION REQUEST REQUIRING CONFIRMATION */}
-              {pendingDispatch && (
-                <div className="bg-amber-50/60 border-2 border-amber-400 rounded-xl p-5 shadow-sm space-y-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-lg bg-amber-500 text-white flex items-center justify-center shadow-xs">
-                        <AlertTriangle className="w-5 h-5 animate-pulse" />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-200 text-amber-900">
-                            DISPATCH #{pendingDispatch.id} • ATTEMPT #{pendingDispatch.attempt_number}
-                          </span>
-                          <span className="text-xs font-bold text-amber-900 uppercase">
-                            Provisional Assignment Offered
-                          </span>
-                        </div>
-                        <h2 className="text-base font-bold text-slate-900 mt-0.5">
-                          Emergency Response Request for Unit {ambulance?.call_sign}
-                        </h2>
-                      </div>
+          <button
+            onClick={() => setCurrentTab("missions")}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors ${
+              currentTab === "missions"
+                ? "bg-slate-900 text-white shadow-2xs"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>My Missions</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-200/80 text-slate-700 font-mono">
+              {dispatches.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setCurrentTab("vehicle")}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors ${
+              currentTab === "vehicle"
+                ? "bg-slate-900 text-white shadow-2xs"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+            }`}
+          >
+            <Truck className="w-3.5 h-3.5" />
+            <span>Vehicle Status</span>
+          </button>
+
+          <button
+            onClick={() => setCurrentTab("support")}
+            className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-colors ${
+              currentTab === "support"
+                ? "bg-slate-900 text-white shadow-2xs"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+            }`}
+          >
+            <LifeBuoy className="w-3.5 h-3.5" />
+            <span>Help & Support</span>
+          </button>
+        </div>
+      </header>
+
+      {/* Feedback Banner */}
+      {feedbackMsg && (
+        <div
+          className={`py-2 px-4 text-xs font-semibold text-center border-b ${
+            feedbackMsg.type === "success"
+              ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+              : feedbackMsg.type === "error"
+              ? "bg-red-50 text-red-800 border-red-200"
+              : "bg-blue-50 text-blue-800 border-blue-200"
+          }`}
+        >
+          {feedbackMsg.text}
+        </div>
+      )}
+
+      {/* Copy Toast */}
+      {copyToast && (
+        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-4 py-2 rounded-xl text-xs font-medium shadow-lg flex items-center space-x-2">
+          <Check className="w-4 h-4 text-emerald-400" />
+          <span>{copyToast}</span>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------- */}
+      {/* 3. INCOMING PROVISIONAL MISSION ALERT OVERLAY                 */}
+      {/* ------------------------------------------------------------- */}
+      {pendingDispatch && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full border-2 border-red-500 shadow-2xl p-6 sm:p-7 space-y-5 animate-in fade-in zoom-in-95 duration-200">
+            {/* Alert Header */}
+            <div className="flex items-start justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="w-12 h-12 rounded-2xl bg-red-100 border border-red-300 flex items-center justify-center text-red-600">
+                  <ShieldAlert className="w-7 h-7 animate-pulse" />
+                </div>
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <span className="font-extrabold text-lg text-slate-900">
+                      Emergency Mission Alert
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-red-600 text-white font-black text-xs uppercase tracking-wider">
+                      Priority
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Dispatch #{pendingDispatch.id} • Unit {pendingDispatch.ambulance_call_sign}
+                  </p>
+                </div>
+              </div>
+
+              {/* Countdown badge */}
+              {remainingSeconds !== null && (
+                <div className="px-3 py-1.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-right">
+                  <span className="text-[10px] uppercase font-bold text-amber-700 block">
+                    Response Window
+                  </span>
+                  <span className="text-base font-extrabold font-mono text-amber-900">
+                    {remainingSeconds}s
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Emergency Details */}
+            <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200 space-y-3">
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+                  Chief Complaint
+                </span>
+                <p className="text-sm font-bold text-slate-900">
+                  {pendingDispatch.incident?.chief_complaint ||
+                    "Emergency Medical Assistance Required"}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 pt-1 border-t border-slate-200">
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+                    Incident Scene
+                  </span>
+                  <p className="text-xs font-semibold text-slate-800 line-clamp-2">
+                    {pendingDispatch.incident_address ||
+                      pendingDispatch.incident?.location_address ||
+                      "Canara Engineering College Sector"}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+                    Destination Hospital
+                  </span>
+                  <p className="text-xs font-semibold text-slate-800 line-clamp-2">
+                    {pendingDispatch.destination_hospital_name}
+                  </p>
+                </div>
+              </div>
+
+              {/* Estimated Distance & ETA */}
+              <div className="flex items-center justify-between pt-1 border-t border-slate-200 text-xs">
+                <span className="text-slate-500 font-medium">Estimated En Route:</span>
+                <span className="font-extrabold text-blue-700">
+                  {formatDistance(pendingDispatch.route_distance_meters)} • ~
+                  {formatDuration(pendingDispatch.estimated_eta_seconds)}
+                </span>
+              </div>
+            </div>
+
+            {/* Action Buttons: Acknowledge & Unable to Respond */}
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={() =>
+                  handleConfirmMission(pendingDispatch.id, "REJECTED")
+                }
+                className="w-full py-3 px-4 rounded-2xl border border-slate-300 hover:bg-slate-100 text-slate-700 text-sm font-bold transition-colors"
+              >
+                Unable to Respond
+              </button>
+
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={() =>
+                  handleConfirmMission(pendingDispatch.id, "ACCEPTED")
+                }
+                className="w-full py-3 px-4 rounded-2xl bg-red-600 hover:bg-red-700 text-white text-sm font-extrabold shadow-md flex items-center justify-center space-x-2 transition-colors"
+              >
+                {actionLoading ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Acknowledge</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------- */}
+      {/* 4. MAIN BODY CONTAINER                                        */}
+      {/* ------------------------------------------------------------- */}
+      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6">
+        {/* ========================================================= */}
+        {/* TAB 1: HOME (PRIMARY MISSION / CALM AVAILABLE STATE)     */}
+        {/* ========================================================= */}
+        {currentTab === "home" && (
+          <div className="space-y-6">
+            {/* AWAITING HOSPITAL CONFIRMATION BANNER */}
+            {awaitingHospitalDispatch && !activeMission && (
+              <div className="bg-amber-50 border border-amber-200 rounded-3xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="flex items-center space-x-3.5">
+                  <div className="w-10 h-10 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                    <Clock className="w-5 h-5 animate-spin" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-amber-900">
+                      Assignment Acknowledged • Awaiting Hospital ER Confirmation
+                    </h3>
+                    <p className="text-xs text-amber-700">
+                      Target hospital:{" "}
+                      <span className="font-semibold">
+                        {awaitingHospitalDispatch.destination_hospital_name}
+                      </span>
+                      . Stand by while trauma bay capacity is reserved.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center space-x-2 text-xs font-mono font-bold text-amber-800 bg-white/80 px-3 py-1.5 rounded-xl border border-amber-200">
+                  <span>Reservation Pending</span>
+                </div>
+              </div>
+            )}
+
+            {/* ACTIVE MISSION VIEW */}
+            {activeMission ? (
+              <div className="space-y-6">
+                {/* 1. MISSION PROGRESS STEPPER */}
+                <div className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-2xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                    <div className="flex items-center space-x-2">
+                      <span className="px-2.5 py-0.5 rounded-lg bg-red-100 text-red-800 text-xs font-extrabold uppercase tracking-wider">
+                        {activeMission.incident?.triage_level || "RED"} • Active Mission
+                      </span>
+                      <span className="text-xs text-slate-500 font-mono">
+                        #{activeMission.id}
+                      </span>
                     </div>
 
-                    {/* 90-Second Countdown */}
-                    {remainingSeconds !== null && (
-                      <div className="text-right">
-                        <span className="text-[10px] font-mono text-slate-500 block uppercase">Dual Confirmation TTL</span>
-                        <span className="text-xl font-black font-mono text-amber-900">
-                          {remainingSeconds}s remaining
+                    <span className="text-xs font-semibold text-slate-600">
+                      Current Stage:{" "}
+                      <strong className="text-slate-900 uppercase">
+                        {activeMission.status.replace(/_/g, " ")}
+                      </strong>
+                    </span>
+                  </div>
+
+                  {/* 5-step milestone stepper */}
+                  <div className="grid grid-cols-5 gap-1.5 sm:gap-2">
+                    {[
+                      { key: "ASSIGNED", label: "Assigned" },
+                      { key: "EN_ROUTE_INCIDENT", label: "En Route" },
+                      { key: "ON_SCENE", label: "On Scene" },
+                      { key: "EN_ROUTE_HOSPITAL", label: "Hospital Transport" },
+                      { key: "AT_HOSPITAL", label: "ER Handover" },
+                    ].map((step, idx) => {
+                      const stages = [
+                        "ASSIGNED",
+                        "EN_ROUTE_INCIDENT",
+                        "ON_SCENE",
+                        "EN_ROUTE_HOSPITAL",
+                        "AT_HOSPITAL",
+                        "COMPLETED",
+                      ];
+                      const currentIdx = stages.indexOf(activeMission.status);
+                      const isComplete = currentIdx > idx;
+                      const isCurrent = currentIdx === idx;
+
+                      return (
+                        <div key={step.key} className="flex flex-col items-center text-center space-y-1.5">
+                          <div
+                            className={`w-7 h-7 sm:w-8 sm:h-8 rounded-full flex items-center justify-center text-xs font-bold transition-colors ${
+                              isComplete
+                                ? "bg-emerald-600 text-white"
+                                : isCurrent
+                                ? "bg-blue-600 text-white ring-4 ring-blue-100"
+                                : "bg-slate-100 text-slate-400"
+                            }`}
+                          >
+                            {isComplete ? (
+                              <Check className="w-3.5 h-3.5" />
+                            ) : (
+                              <span>{idx + 1}</span>
+                            )}
+                          </div>
+                          <span
+                            className={`text-[10px] sm:text-xs font-medium line-clamp-1 ${
+                              isCurrent
+                                ? "text-slate-900 font-bold"
+                                : isComplete
+                                ? "text-emerald-700 font-semibold"
+                                : "text-slate-400"
+                            }`}
+                          >
+                            {step.label}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 2. INCIDENT & TARGET DETAILS CARDS */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Incident / Patient Information */}
+                  <div className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-2xs space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <AlertOctagon className="w-4 h-4 text-red-600" />
+                        <span className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                          Incident Scene Details
                         </span>
                       </div>
-                    )}
-                  </div>
-
-                  {/* Incident Details Card */}
-                  <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-2 text-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="font-bold text-slate-900">Chief Medical Complaint:</span>
-                      <span className="font-mono text-slate-500">Incident #{pendingDispatch.incident_id}</span>
-                    </div>
-                    <p className="text-sm font-semibold text-slate-900 bg-slate-50 p-2.5 rounded border border-slate-200">
-                      {pendingDispatch.incident?.chief_complaint || "Acute medical crisis requiring immediate ALS response"}
-                    </p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 text-slate-600">
-                      <div className="flex items-center gap-1.5">
-                        <MapPin className="w-3.5 h-3.5 text-red-600 shrink-0" />
-                        <span className="truncate">Scene: <strong>{pendingDispatch.incident?.location_address}</strong></span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <Building2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                        <span className="truncate">Assigned ER: <strong>{pendingDispatch.destination_hospital_name}</strong></span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Accept / Decline Action Buttons */}
-                  <div className="flex items-center justify-end gap-3 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => handleConfirmMission(pendingDispatch.id, "REJECTED")}
-                      disabled={actionLoading}
-                      className="px-4 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-bold text-xs transition"
-                    >
-                      Decline Mission
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleConfirmMission(pendingDispatch.id, "ACCEPTED")}
-                      disabled={actionLoading}
-                      className="px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs transition flex items-center gap-1.5"
-                    >
-                      <Check className="w-4 h-4" />
-                      <span>Accept Mission</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* CASE 1B: AMBULANCE ACCEPTED, AWAITING RECEIVING HOSPITAL CONFIRMATION */}
-              {awaitingHospitalDispatch && !pendingDispatch && !activeMission && (
-                <div className="bg-blue-50/70 border-2 border-blue-300 rounded-xl p-5 shadow-xs space-y-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-lg bg-blue-600 text-white flex items-center justify-center">
-                        <Clock className="w-5 h-5 animate-spin" />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800">
-                            DISPATCH #{awaitingHospitalDispatch.id}
-                          </span>
-                          <span className="text-xs font-bold text-blue-900 uppercase">
-                            Unit Accepted • Awaiting Hospital ER Confirmation
-                          </span>
-                        </div>
-                        <h2 className="text-base font-bold text-slate-900 mt-0.5">
-                          Hospital Coordination in Progress
-                        </h2>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="bg-white border border-blue-100 rounded-lg p-4 text-xs space-y-2 text-slate-700">
-                    <p>
-                      Unit <strong>{ambulance?.call_sign}</strong> has accepted the dispatch for Incident #{awaitingHospitalDispatch.incident_id}.
-                      The Receiving Hospital (<strong>{awaitingHospitalDispatch.destination_hospital_name}</strong>) is currently verifying trauma bed & physician capacity.
-                    </p>
-                    <p className="text-[11px] text-slate-500">
-                      As soon as the receiving hospital confirms, your mission will automatically transition into active response mode.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* CASE 2: ACTIVE MISSION IN PROGRESS */}
-              {activeMission ? (
-                <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-5">
-                  <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-lg bg-blue-600 text-white flex items-center justify-center">
-                        <Radio className="w-5 h-5 animate-pulse" />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
-                            DUAL CONFIRMED
-                          </span>
-                          <span className="text-xs font-bold text-slate-900">Dispatch #{activeMission.id}</span>
-                        </div>
-                        <h2 className="text-base font-bold text-slate-900 mt-0.5">
-                          Active Operational Mission in Progress
-                        </h2>
-                      </div>
-                    </div>
-
-                    {/* External Navigation Links */}
-                    <div className="flex items-center gap-2">
-                      <a
-                        href={gmapsSceneUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-blue-600 text-xs font-bold flex items-center gap-1 transition"
-                      >
-                        <Compass className="w-3.5 h-3.5" />
-                        <span>Google Maps</span>
-                        <ExternalLink className="w-3 h-3 text-slate-400" />
-                      </a>
-                      <a
-                        href={osmSceneUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center gap-1 transition"
-                      >
-                        <Navigation className="w-3.5 h-3.5 text-slate-500" />
-                        <span>OpenStreetMap</span>
-                      </a>
-                    </div>
-                  </div>
-
-                  {/* Patient & Incident Info */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                    <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1.5">
-                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
-                        Patient / Pickup Waypoint
+                      <span className="text-xs font-bold text-red-600">
+                        {activeMission.incident?.chief_complaint || "Emergency"}
                       </span>
-                      <p className="text-sm font-bold text-slate-900">
-                        {activeMission.incident?.caller_name || "Emergency Caller"} ({activeMission.incident?.caller_phone})
-                      </p>
-                      <p className="text-slate-600 flex items-center gap-1">
-                        <MapPin className="w-3.5 h-3.5 text-red-600 shrink-0" />
-                        <span>{activeMission.incident_address || activeMission.incident?.location_address}</span>
-                      </p>
-                      <p className="text-slate-800 bg-white p-2 rounded border border-slate-200 mt-2">
-                        {activeMission.incident?.chief_complaint}
-                      </p>
                     </div>
 
-                    <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1.5">
-                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
-                        Destination Hospital ER
-                      </span>
-                      <p className="text-sm font-bold text-slate-900">{activeMission.destination_hospital_name}</p>
-                      <p className="text-slate-600 flex items-center gap-1">
-                        <Building2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                        <span>Trauma Emergency Ward Intake Reserved</span>
-                      </p>
-                      <a
-                        href={gmapsHospUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:text-blue-800 mt-2"
-                      >
-                        <Navigation className="w-3 h-3" />
-                        <span>Navigate to Hospital ER</span>
-                      </a>
-                    </div>
-                  </div>
-
-                  {/* PATIENT VITALS & CLINICAL TELEMETRY SECTION */}
-                  <div className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5 shadow-2xs space-y-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
-                      <div className="flex items-center gap-2">
-                        <div className="w-8 h-8 rounded-lg bg-rose-50 text-rose-600 border border-rose-200 flex items-center justify-center">
-                          <Activity className="w-4 h-4" />
-                        </div>
-                        <div>
-                          <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                            <span>Patient Vitals Telemetry</span>
-                            {missionVitals.length > 0 && (
-                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                                {missionVitals.length} recorded
-                              </span>
-                            )}
-                          </h3>
-                          <p className="text-[11px] text-slate-500">
-                            Real-time physiological metrics synchronized with receiving hospital ER
+                    <div className="space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-start space-x-2">
+                          <MapPin className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                          <p className="text-xs font-semibold text-slate-800">
+                            {activeMission.incident_address ||
+                              activeMission.incident?.location_address ||
+                              "Canara Engineering College Sector"}
                           </p>
                         </div>
                       </div>
 
-                      {missionVitals.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => setShowVitalsHistory(!showVitalsHistory)}
-                          className="text-xs font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1 transition"
-                        >
-                          <span>{showVitalsHistory ? "Hide Vitals Log" : "View Vitals Log"}</span>
-                          {showVitalsHistory ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                        </button>
-                      )}
-                    </div>
-
-                    {/* LATEST RECORDED VITALS SNAPSHOT (if available) */}
-                    {missionVitals.length > 0 && (
-                      <div className="space-y-2">
-                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
-                          Latest Reading ({new Date(missionVitals[0].recorded_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})
+                      {/* Coordinates & Copy */}
+                      <div className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2 border border-slate-100 text-[11px] font-mono text-slate-600">
+                        <span>
+                          {targetLat?.toFixed(6)}, {targetLng?.toFixed(6)}
                         </span>
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                          {/* Heart Rate */}
-                          <div className="p-3 rounded-lg bg-rose-50/60 border border-rose-200/80">
-                            <div className="flex items-center justify-between text-rose-700 text-[11px] font-bold">
-                              <span>Heart Rate</span>
-                              <Heart className="w-3.5 h-3.5" />
-                            </div>
-                            <div className="mt-1 flex items-baseline gap-1">
-                              <span className="text-xl font-black text-rose-950 font-mono">
-                                {missionVitals[0].heart_rate}
-                              </span>
-                              <span className="text-[10px] text-rose-600 font-medium">bpm</span>
-                            </div>
-                          </div>
+                        <button
+                          onClick={() =>
+                            handleCopy(
+                              `${targetLat}, ${targetLng}`,
+                              "Coordinates"
+                            )
+                          }
+                          className="hover:text-slate-900 flex items-center space-x-1"
+                        >
+                          <Copy className="w-3 h-3" />
+                          <span>Copy</span>
+                        </button>
+                      </div>
 
-                          {/* Blood Pressure */}
-                          <div className="p-3 rounded-lg bg-indigo-50/60 border border-indigo-200/80">
-                            <div className="flex items-center justify-between text-indigo-700 text-[11px] font-bold">
-                              <span>Blood Pressure</span>
-                              <Droplet className="w-3.5 h-3.5" />
-                            </div>
-                            <div className="mt-1 flex items-baseline gap-1">
-                              <span className="text-xl font-black text-indigo-950 font-mono">
-                                {missionVitals[0].blood_pressure_systolic}/{missionVitals[0].blood_pressure_diastolic}
-                              </span>
-                              <span className="text-[10px] text-indigo-600 font-medium">mmHg</span>
-                            </div>
-                          </div>
-
-                          {/* Oxygen Saturation */}
-                          <div className="p-3 rounded-lg bg-sky-50/60 border border-sky-200/80">
-                            <div className="flex items-center justify-between text-sky-700 text-[11px] font-bold">
-                              <span>Oxygen (SpO2)</span>
-                              <Wind className="w-3.5 h-3.5" />
-                            </div>
-                            <div className="mt-1 flex items-baseline gap-1">
-                              <span className="text-xl font-black text-sky-950 font-mono">
-                                {missionVitals[0].oxygen_saturation}%
-                              </span>
-                              <span className="text-[10px] text-sky-600 font-medium">sat</span>
-                            </div>
-                          </div>
-
-                          {/* Respiratory Rate */}
-                          <div className="p-3 rounded-lg bg-emerald-50/60 border border-emerald-200/80">
-                            <div className="flex items-center justify-between text-emerald-700 text-[11px] font-bold">
-                              <span>Resp. Rate</span>
-                              <Activity className="w-3.5 h-3.5" />
-                            </div>
-                            <div className="mt-1 flex items-baseline gap-1">
-                              <span className="text-xl font-black text-emerald-950 font-mono">
-                                {missionVitals[0].respiratory_rate}
-                              </span>
-                              <span className="text-[10px] text-emerald-600 font-medium">/min</span>
-                            </div>
-                          </div>
+                      {/* Caller Information */}
+                      <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs">
+                        <div className="flex items-center space-x-1.5 text-slate-600">
+                          <User className="w-3.5 h-3.5 text-slate-400" />
+                          <span>
+                            {activeMission.incident?.caller_name || "Emergency Caller"}
+                          </span>
                         </div>
-
-                        {missionVitals[0].notes && (
-                          <div className="text-xs bg-slate-50 border border-slate-200 rounded-md p-2 text-slate-700">
-                            <span className="font-semibold text-slate-900">Crew Notes: </span>
-                            {missionVitals[0].notes}
-                          </div>
+                        {activeMission.incident?.caller_phone && (
+                          <a
+                            href={`tel:${activeMission.incident.caller_phone}`}
+                            className="inline-flex items-center space-x-1 text-blue-600 hover:text-blue-700 font-semibold"
+                          >
+                            <Phone className="w-3.5 h-3.5" />
+                            <span>{activeMission.incident.caller_phone}</span>
+                          </a>
                         )}
                       </div>
-                    )}
+                    </div>
+                  </div>
 
-                    {/* EXPANDABLE VITALS HISTORY LOG */}
-                    {showVitalsHistory && missionVitals.length > 1 && (
-                      <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50/50">
-                        <div className="px-3 py-2 bg-slate-100/70 border-b border-slate-200 text-[11px] font-bold text-slate-700">
-                          Mission Vitals Timeline ({missionVitals.length} records)
-                        </div>
-                        <div className="overflow-x-auto max-h-48">
-                          <table className="w-full text-left text-xs">
-                            <thead className="bg-slate-50 text-slate-500 text-[10px] uppercase font-mono border-b border-slate-200">
-                              <tr>
-                                <th className="py-2 px-3">Time</th>
-                                <th className="py-2 px-3">HR (bpm)</th>
-                                <th className="py-2 px-3">BP (mmHg)</th>
-                                <th className="py-2 px-3">SpO2</th>
-                                <th className="py-2 px-3">RR (/min)</th>
-                                <th className="py-2 px-3">Notes</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-200 bg-white">
-                              {missionVitals.map((v) => (
-                                <tr key={v.id} className="hover:bg-slate-50">
-                                  <td className="py-1.5 px-3 font-mono text-slate-600">
-                                    {new Date(v.recorded_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-                                  </td>
-                                  <td className="py-1.5 px-3 font-mono font-bold text-rose-700">{v.heart_rate}</td>
-                                  <td className="py-1.5 px-3 font-mono font-semibold text-indigo-700">
-                                    {v.blood_pressure_systolic}/{v.blood_pressure_diastolic}
-                                  </td>
-                                  <td className="py-1.5 px-3 font-mono font-semibold text-sky-700">{v.oxygen_saturation}%</td>
-                                  <td className="py-1.5 px-3 font-mono text-emerald-700">{v.respiratory_rate}</td>
-                                  <td className="py-1.5 px-3 text-slate-600 truncate max-w-xs">{v.notes || "—"}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* RECORD NEW VITALS FORM */}
-                    <form onSubmit={handleSubmitVitals} className="bg-slate-50 border border-slate-200 rounded-lg p-3.5 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-slate-900">
-                          {missionVitals.length === 0 ? "Record Initial Patient Vitals" : "Log Updated Patient Vitals"}
+                  {/* Receiving Hospital Facility */}
+                  <div className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-2xs space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <Building2 className="w-4 h-4 text-emerald-600" />
+                        <span className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                          Receiving Medical Center
                         </span>
-                        <span className="text-[10px] text-slate-500 font-medium">Physiological metrics validation active</span>
                       </div>
+                      <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
+                        Trauma Bay Reserved
+                      </span>
+                    </div>
 
-                      {/* Error & Success Feedback */}
-                      {vitalsError && (
-                        <div className="p-2 rounded bg-red-50 border border-red-200 text-xs text-red-700 font-medium flex items-center justify-between">
-                          <span>{vitalsError}</span>
-                          <button type="button" onClick={() => setVitalsError(null)} className="font-bold ml-2">✕</button>
-                        </div>
-                      )}
-                      {vitalsSuccess && (
-                        <div className="p-2 rounded bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-medium flex items-center justify-between">
-                          <span>{vitalsSuccess}</span>
-                          <button type="button" onClick={() => setVitalsSuccess(null)} className="font-bold ml-2">✕</button>
-                        </div>
-                      )}
+                    <div className="space-y-2">
+                      <h4 className="text-sm font-bold text-slate-900">
+                        {activeMission.destination_hospital_name}
+                      </h4>
+                      <p className="text-xs text-slate-600">
+                        {activeMission.destination_hospital_address ||
+                          "Mangaluru Emergency Regional Center"}
+                      </p>
 
-                      {/* 5 Compact Metric Inputs */}
-                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-                        {/* Heart Rate */}
+                      <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs text-slate-500">
+                        <span>Emergency ER Contact:</span>
+                        <a
+                          href="tel:08242220555"
+                          className="font-semibold text-slate-800 hover:text-blue-600 inline-flex items-center space-x-1"
+                        >
+                          <Phone className="w-3.5 h-3.5 text-slate-400" />
+                          <span>0824-2220555</span>
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. FUNCTIONAL LEAFLET MAP WRAPPER */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs font-semibold text-slate-600 px-1">
+                    <span>Live GPS Navigation & Tracking</span>
+                    <span className="text-blue-600 font-mono">
+                      {formatDistance(activeMission.route_distance_meters)} remaining
+                    </span>
+                  </div>
+                  <AmbulanceMapWrapper
+                    ambulanceLat={ambulance?.current_latitude}
+                    ambulanceLng={ambulance?.current_longitude}
+                    ambulanceCallSign={ambulance?.call_sign}
+                    targetLat={targetLat}
+                    targetLng={targetLng}
+                    targetLabel={targetLabel}
+                    targetType={targetType}
+                    gpsStatus="CONNECTED"
+                  />
+                </div>
+
+                {/* 4. CONTEXTUAL SINGLE PRIMARY ACTION BUTTON */}
+                <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm space-y-3">
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">
+                    Next Mission Phase Action
+                  </span>
+
+                  {/* Stage 1: ASSIGNED -> EN ROUTE */}
+                  {activeMission.status === "ASSIGNED" && (
+                    <button
+                      type="button"
+                      disabled={actionLoading}
+                      onClick={() => handleStepLifecycle(activeMission.id)}
+                      className="w-full py-4 px-6 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-base shadow-md flex items-center justify-center space-x-3 transition-colors"
+                    >
+                      {actionLoading ? (
+                        <RefreshCw className="w-5 h-5 animate-spin" />
+                      ) : (
+                        <>
+                          <Navigation className="w-5 h-5 fill-current" />
+                          <span>Start Response — En Route to Scene</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {/* Stage 2: EN_ROUTE_INCIDENT -> ON_SCENE */}
+                  {activeMission.status === "EN_ROUTE_INCIDENT" && (
+                    <button
+                      type="button"
+                      disabled={actionLoading}
+                      onClick={() => handleStepLifecycle(activeMission.id)}
+                      className="w-full py-4 px-6 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-base shadow-md flex items-center justify-center space-x-3 transition-colors"
+                    >
+                      {actionLoading ? (
+                        <RefreshCw className="w-5 h-5 animate-spin" />
+                      ) : (
+                        <>
+                          <MapPin className="w-5 h-5" />
+                          <span>Arrived at Scene</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {/* Stage 3: ON_SCENE -> CONFIRM PATIENT PICKUP (EXPLICIT CONFIRMATION) */}
+                  {activeMission.status === "ON_SCENE" && (
+                    <div className="space-y-2">
+                      <p className="text-xs text-slate-500">
+                        Paramedic protocol: Arrival at scene does not automatically depart.
+                        Confirm patient is safely inside the ambulance before starting hospital transport.
+                      </p>
+                      <button
+                        type="button"
+                        disabled={actionLoading}
+                        onClick={() => setShowPickupModal(true)}
+                        className="w-full py-4 px-6 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-base shadow-md flex items-center justify-center space-x-3 transition-colors"
+                      >
+                        {actionLoading ? (
+                          <RefreshCw className="w-5 h-5 animate-spin" />
+                        ) : (
+                          <>
+                            <Stethoscope className="w-5 h-5" />
+                            <span>Confirm Patient Pickup & Start Transport</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Stage 4: EN_ROUTE_HOSPITAL -> AT_HOSPITAL */}
+                  {activeMission.status === "EN_ROUTE_HOSPITAL" && (
+                    <button
+                      type="button"
+                      disabled={actionLoading}
+                      onClick={handleConfirmArrivalHospital}
+                      className="w-full py-4 px-6 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-base shadow-md flex items-center justify-center space-x-3 transition-colors"
+                    >
+                      {actionLoading ? (
+                        <RefreshCw className="w-5 h-5 animate-spin" />
+                      ) : (
+                        <>
+                          <Building2 className="w-5 h-5" />
+                          <span>Arrived at Hospital ER Trauma Bay</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {/* Stage 5: AT_HOSPITAL -> COMPLETE */}
+                  {activeMission.status === "AT_HOSPITAL" && (
+                    <button
+                      type="button"
+                      disabled={actionLoading}
+                      onClick={() => handleStepLifecycle(activeMission.id)}
+                      className="w-full py-4 px-6 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-base shadow-md flex items-center justify-center space-x-3 transition-colors"
+                    >
+                      {actionLoading ? (
+                        <RefreshCw className="w-5 h-5 animate-spin" />
+                      ) : (
+                        <>
+                          <CheckCircle2 className="w-5 h-5" />
+                          <span>Complete Handover & Finish Mission</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {/* Secondary Quick Controls */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100 text-xs">
+                    <div className="flex items-center space-x-2">
+                      <a
+                        href="tel:08242220555"
+                        className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold flex items-center space-x-1.5 transition-colors"
+                      >
+                        <PhoneCall className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Call Dispatcher</span>
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => setShowAssistanceModal(true)}
+                        className="px-3 py-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 font-semibold flex items-center space-x-1.5 transition-colors"
+                      >
+                        <ShieldAlert className="w-3.5 h-3.5" />
+                        <span>Request Assistance</span>
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowVitalsForm(!showVitalsForm)}
+                      className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold flex items-center space-x-1.5 transition-colors"
+                    >
+                      <Activity className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>{showVitalsForm ? "Hide Vitals Logger" : "Log Patient Vitals"}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 5. PATIENT VITALS TELEMETRY SECTION (COLLAPSIBLE) */}
+                {showVitalsForm && (
+                  <div className="bg-white rounded-3xl border border-slate-200 p-5 shadow-2xs space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <Heart className="w-4 h-4 text-red-600" />
+                        <h4 className="text-sm font-bold text-slate-900">
+                          Real-Time Patient Vitals Telemetry
+                        </h4>
+                      </div>
+                      <span className="text-xs text-slate-500">
+                        Synchronized live with receiving ER
+                      </span>
+                    </div>
+
+                    {vitalsError && (
+                      <div className="p-3 bg-red-50 text-red-700 text-xs rounded-xl border border-red-200">
+                        {vitalsError}
+                      </div>
+                    )}
+                    {vitalsSuccess && (
+                      <div className="p-3 bg-emerald-50 text-emerald-700 text-xs rounded-xl border border-emerald-200">
+                        {vitalsSuccess}
+                      </div>
+                    )}
+
+                    <form onSubmit={handleSubmitVitals} className="space-y-4">
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                         <div>
-                          <label className="text-[10px] font-bold text-slate-700 block mb-1">
-                            Heart Rate (bpm)*
+                          <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                            Heart Rate (bpm)
                           </label>
                           <input
                             type="number"
-                            min="30"
-                            max="250"
                             required
                             placeholder="75"
                             value={vitalsForm.heartRate}
-                            onChange={(e) => setVitalsForm({ ...vitalsForm, heartRate: e.target.value })}
-                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                            onChange={(e) =>
+                              setVitalsForm({ ...vitalsForm, heartRate: e.target.value })
+                            }
+                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                           />
                         </div>
-
-                        {/* Systolic BP */}
                         <div>
-                          <label className="text-[10px] font-bold text-slate-700 block mb-1">
-                            BP Systolic*
+                          <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                            BP Systolic
                           </label>
                           <input
                             type="number"
-                            min="50"
-                            max="260"
                             required
                             placeholder="120"
                             value={vitalsForm.bpSystolic}
-                            onChange={(e) => setVitalsForm({ ...vitalsForm, bpSystolic: e.target.value })}
-                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                            onChange={(e) =>
+                              setVitalsForm({ ...vitalsForm, bpSystolic: e.target.value })
+                            }
+                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                           />
                         </div>
-
-                        {/* Diastolic BP */}
                         <div>
-                          <label className="text-[10px] font-bold text-slate-700 block mb-1">
-                            BP Diastolic*
+                          <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                            BP Diastolic
                           </label>
                           <input
                             type="number"
-                            min="30"
-                            max="160"
                             required
                             placeholder="80"
                             value={vitalsForm.bpDiastolic}
-                            onChange={(e) => setVitalsForm({ ...vitalsForm, bpDiastolic: e.target.value })}
-                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                            onChange={(e) =>
+                              setVitalsForm({ ...vitalsForm, bpDiastolic: e.target.value })
+                            }
+                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                           />
                         </div>
-
-                        {/* SpO2 */}
                         <div>
-                          <label className="text-[10px] font-bold text-slate-700 block mb-1">
-                            SpO2 (%)*
+                          <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                            SpO2 (%)
                           </label>
                           <input
                             type="number"
-                            min="50"
-                            max="100"
                             required
                             placeholder="98"
                             value={vitalsForm.oxygenSat}
-                            onChange={(e) => setVitalsForm({ ...vitalsForm, oxygenSat: e.target.value })}
-                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                            onChange={(e) =>
+                              setVitalsForm({ ...vitalsForm, oxygenSat: e.target.value })
+                            }
+                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                           />
                         </div>
-
-                        {/* Respiratory Rate */}
                         <div>
-                          <label className="text-[10px] font-bold text-slate-700 block mb-1">
-                            Resp Rate (/min)*
+                          <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                            Resp Rate (/min)
                           </label>
                           <input
                             type="number"
-                            min="5"
-                            max="60"
                             required
                             placeholder="16"
                             value={vitalsForm.respRate}
-                            onChange={(e) => setVitalsForm({ ...vitalsForm, respRate: e.target.value })}
-                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+                            onChange={(e) =>
+                              setVitalsForm({ ...vitalsForm, respRate: e.target.value })
+                            }
+                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                           />
                         </div>
                       </div>
 
-                      {/* Paramedic Notes */}
-                      <div>
-                        <label className="text-[10px] font-bold text-slate-700 block mb-1">
-                          Paramedic Observations / Patient Condition (Optional)
-                        </label>
+                      <div className="flex items-center gap-3">
                         <input
                           type="text"
-                          maxLength={500}
-                          placeholder="e.g. Patient conscious, alert, mild tachycardia on arrival"
+                          placeholder="Clinical observations or medication notes..."
                           value={vitalsForm.notes}
-                          onChange={(e) => setVitalsForm({ ...vitalsForm, notes: e.target.value })}
-                          className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                          onChange={(e) =>
+                            setVitalsForm({ ...vitalsForm, notes: e.target.value })
+                          }
+                          className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
-                      </div>
-
-                      {/* Submit Button */}
-                      <div className="flex items-center justify-end pt-1">
                         <button
                           type="submit"
                           disabled={vitalsSubmitting}
-                          className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs shadow-xs transition flex items-center gap-1.5 disabled:opacity-50"
+                          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center space-x-1.5 shrink-0"
                         >
                           {vitalsSubmitting ? (
-                            <>
-                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                              <span>Saving Vitals Telemetry...</span>
-                            </>
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                           ) : (
-                            <>
-                              <Heart className="w-3.5 h-3.5" />
-                              <span>Save & Transmit Vitals</span>
-                            </>
+                            <Send className="w-3.5 h-3.5" />
                           )}
+                          <span>Record Vitals</span>
                         </button>
                       </div>
                     </form>
-                  </div>
 
-                  {/* 4-STAGE LIFECYCLE STEPPER & CONTROL BUTTON */}
-                  <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-3">
-                    <div className="flex items-center justify-between text-xs font-bold text-slate-900">
-                      <span>Operational Mission Lifecycle</span>
-                      <span className="font-mono text-blue-700">Stage: {activeMission.status}</span>
-                    </div>
-
-                    {/* Progress Track */}
-                    <div className="grid grid-cols-4 gap-2 text-center text-xs">
-                      {(() => {
-                        const LIFECYCLE_ORDER = ["ASSIGNED", "EN_ROUTE_INCIDENT", "ON_SCENE", "EN_ROUTE_HOSPITAL", "AT_HOSPITAL", "COMPLETED"];
-                        const currentIdx = LIFECYCLE_ORDER.indexOf(activeMission.status);
-                        return [
-                          { id: "ASSIGNED", label: "1. Assigned" },
-                          { id: "EN_ROUTE_INCIDENT", label: "2. En Route Scene" },
-                          { id: "ON_SCENE", label: "3. On Scene" },
-                          { id: "EN_ROUTE_HOSPITAL", label: "4. En Route ER" },
-                        ].map((step) => {
-                          const stepIdx = LIFECYCLE_ORDER.indexOf(step.id);
-                          const isCompleted = currentIdx > stepIdx;
-                          const isCurrent = activeMission.status === step.id;
-                          return (
+                    {/* Vitals History Summary */}
+                    {missionVitals.length > 0 && (
+                      <div className="pt-3 border-t border-slate-100">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-2">
+                          Recent Recorded Telemetry ({missionVitals.length})
+                        </span>
+                        <div className="space-y-1.5 max-h-36 overflow-y-auto">
+                          {missionVitals.map((v) => (
                             <div
-                              key={step.id}
-                              className={`p-2 rounded-lg border text-xs font-semibold flex items-center justify-center gap-1 ${
-                                isCompleted
-                                  ? "bg-emerald-50 text-emerald-800 border-emerald-300"
-                                  : isCurrent
-                                  ? "bg-blue-600 text-white border-blue-600 shadow-xs"
-                                  : "bg-white text-slate-500 border-slate-200"
-                              }`}
+                              key={v.id}
+                              className="flex items-center justify-between px-3 py-1.5 bg-slate-50 rounded-xl text-xs text-slate-700"
                             >
-                              {isCompleted && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />}
-                              <span>{step.label}</span>
+                              <div className="space-x-2 font-mono">
+                                <span>HR: <strong>{v.heart_rate}</strong></span>
+                                <span>BP: <strong>{v.blood_pressure_systolic}/{v.blood_pressure_diastolic}</strong></span>
+                                <span>SpO2: <strong>{v.oxygen_saturation}%</strong></span>
+                                <span>RR: <strong>{v.respiratory_rate}</strong></span>
+                              </div>
+                              <span className="text-[10px] text-slate-400">
+                                {new Date(v.recorded_at).toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })}
+                              </span>
                             </div>
-                          );
-                        });
-                      })()}
-                    </div>
-
-                    {/* Prominent Next Action Button */}
-                    {nextActionConfig && (
-                      <div className="pt-2">
-                        <button
-                          type="button"
-                          onClick={() => handleStepLifecycle(activeMission.id)}
-                          disabled={actionLoading}
-                          className="w-full py-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-sm transition active:scale-[0.99]"
-                        >
-                          <NextActionIcon className="w-5 h-5" />
-                          <span>{nextActionConfig.label}</span>
-                          <ArrowRight className="w-4 h-4" />
-                        </button>
+                          ))}
+                        </div>
                       </div>
                     )}
                   </div>
-                </div>
-              ) : null}
-
-              {/* CASE 3: NO ACTIVE MISSION — STANDBY / READINESS STATE */}
-              {!pendingDispatch && !awaitingHospitalDispatch && !activeMission && (
-                <div className="bg-white border border-slate-200 rounded-xl p-8 shadow-2xs text-center space-y-4 max-w-xl mx-auto">
-                  <div className="w-14 h-14 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 mx-auto">
-                    <Ambulance className="w-7 h-7" />
+                )}
+              </div>
+            ) : (
+              /* CALM AVAILABLE / IDLE STATE */
+              <div className="space-y-6">
+                <div className="bg-white rounded-3xl border border-slate-200/80 p-8 sm:p-10 shadow-2xs text-center flex flex-col items-center max-w-xl mx-auto space-y-4">
+                  <div
+                    className={`w-16 h-16 rounded-3xl flex items-center justify-center ${
+                      isOnDuty
+                        ? "bg-emerald-50 text-emerald-600 border border-emerald-200"
+                        : "bg-slate-100 text-slate-400 border border-slate-200"
+                    }`}
+                  >
+                    {isOnDuty ? (
+                      <ShieldCheck className="w-8 h-8" />
+                    ) : (
+                      <Shield className="w-8 h-8" />
+                    )}
                   </div>
-                  <div className="space-y-1">
-                    <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 uppercase">
-                      Duty Status: {ambulance?.status || "AVAILABLE"}
-                    </span>
-                    <h2 className="text-lg font-bold text-slate-900 mt-2">
-                      Ambulance {ambulance?.call_sign} on Standby
+
+                  <div>
+                    <h2 className="text-xl font-extrabold text-slate-900">
+                      {isOnDuty
+                        ? "Unit On Duty • Ready for Emergency Calls"
+                        : "Ambulance Unit is Off Duty"}
                     </h2>
-                    <p className="text-xs text-slate-500 max-w-md mx-auto">
-                      Connected to Mangaluru Emergency Coordination Network. The console will alert immediately when a high-priority incident is assigned to this unit.
+                    <p className="text-xs text-slate-500 mt-1 max-w-sm">
+                      {isOnDuty
+                        ? `Stationed at ${
+                            ambulance?.base_station || "Mangaluru Base Station"
+                          }. Live GPS telemetry active and ready for dispatch.`
+                        : "Unit is currently marked off-duty. Switch duty toggle to start receiving emergency missions."}
                     </p>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3 max-w-xs mx-auto text-left pt-2 text-xs">
-                    <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
-                      <span className="text-[10px] text-slate-500 font-medium">Base Station</span>
-                      <p className="font-bold text-slate-900 truncate">{ambulance?.base_station || "Surathkal Sector"}</p>
-                    </div>
-                    <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
-                      <span className="text-[10px] text-slate-500 font-medium">Fuel Level</span>
-                      <p className="font-bold text-slate-900">{ambulance?.fuel_level_percent || 90}%</p>
-                    </div>
+                  <div className="flex items-center space-x-3 pt-2">
+                    <button
+                      onClick={handleToggleDutyStatus}
+                      className={`px-5 py-2.5 rounded-xl text-xs font-bold border transition-colors shadow-2xs ${
+                        isOnDuty
+                          ? "bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300"
+                          : "bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-600"
+                      }`}
+                    >
+                      {isOnDuty ? "Go Off Duty" : "Go On Duty (Available)"}
+                    </button>
+
+                    <button
+                      onClick={() => setCurrentTab("vehicle")}
+                      className="px-5 py-2.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold transition-colors shadow-2xs"
+                    >
+                      Check Equipment
+                    </button>
                   </div>
                 </div>
-              )}
-            </div>
-          )}
 
-          {/* ============================================================== */}
-          {/* VIEW: MISSION HISTORY                                          */}
-          {/* ============================================================== */}
-          {currentNav === "history" && (
-            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4">
-              <h2 className="text-base font-bold text-slate-900">Unit Mission History</h2>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50 border-y border-slate-200 text-slate-600 uppercase font-mono text-[10px]">
-                    <tr>
-                      <th className="py-2.5 px-3">Dispatch #</th>
-                      <th className="py-2.5 px-3">Incident #</th>
-                      <th className="py-2.5 px-3">Hospital Destination</th>
-                      <th className="py-2.5 px-3">Confirmation Status</th>
-                      <th className="py-2.5 px-3">Mission Status</th>
-                      <th className="py-2.5 px-3">Vitals Logged</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {dispatches.map((disp) => (
-                      <tr key={disp.id} className="hover:bg-slate-50 transition">
-                        <td className="py-3 px-3 font-mono font-bold text-slate-900">#{disp.id}</td>
-                        <td className="py-3 px-3 font-mono text-slate-600">#{disp.incident_id}</td>
-                        <td className="py-3 px-3 font-semibold text-slate-800">{disp.destination_hospital_name}</td>
-                        <td className="py-3 px-3">
-                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
-                            {disp.coordination_status}
+                {/* Unit Snapshot Summary Card */}
+                {ambulance && (
+                  <div className="max-w-2xl mx-auto bg-white rounded-3xl border border-slate-200/80 p-6 shadow-2xs space-y-4">
+                    <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                      <div className="flex items-center space-x-2.5">
+                        <Ambulance className="w-5 h-5 text-blue-600" />
+                        <span className="font-bold text-sm text-slate-900">
+                          Unit {ambulance.call_sign} Specs
+                        </span>
+                      </div>
+                      <span className="px-2.5 py-0.5 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 text-xs font-bold uppercase">
+                        {ambulance.paramedic_level}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+                      <div>
+                        <span className="text-slate-400 block text-[10px] font-bold uppercase">
+                          Base Station
+                        </span>
+                        <span className="font-semibold text-slate-800">
+                          {ambulance.base_station}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block text-[10px] font-bold uppercase">
+                          Vehicle Type
+                        </span>
+                        <span className="font-semibold text-slate-800">
+                          {ambulance.vehicle_type}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block text-[10px] font-bold uppercase">
+                          Fuel Level
+                        </span>
+                        <span className="font-semibold text-slate-800">
+                          {ambulance.fuel_level_percent}% Full
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block text-[10px] font-bold uppercase">
+                          Current Status
+                        </span>
+                        <span
+                          className={`font-extrabold uppercase ${
+                            ambulance.status === "AVAILABLE"
+                              ? "text-emerald-600"
+                              : ambulance.status === "OFF_DUTY"
+                              ? "text-slate-500"
+                              : "text-amber-600"
+                          }`}
+                        >
+                          {ambulance.status}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ========================================================= */}
+        {/* TAB 2: MY MISSIONS (HISTORY & DETAILS)                     */}
+        {/* ========================================================= */}
+        {currentTab === "missions" && (
+          <div className="space-y-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-extrabold text-slate-900">
+                  Mission History
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Authenticated operational missions assigned to this ambulance unit.
+                </p>
+              </div>
+
+              <span className="px-3 py-1 rounded-xl bg-slate-100 text-slate-700 text-xs font-mono font-bold">
+                {dispatches.length} Missions Recorded
+              </span>
+            </div>
+
+            {dispatches.length === 0 ? (
+              <div className="bg-white rounded-3xl border border-slate-200 p-10 text-center text-slate-500 text-xs">
+                No past missions found for this ambulance unit.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {dispatches.map((m) => (
+                  <div
+                    key={m.id}
+                    className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-2xs hover:shadow-xs transition-shadow space-y-3"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <div className="flex items-center space-x-2">
+                          <span className="font-bold text-sm text-slate-900">
+                            Mission #{m.id}
                           </span>
-                        </td>
-                        <td className="py-3 px-3">
-                          <span className="font-mono text-slate-700">{disp.status}</span>
-                        </td>
-                        <td className="py-3 px-3">
-                          {disp.latest_vitals ? (
-                            <span className="text-[11px] font-mono font-semibold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded">
-                              HR {disp.latest_vitals.heart_rate} • {disp.latest_vitals.blood_pressure_systolic}/{disp.latest_vitals.blood_pressure_diastolic} • SpO2 {disp.latest_vitals.oxygen_saturation}%
-                            </span>
-                          ) : (
-                            <span className="text-slate-400 font-mono text-[11px]">—</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                              m.status === "COMPLETED"
+                                ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                : m.status === "CANCELLED"
+                                ? "bg-slate-100 text-slate-600 border border-slate-200"
+                                : "bg-blue-50 text-blue-700 border border-blue-200"
+                            }`}
+                          >
+                            {m.status.replace(/_/g, " ")}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          {m.incident?.chief_complaint || "Emergency Response"}
+                        </p>
+                      </div>
+
+                      <span className="text-[10px] text-slate-400 font-mono">
+                        {m.coordination_status}
+                      </span>
+                    </div>
+
+                    <div className="space-y-1.5 text-xs text-slate-600 bg-slate-50 rounded-2xl p-3 border border-slate-100">
+                      <div className="flex items-start space-x-2">
+                        <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                        <span className="line-clamp-1">
+                          {m.incident_address ||
+                            m.incident?.location_address ||
+                            "Canara Engineering College Sector"}
+                        </span>
+                      </div>
+                      <div className="flex items-start space-x-2">
+                        <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                        <span className="line-clamp-1">
+                          {m.destination_hospital_name}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-1 text-xs">
+                      <span className="text-[11px] text-slate-400">
+                        Distance: {formatDistance(m.route_distance_meters)}
+                      </span>
+                      <button
+                        onClick={() => setSelectedMissionDetails(m)}
+                        className="text-blue-600 hover:text-blue-700 font-semibold inline-flex items-center space-x-1"
+                      >
+                        <span>View Details</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ========================================================= */}
+        {/* TAB 3: VEHICLE STATUS & EQUIPMENT                         */}
+        {/* ========================================================= */}
+        {currentTab === "vehicle" && (
+          <div className="space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-extrabold text-slate-900">
+                  Vehicle Status & Medical Inventory
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Unit operational readiness, fuel levels, GPS receiver telemetry and onboard equipment.
+                </p>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setShowReportIssueModal(true)}
+                  className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-colors flex items-center space-x-1.5 shadow-2xs"
+                >
+                  <Wrench className="w-3.5 h-3.5" />
+                  <span>Report Vehicle Issue</span>
+                </button>
               </div>
             </div>
-          )}
 
-          {/* ============================================================== */}
-          {/* VIEW: FLEET / VEHICLE STATUS                                   */}
-          {/* ============================================================== */}
-          {currentNav === "fleet" && (
-            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4 max-w-2xl">
-              <h2 className="text-base font-bold text-slate-900">Vehicle Specifications & Telemetry</h2>
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200">
-                  <span className="text-[10px] text-slate-500 uppercase font-medium">Call Sign</span>
-                  <p className="text-sm font-bold text-slate-900">{ambulance?.call_sign}</p>
-                </div>
-                <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200">
-                  <span className="text-[10px] text-slate-500 uppercase font-medium">Vehicle Tier</span>
-                  <p className="text-sm font-bold text-blue-700">{ambulance?.vehicle_type || "ALS"}</p>
-                </div>
-                <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200">
-                  <span className="text-[10px] text-slate-500 uppercase font-medium">GPS Coordinates</span>
-                  <p className="text-xs font-mono font-bold text-slate-800">
-                    {ambulance?.current_latitude?.toFixed(4)}°N, {ambulance?.current_longitude?.toFixed(4)}°E
+            {/* Vehicle Overview Card */}
+            {ambulance && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-2xs space-y-2">
+                  <div className="flex items-center space-x-2 text-slate-500 text-xs font-bold uppercase tracking-wider">
+                    <Truck className="w-4 h-4 text-blue-600" />
+                    <span>Unit Registration</span>
+                  </div>
+                  <h3 className="text-xl font-extrabold text-slate-900">
+                    Unit {ambulance.call_sign}
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Type: <strong className="text-slate-800">{ambulance.vehicle_type}</strong> • Base:{" "}
+                    <strong className="text-slate-800">{ambulance.base_station}</strong>
                   </p>
                 </div>
-                <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200">
-                  <span className="text-[10px] text-slate-500 uppercase font-medium">Paramedic Level</span>
-                  <p className="text-sm font-bold text-slate-900">{ambulance?.paramedic_level || "ADVANCED"}</p>
-                </div>
-              </div>
-            </div>
-          )}
 
-          {/* ============================================================== */}
-          {/* VIEW: PROFILE                                                  */}
-          {/* ============================================================== */}
-          {currentNav === "profile" && (
-            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4 max-w-md">
-              <h2 className="text-base font-bold text-slate-900">Crew Account Profile</h2>
-              <div className="space-y-2 text-xs">
-                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
-                  <span className="text-[10px] text-slate-500 block">Name</span>
-                  <p className="font-bold text-slate-900">{user?.full_name}</p>
+                <div className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-2xs space-y-2">
+                  <div className="flex items-center space-x-2 text-slate-500 text-xs font-bold uppercase tracking-wider">
+                    <Fuel className="w-4 h-4 text-amber-600" />
+                    <span>Fuel Level</span>
+                  </div>
+                  <div className="flex items-baseline space-x-2">
+                    <span className="text-xl font-extrabold text-slate-900">
+                      {ambulance.fuel_level_percent}%
+                    </span>
+                    <span className="text-xs text-slate-500">Operational</span>
+                  </div>
+                  <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${
+                        ambulance.fuel_level_percent > 40
+                          ? "bg-emerald-500"
+                          : "bg-amber-500"
+                      }`}
+                      style={{ width: `${ambulance.fuel_level_percent}%` }}
+                    />
+                  </div>
                 </div>
-                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
-                  <span className="text-[10px] text-slate-500 block">Email</span>
-                  <p className="font-mono text-slate-800">{user?.email}</p>
-                </div>
-                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200">
-                  <span className="text-[10px] text-slate-500 block">Assigned Unit ID</span>
-                  <p className="font-mono font-bold text-blue-700">Ambulance #{user?.ambulance_id}</p>
+
+                <div className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-2xs space-y-2">
+                  <div className="flex items-center space-x-2 text-slate-500 text-xs font-bold uppercase tracking-wider">
+                    <Radio className="w-4 h-4 text-emerald-600" />
+                    <span>GPS Telemetry</span>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-sm font-extrabold text-slate-800">
+                      Connected (12 Sats)
+                    </span>
+                  </div>
+                  <p className="text-[11px] font-mono text-slate-500">
+                    {ambulance.current_latitude?.toFixed(6)}, {ambulance.current_longitude?.toFixed(6)}
+                  </p>
                 </div>
               </div>
+            )}
+
+            {/* Onboard Medical & Rescue Equipment Checklist */}
+            <div className="bg-white rounded-3xl border border-slate-200/80 p-6 shadow-2xs space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                <div className="flex items-center space-x-2">
+                  <Stethoscope className="w-4 h-4 text-emerald-600" />
+                  <h3 className="font-bold text-sm text-slate-900">
+                    Onboard Medical & Emergency Equipment Inventory
+                  </h3>
+                </div>
+                <span className="text-xs text-emerald-700 font-semibold bg-emerald-50 px-2.5 py-0.5 rounded-md border border-emerald-200">
+                  Verified Ready
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                {(
+                  ambulance?.equipment || [
+                    "Defibrillator / AED",
+                    "Portable Ventilator",
+                    "Suction Unit",
+                    "Oxygen Cylinder & Regulator",
+                    "Immobilization Spine Board",
+                    "ALS Medication Bag",
+                    "Trauma Bandage Pack",
+                    "Pulse Oximeter",
+                    "Bag Valve Mask (Adult & Peds)",
+                  ]
+                ).map((eq, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-center space-x-2.5 p-3 rounded-2xl bg-slate-50 border border-slate-100 text-xs font-semibold text-slate-800"
+                  >
+                    <div className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                      <Check className="w-3 h-3" />
+                    </div>
+                    <span>{eq}</span>
+                  </div>
+                ))}
+              </div>
             </div>
-          )}
-        </main>
-      </div>
+          </div>
+        )}
+
+        {/* ========================================================= */}
+        {/* TAB 4: HELP & SUPPORT                                     */}
+        {/* ========================================================= */}
+        {currentTab === "support" && (
+          <div className="space-y-6 max-w-3xl mx-auto">
+            <div>
+              <h2 className="text-lg font-extrabold text-slate-900">
+                Field Help & Operational Support
+              </h2>
+              <p className="text-xs text-slate-500">
+                Direct hotline to Mangaluru Emergency Control Room, backup requests, and breakdown procedures.
+              </p>
+            </div>
+
+            {/* Direct Dispatch Hotline Card */}
+            <div className="bg-white rounded-3xl border border-slate-200/80 p-6 shadow-2xs space-y-4">
+              <div className="flex items-center space-x-3">
+                <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                  <PhoneCall className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900">
+                    Emergency Dispatch Control Room
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    24/7 Priority Emergency Channel for Ambulance Field Crews
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100">
+                <div>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase block">
+                    Direct Phone Line
+                  </span>
+                  <span className="text-base font-extrabold font-mono text-slate-800">
+                    0824-2220555
+                  </span>
+                </div>
+
+                <a
+                  href="tel:08242220555"
+                  className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow-2xs flex items-center space-x-2 transition-colors"
+                >
+                  <Phone className="w-4 h-4" />
+                  <span>Call Dispatch Now</span>
+                </a>
+              </div>
+            </div>
+
+            {/* Operational Support Actions */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* Request Police / Fire Backup */}
+              <div className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-2xs space-y-3">
+                <div className="flex items-center space-x-2 text-red-600">
+                  <ShieldAlert className="w-5 h-5" />
+                  <h4 className="text-sm font-bold text-slate-900">
+                    Request Emergency Backup
+                  </h4>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Request immediate police traffic escort, fire rescue extraction, or a secondary ambulance unit.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowAssistanceModal(true)}
+                  className="w-full py-2.5 px-4 rounded-xl bg-red-50 hover:bg-red-100 text-red-700 text-xs font-bold border border-red-200 transition-colors"
+                >
+                  Request Backup
+                </button>
+              </div>
+
+              {/* Report Vehicle Breakdown */}
+              <div className="bg-white rounded-3xl border border-slate-200/80 p-5 shadow-2xs space-y-3">
+                <div className="flex items-center space-x-2 text-slate-700">
+                  <Wrench className="w-5 h-5" />
+                  <h4 className="text-sm font-bold text-slate-900">
+                    Report Vehicle Breakdown
+                  </h4>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Log engine trouble, tire puncture, or equipment failure and flag unit for fleet maintenance.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowReportIssueModal(true)}
+                  className="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold border border-slate-200 transition-colors"
+                >
+                  Report Problem
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* ------------------------------------------------------------- */}
+      {/* 5. MODALS & DRAWERS                                           */}
+      {/* ------------------------------------------------------------- */}
+
+      {/* MODAL: Confirm Patient Pickup */}
+      {showPickupModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full border border-slate-200 p-6 space-y-4 shadow-xl">
+            <div className="flex items-center space-x-3 text-blue-600">
+              <div className="w-10 h-10 rounded-2xl bg-blue-50 flex items-center justify-center">
+                <Stethoscope className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-extrabold text-base text-slate-900">
+                  Confirm Patient Pickup
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Paramedic Safety Verification
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              Confirm that the patient has been safely transferred inside the ambulance and secured on the stretcher.
+              This will advance the mission status to <strong>En Route to Hospital</strong> and notify the receiving ER trauma team.
+            </p>
+
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowPickupModal(false)}
+                className="w-full py-2.5 px-4 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmPatientPickup}
+                className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold shadow-md transition-colors"
+              >
+                Yes, Patient Onboard
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Request Assistance */}
+      {showAssistanceModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full border border-slate-200 p-6 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2.5 text-red-600">
+                <ShieldAlert className="w-5 h-5" />
+                <h3 className="font-extrabold text-base text-slate-900">
+                  Request Emergency Backup
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowAssistanceModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleRequestAssistance} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Type of Assistance Required
+                </label>
+                <select
+                  value={assistanceType}
+                  onChange={(e) => setAssistanceType(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-red-500"
+                >
+                  <option value="POLICE">Police Escort / Traffic Clearance</option>
+                  <option value="FIRE">Fire & Rescue / Extrication</option>
+                  <option value="BACKUP_AMBULANCE">Secondary Ambulance Unit (Mass Casualty)</option>
+                  <option value="CONTROL_ROOM">Supervisor Direct Callback</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Operational Notes (Optional)
+                </label>
+                <textarea
+                  rows={3}
+                  placeholder="Heavy traffic jam on NH66, or patient pinned inside wreckage..."
+                  value={assistanceNotes}
+                  onChange={(e) => setAssistanceNotes(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-red-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAssistanceModal(false)}
+                  className="w-full py-2.5 px-4 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="w-full py-2.5 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold shadow-md transition-colors"
+                >
+                  Broadcast Request
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Report Vehicle Issue */}
+      {showReportIssueModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full border border-slate-200 p-6 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2.5 text-slate-800">
+                <Wrench className="w-5 h-5 text-amber-600" />
+                <h3 className="font-extrabold text-base text-slate-900">
+                  Report Vehicle / Equipment Problem
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowReportIssueModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleReportIssue} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Issue Category
+                </label>
+                <select
+                  value={issueType}
+                  onChange={(e) => setIssueType(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                >
+                  <option value="MECHANICAL">Mechanical / Engine Trouble</option>
+                  <option value="MEDICAL_EQUIPMENT">Medical Equipment Failure</option>
+                  <option value="FUEL">Low Fuel / Fluid Leak</option>
+                  <option value="COMMUNICATIONS">Radio / GPS Telemetry Loss</option>
+                  <option value="OTHER">Other Operational Defect</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Description of Issue
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  placeholder="Describe vehicle or equipment condition..."
+                  value={issueNotes}
+                  onChange={(e) => setIssueNotes(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                />
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="markMaint"
+                  checked={issueMarkMaintenance}
+                  onChange={(e) => setIssueMarkMaintenance(e.target.checked)}
+                  className="rounded border-slate-300 text-amber-600 focus:ring-amber-500"
+                />
+                <label
+                  htmlFor="markMaint"
+                  className="text-xs font-semibold text-slate-700"
+                >
+                  Mark unit as unavailable for MAINTENANCE
+                </label>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowReportIssueModal(false)}
+                  className="w-full py-2.5 px-4 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="w-full py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-extrabold shadow-md transition-colors"
+                >
+                  Submit Report
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Mission Details Drawer / Viewer */}
+      {selectedMissionDetails && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full border border-slate-200 p-6 space-y-4 shadow-xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="font-extrabold text-base text-slate-900">
+                  Mission Summary #{selectedMissionDetails.id}
+                </h3>
+                <span className="text-xs text-slate-500">
+                  Status: {selectedMissionDetails.status.replace(/_/g, " ")}
+                </span>
+              </div>
+              <button
+                onClick={() => setSelectedMissionDetails(null)}
+                className="text-slate-400 hover:text-slate-600 p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="bg-slate-50 p-3 rounded-2xl space-y-1">
+                <span className="text-[10px] uppercase font-bold text-slate-400">
+                  Chief Complaint
+                </span>
+                <p className="font-bold text-slate-800">
+                  {selectedMissionDetails.incident?.chief_complaint || "Emergency Response"}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-slate-50 p-3 rounded-2xl space-y-1">
+                  <span className="text-[10px] uppercase font-bold text-slate-400">
+                    Scene Location
+                  </span>
+                  <p className="font-semibold text-slate-800">
+                    {selectedMissionDetails.incident_address || "Canara Engineering College Sector"}
+                  </p>
+                </div>
+
+                <div className="bg-slate-50 p-3 rounded-2xl space-y-1">
+                  <span className="text-[10px] uppercase font-bold text-slate-400">
+                    Destination Hospital
+                  </span>
+                  <p className="font-semibold text-slate-800">
+                    {selectedMissionDetails.destination_hospital_name}
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-slate-50 p-3 rounded-2xl space-y-1">
+                <span className="text-[10px] uppercase font-bold text-slate-400">
+                  Total Route Distance
+                </span>
+                <p className="font-bold text-slate-800 font-mono">
+                  {formatDistance(selectedMissionDetails.route_distance_meters)}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setSelectedMissionDetails(null)}
+              className="w-full py-2.5 px-4 rounded-xl bg-slate-900 text-white text-xs font-bold transition-colors"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

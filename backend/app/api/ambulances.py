@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status as http_status
 from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
 from backend.app.models.entities import Ambulance, User, Dispatch, Incident
-from backend.app.schemas.ambulance import AmbulanceOut, AmbulanceLocationUpdate
+from backend.app.schemas.ambulance import AmbulanceOut, AmbulanceLocationUpdate, AmbulanceIssueReport
 from backend.app.core.auth import (
     get_optional_current_user,
     ROLE_AMBULANCE_CREW,
@@ -65,6 +65,17 @@ def update_ambulance_status(
     s_upper = status.upper().strip()
     if s_upper not in valid_statuses:
         raise HTTPException(status_code=400, detail=f"Invalid ambulance status '{status}'. Valid: {valid_statuses}")
+
+    if s_upper == "OFF_DUTY":
+        active_disp = db.query(Dispatch).filter(
+            Dispatch.ambulance_id == amb.id,
+            Dispatch.status.notin_(["COMPLETED", "CANCELLED"]),
+        ).first()
+        if active_disp:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot switch ambulance to OFF_DUTY while an active emergency mission is in progress.",
+            )
 
     amb.status = s_upper
     db.commit()
@@ -160,3 +171,54 @@ def update_ambulance_telemetry(
     )
 
     return amb
+
+@router.post("/{ambulance_id}/report-issue")
+def report_ambulance_issue(
+    ambulance_id: int,
+    payload: Optional[AmbulanceIssueReport] = None,
+    issue_type: Optional[str] = None,
+    notes: Optional[str] = None,
+    mark_maintenance: Optional[bool] = None,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Paramedic crew reports an operational or vehicle mechanical issue.
+    Optionally marks the ambulance as MAINTENANCE.
+    """
+    final_issue = (payload.issue_type if payload and payload.issue_type else issue_type) or "OPERATIONAL_ISSUE"
+    final_notes = (payload.notes if payload and payload.notes is not None else notes)
+    final_maintenance = (payload.mark_maintenance if payload and payload.mark_maintenance is not None else (mark_maintenance or False))
+
+    amb = db.query(Ambulance).filter(Ambulance.id == ambulance_id).first()
+    if not amb:
+        raise HTTPException(status_code=404, detail="Ambulance unit not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if not auth_user:
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to report ambulance issues",
+        )
+
+    if final_maintenance:
+        amb.status = "MAINTENANCE"
+        db.commit()
+        db.refresh(amb)
+
+    broadcast_sync(
+        "AMBULANCE_ISSUE_REPORTED",
+        {
+            "ambulance_id": amb.id,
+            "call_sign": amb.call_sign,
+            "issue_type": final_issue,
+            "notes": final_notes,
+            "status": amb.status,
+            "reported_by": auth_user.full_name or auth_user.email,
+        },
+        ambulance_id=amb.id,
+        entity_type="ambulance",
+        entity_id=amb.id,
+    )
+
+    return {"status": "ok", "message": f"Issue '{final_issue}' reported to Fleet Maintenance & Dispatch Control"}

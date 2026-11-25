@@ -48,6 +48,11 @@ class HandoverCompleteRequest(BaseModel):
     completed_by: Optional[str] = None
     receiving_notes: Optional[str] = None
 
+class MissionAssistanceRequest(BaseModel):
+    assistance_type: str = Field(..., description="POLICE, FIRE, BACKUP_AMBULANCE, or CONTROL_ROOM")
+    notes: Optional[str] = None
+
+
 class HospitalPreparationUpdate(BaseModel):
     preparation_status: str = Field(..., description="NOT_STARTED, TEAM_NOTIFIED, BAY_PREPARED, SPECIALISTS_STANDBY, READY_FOR_ARRIVAL")
     preparation_notes: Optional[str] = None
