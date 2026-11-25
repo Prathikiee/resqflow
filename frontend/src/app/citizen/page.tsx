@@ -11,7 +11,6 @@ import {
   Building2,
   Car,
   Check,
-  CheckCircle2,
   ChevronDown,
   ChevronUp,
   Clock,
@@ -23,17 +22,16 @@ import {
   MapPin,
   MessageSquare,
   Mic,
-  MicOff,
   Navigation,
-  PhoneCall,
+  Phone,
   Radio,
   RefreshCw,
   Send,
   ShieldAlert,
   ShieldCheck,
-  Volume2,
   X,
 } from "lucide-react";
+import DynamicCitizenTrackingMap from "@/components/CitizenMapWrapper";
 
 interface IncidentRecord {
   id: number;
@@ -62,6 +60,8 @@ interface DispatchRecord {
   destination_hospital_name: string;
   destination_hospital_id: number;
   destination_hospital_address?: string;
+  destination_hospital_latitude?: number;
+  destination_hospital_longitude?: number;
   coordination_status: string;
   ambulance_confirmation_status: string;
   hospital_confirmation_status: string;
@@ -73,11 +73,36 @@ interface DispatchRecord {
   route_distance_meters?: number;
 }
 
-type CitizenView = "MAIN" | "TALK" | "TEXT";
-
 type GpsStatus = "ACQUIRING" | "ACQUIRED" | "DENIED" | "TIMEOUT" | "UNAVAILABLE" | "MANUAL";
 
-type EmergencyType = "MEDICAL" | "ACCIDENT" | "FIRE" | "OTHER";
+type EmergencyCategory = "ROAD_ACCIDENT" | "MEDICAL" | "CARDIAC" | "FIRE" | "INJURY_FALL" | "OTHER";
+
+type VoiceState =
+  | "READY"
+  | "LISTENING"
+  | "TRANSCRIBING"
+  | "TRANSCRIPT_READY"
+  | "PERMISSION_DENIED"
+  | "UNAVAILABLE"
+  | "FAILED";
+
+interface EmergencyCategoryOption {
+  id: EmergencyCategory;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  isCardiac?: boolean;
+  isTrauma?: boolean;
+  code: string;
+}
+
+const EMERGENCY_CATEGORIES: EmergencyCategoryOption[] = [
+  { id: "ROAD_ACCIDENT", label: "Road Accident", icon: Car, isTrauma: true, code: "Road Accident" },
+  { id: "MEDICAL", label: "Medical", icon: Activity, code: "Medical Emergency" },
+  { id: "CARDIAC", label: "Cardiac", icon: HeartPulse, isCardiac: true, code: "Cardiac Emergency" },
+  { id: "FIRE", label: "Fire", icon: Flame, code: "Fire / Rescue" },
+  { id: "INJURY_FALL", label: "Injury / Fall", icon: ShieldAlert, isTrauma: true, code: "Injury / Fall" },
+  { id: "OTHER", label: "Other", icon: HelpCircle, code: "Other Emergency" },
+];
 
 interface Landmark {
   name: string;
@@ -96,20 +121,39 @@ const MANGALURU_LANDMARKS: Landmark[] = [
   { name: "Kadri Park Road", area: "Kadri Hills", lat: 12.8760, lng: 74.8560 },
 ];
 
+const MAX_DESCRIPTION_LENGTH = 500;
+
 export default function CitizenPortalPage() {
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
   const [activeIncident, setActiveIncident] = useState<IncidentRecord | null>(null);
   const [activeDispatch, setActiveDispatch] = useState<DispatchRecord | null>(null);
+  const [isTrackingViewOpen, setIsTrackingViewOpen] = useState(false);
+  const [isCheckingMyEmergency, setIsCheckingMyEmergency] = useState(false);
+  const [hasNoActiveEmergency, setHasNoActiveEmergency] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRefreshingTracking, setIsRefreshingTracking] = useState(false);
 
-  // Workflow navigation
-  const [view, setView] = useState<CitizenView>("MAIN");
+  // Form State
+  const [selectedCategory, setSelectedCategory] = useState<EmergencyCategory>("MEDICAL");
+  const [customOtherType, setCustomOtherType] = useState("");
+  const [incidentDescription, setIncidentDescription] = useState("");
+  const [isDescriptionVisible, setIsDescriptionVisible] = useState(false);
+  const [showAdditionalInfo, setShowAdditionalInfo] = useState(false);
+  const [injuredCount, setInjuredCount] = useState<string>("1");
+  const [specificLandmark, setSpecificLandmark] = useState("");
+  const [flagUnconscious, setFlagUnconscious] = useState(false);
+  const [flagBreathing, setFlagBreathing] = useState(false);
+  const [flagSevereBleeding, setFlagSevereBleeding] = useState(false);
 
-  // Location state
+  // Voice Speech Recognition State
+  const [voiceState, setVoiceState] = useState<VoiceState>("READY");
+  const recognitionRef = useRef<any>(null);
+
+  // Location State
   const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number; accuracy?: number }>({
     lat: 12.8718,
     lng: 74.8458,
@@ -118,40 +162,40 @@ export default function CitizenPortalPage() {
   const [gpsStatus, setGpsStatus] = useState<GpsStatus>("ACQUIRING");
   const [selectedAddress, setSelectedAddress] = useState<string>("Hampankatta, Mangaluru, Karnataka");
   const [hasConfirmedLocation, setHasConfirmedLocation] = useState<boolean>(false);
-
-  // Missing Location Modal state
-  const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
-  const [pendingFlow, setPendingFlow] = useState<"TALK" | "TEXT" | null>(null);
+  const [isManualLocationOpen, setIsManualLocationOpen] = useState(false);
   const [manualInput, setManualInput] = useState("");
 
-  // Cancel Incident Modal state
+  // Cancel Incident Modal State
   const [isCancelModalOpen, setIsCancelModalOpen] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [isCancelling, setIsCancelling] = useState(false);
 
-  // Talk for Help state
-  const [isListening, setIsListening] = useState(false);
-  const [spokenTranscript, setSpokenTranscript] = useState("");
-  const [voiceSupported, setVoiceSupported] = useState(true);
-  const [voiceFeedback, setVoiceFeedback] = useState<string | null>(null);
-  const recognitionRef = useRef<any>(null);
-
-  // Text for Help state
-  const [emergencyType, setEmergencyType] = useState<EmergencyType>("MEDICAL");
-  const [incidentDescription, setIncidentDescription] = useState("");
-  const [injuredCount, setInjuredCount] = useState<string>("1");
-  const [showAdditionalInfo, setShowAdditionalInfo] = useState(false);
-  const [specificLandmark, setSpecificLandmark] = useState("");
-  const [flagUnconscious, setFlagUnconscious] = useState(false);
-  const [flagBreathing, setFlagBreathing] = useState(false);
-  const [flagSevereBleeding, setFlagSevereBleeding] = useState(false);
-  const [flagChestPain, setFlagChestPain] = useState(false);
-
   const isSubmittingRef = useRef(false);
+  const descriptionInputRef = useRef<HTMLTextAreaElement | null>(null);
   const activeIncidentRef = useRef<IncidentRecord | null>(null);
   const activeDispatchRef = useRef<DispatchRecord | null>(null);
-  const [isRefreshingTracking, setIsRefreshingTracking] = useState(false);
   const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  // Helper: Format date into Indian Standard Time (IST)
+  const formatIST = (dateStr?: string) => {
+    if (!dateStr) return "";
+    try {
+      const d = new Date(dateStr);
+      return (
+        new Intl.DateTimeFormat("en-IN", {
+          timeZone: "Asia/Kolkata",
+          day: "numeric",
+          month: "short",
+          year: "numeric",
+          hour: "numeric",
+          minute: "numeric",
+          hour12: true,
+        }).format(d) + " IST"
+      );
+    } catch {
+      return dateStr;
+    }
+  };
 
   useEffect(() => {
     activeIncidentRef.current = activeIncident;
@@ -161,15 +205,8 @@ export default function CitizenPortalPage() {
     activeDispatchRef.current = activeDispatch;
   }, [activeDispatch]);
 
-  // Check whether current location is considered valid and confirmed
-  const isLocationReady = Boolean(
-    (gpsStatus === "ACQUIRED" || gpsStatus === "MANUAL" || hasConfirmedLocation) &&
-      selectedAddress.trim().length > 0 &&
-      gpsCoords.lat !== 0
-  );
-
   // Acquire Geolocation
-  const acquireGps = useCallback((flowToResume?: "TALK" | "TEXT") => {
+  const acquireGps = useCallback(() => {
     if (typeof window === "undefined" || !navigator.geolocation) {
       setGpsStatus("UNAVAILABLE");
       return;
@@ -185,11 +222,6 @@ export default function CitizenPortalPage() {
         setGpsStatus("ACQUIRED");
         setHasConfirmedLocation(true);
         setSelectedAddress(`Live GPS Fix (${lat.toFixed(4)}, ${lng.toFixed(4)}) - Mangaluru`);
-        if (flowToResume) {
-          setIsLocationModalOpen(false);
-          setPendingFlow(null);
-          setView(flowToResume);
-        }
       },
       (err) => {
         if (err.code === 1) {
@@ -205,77 +237,123 @@ export default function CitizenPortalPage() {
   }, []);
 
   // Fetch active incident or verify user session
-  const fetchActiveIncident = useCallback(async (isManualRefresh = false) => {
+  const fetchActiveIncident = useCallback(
+    async (isManualRefresh = false) => {
+      const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+      if (!token) {
+        router.push("/login");
+        return;
+      }
+
+      if (isManualRefresh) setIsRefreshingTracking(true);
+
+      try {
+        const meResp = await fetch(`${backendUrl}/api/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!meResp.ok) throw new Error("Session expired");
+        const meData = await meResp.json();
+        setUser(meData);
+
+        // Authoritative query from backend: active non-terminal incident for current citizen
+        const myActiveResp = await fetch(`${backendUrl}/api/incidents/my-active`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (myActiveResp.ok) {
+          const active = await myActiveResp.json();
+          if (active && active.id) {
+            setActiveIncident(active);
+            setHasNoActiveEmergency(false);
+            localStorage.setItem("lifelink_active_incident_id", String(active.id));
+
+            try {
+              const dispResp = await fetch(`${backendUrl}/api/dispatch?incident_id=${active.id}`, {
+                headers: { Authorization: `Bearer ${token}` },
+              });
+              if (dispResp.ok) {
+                const disps = await dispResp.json();
+                if (disps.length > 0) setActiveDispatch(disps[0]);
+                else setActiveDispatch(null);
+              }
+            } catch {
+              // non-fatal dispatch fetch failure
+            }
+          } else {
+            setActiveIncident(null);
+            setActiveDispatch(null);
+            localStorage.removeItem("lifelink_active_incident_id");
+          }
+        }
+      } catch (err: any) {
+        setErrorMessage(err.message || "Failed to connect to backend");
+      } finally {
+        setIsLoading(false);
+        if (isManualRefresh) setIsRefreshingTracking(false);
+      }
+    },
+    [backendUrl, router]
+  );
+
+  // Dedicated "My Emergency" navigation handler
+  const handleOpenMyEmergency = async () => {
     const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
     if (!token) {
       router.push("/login");
       return;
     }
 
-    if (isManualRefresh) setIsRefreshingTracking(true);
+    setIsCheckingMyEmergency(true);
+    setErrorMessage(null);
 
     try {
-      const meResp = await fetch(`${backendUrl}/api/auth/me`, {
+      const resp = await fetch(`${backendUrl}/api/incidents/my-active`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!meResp.ok) throw new Error("Session expired");
-      const meData = await meResp.json();
-      setUser(meData);
 
-      const savedIncId = localStorage.getItem("lifelink_active_incident_id");
-      let foundActive = false;
-
-      if (savedIncId) {
-        const incResp = await fetch(`${backendUrl}/api/incidents/${savedIncId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (incResp.ok) {
-          const incData = await incResp.json();
-          setActiveIncident(incData);
-          foundActive = true;
-
-          const dispResp = await fetch(`${backendUrl}/api/dispatch?incident_id=${savedIncId}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (dispResp.ok) {
-            const disps = await dispResp.json();
-            if (disps.length > 0) {
-              setActiveDispatch(disps[0]);
-            }
-          }
-        }
+      if (resp.status === 401) {
+        router.push("/login");
+        return;
       }
 
-      // If no active incident found in local storage, query user's personal reported incidents
-      if (!foundActive) {
-        const listResp = await fetch(`${backendUrl}/api/incidents`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (listResp.ok) {
-          const incidents = await listResp.json();
-          const active = incidents.find(
-            (inc: any) => inc.status !== "RESOLVED" && inc.status !== "CANCELLED" && inc.status !== "CLOSED"
-          );
-          if (active) {
-            setActiveIncident(active);
-            localStorage.setItem("lifelink_active_incident_id", String(active.id));
-            const dispResp = await fetch(`${backendUrl}/api/dispatch?incident_id=${active.id}`, {
+      if (resp.ok) {
+        const activeInc = await resp.json();
+        if (activeInc && activeInc.id) {
+          setActiveIncident(activeInc);
+          localStorage.setItem("lifelink_active_incident_id", String(activeInc.id));
+          setHasNoActiveEmergency(false);
+
+          try {
+            const dispResp = await fetch(`${backendUrl}/api/dispatch?incident_id=${activeInc.id}`, {
               headers: { Authorization: `Bearer ${token}` },
             });
             if (dispResp.ok) {
               const disps = await dispResp.json();
               if (disps.length > 0) setActiveDispatch(disps[0]);
+              else setActiveDispatch(null);
             }
+          } catch {
+            // non-fatal
           }
+
+          setIsTrackingViewOpen(true);
+        } else {
+          // No active emergency found in database
+          setActiveIncident(null);
+          setActiveDispatch(null);
+          localStorage.removeItem("lifelink_active_incident_id");
+          setHasNoActiveEmergency(true);
+          setIsTrackingViewOpen(true);
         }
+      } else {
+        throw new Error("Unable to check active emergency status");
       }
     } catch (err: any) {
-      setErrorMessage(err.message || "Failed to connect to backend");
+      setErrorMessage(err.message || "Failed to retrieve your emergency status");
     } finally {
-      setIsLoading(false);
-      if (isManualRefresh) setIsRefreshingTracking(false);
+      setIsCheckingMyEmergency(false);
     }
-  }, [backendUrl, router]);
+  };
 
   useEffect(() => {
     fetchActiveIncident();
@@ -318,7 +396,7 @@ export default function CitizenPortalPage() {
             setActiveIncident((prev: any) => (prev ? { ...prev, status: payload.status } : prev));
           }
 
-          // 2. Dispatch creation & provisional reservation
+          // 2. Dispatch creation & provisional reservations
           if (
             (eventType === "DISPATCH_PROVISIONAL_RESERVATION" ||
               eventType === "DISPATCH_CONFIRMATION_UPDATED" ||
@@ -337,12 +415,17 @@ export default function CitizenPortalPage() {
                   ambulance_vehicle_type: payload.ambulance_vehicle_type || "BLS",
                   ambulance_current_latitude: payload.ambulance_current_latitude,
                   ambulance_current_longitude: payload.ambulance_current_longitude,
-                  destination_hospital_name: payload.destination_hospital_name || payload.hospital_name || "Assigned Emergency Dept",
+                  destination_hospital_name:
+                    payload.destination_hospital_name || payload.hospital_name || "Assigned Emergency Dept",
                   destination_hospital_id: payload.destination_hospital_id,
                   destination_hospital_address: payload.destination_hospital_address,
+                  destination_hospital_latitude: payload.destination_hospital_latitude,
+                  destination_hospital_longitude: payload.destination_hospital_longitude,
                   coordination_status: payload.coordination_status || "PENDING_CONFIRMATIONS",
-                  ambulance_confirmation_status: payload.ambulance_confirmation_status || payload.ambulance_confirmation || "PENDING",
-                  hospital_confirmation_status: payload.hospital_confirmation_status || payload.hospital_confirmation || "PENDING",
+                  ambulance_confirmation_status:
+                    payload.ambulance_confirmation_status || payload.ambulance_confirmation || "PENDING",
+                  hospital_confirmation_status:
+                    payload.hospital_confirmation_status || payload.hospital_confirmation || "PENDING",
                   status: payload.status || "ASSIGNED",
                   attempt_number: payload.attempt_number || 1,
                   estimated_eta_seconds: payload.estimated_eta_seconds,
@@ -353,16 +436,27 @@ export default function CitizenPortalPage() {
                 ...prev,
                 ambulance_call_sign: payload.ambulance_call_sign || prev.ambulance_call_sign,
                 ambulance_vehicle_type: payload.ambulance_vehicle_type || prev.ambulance_vehicle_type,
-                destination_hospital_name: payload.destination_hospital_name || payload.hospital_name || prev.destination_hospital_name,
+                destination_hospital_name:
+                  payload.destination_hospital_name || payload.hospital_name || prev.destination_hospital_name,
                 destination_hospital_address: payload.destination_hospital_address || prev.destination_hospital_address,
+                destination_hospital_latitude: payload.destination_hospital_latitude ?? prev.destination_hospital_latitude,
+                destination_hospital_longitude: payload.destination_hospital_longitude ?? prev.destination_hospital_longitude,
                 coordination_status: payload.coordination_status || prev.coordination_status,
-                ambulance_confirmation_status: payload.ambulance_confirmation_status || payload.ambulance_confirmation || prev.ambulance_confirmation_status,
-                hospital_confirmation_status: payload.hospital_confirmation_status || payload.hospital_confirmation || prev.hospital_confirmation_status,
+                ambulance_confirmation_status:
+                  payload.ambulance_confirmation_status ||
+                  payload.ambulance_confirmation ||
+                  prev.ambulance_confirmation_status,
+                hospital_confirmation_status:
+                  payload.hospital_confirmation_status ||
+                  payload.hospital_confirmation ||
+                  prev.hospital_confirmation_status,
                 status: payload.status || prev.status,
                 estimated_eta_seconds: payload.estimated_eta_seconds ?? prev.estimated_eta_seconds,
                 route_distance_meters: payload.route_distance_meters ?? prev.route_distance_meters,
-                ambulance_current_latitude: payload.ambulance_current_latitude ?? prev.ambulance_current_latitude,
-                ambulance_current_longitude: payload.ambulance_current_longitude ?? prev.ambulance_current_longitude,
+                ambulance_current_latitude:
+                  payload.ambulance_current_latitude ?? prev.ambulance_current_latitude,
+                ambulance_current_longitude:
+                  payload.ambulance_current_longitude ?? prev.ambulance_current_longitude,
               };
             });
           }
@@ -388,11 +482,7 @@ export default function CitizenPortalPage() {
           }
 
           // 4. Hospital arrival confirmed
-          if (
-            eventType === "PATIENT_ARRIVED_HOSPITAL" &&
-            curInc &&
-            payload.incident_id === curInc.id
-          ) {
+          if (eventType === "PATIENT_ARRIVED_HOSPITAL" && curInc && payload.incident_id === curInc.id) {
             setActiveDispatch((prev: any) =>
               prev
                 ? {
@@ -405,7 +495,7 @@ export default function CitizenPortalPage() {
             setActiveIncident((prev: any) => (prev ? { ...prev, status: "AT_HOSPITAL" } : prev));
           }
 
-          // 5. Ambulance status and real-time GPS telemetry
+          // 5. Live GPS telemetry
           if (
             eventType === "AMBULANCE_STATUS_UPDATED" &&
             curDisp &&
@@ -422,15 +512,13 @@ export default function CitizenPortalPage() {
             );
           }
 
-          // 6. Terminal incident statuses
+          // 6. Terminal statuses
           if (eventType === "INCIDENT_RESOLVED" && curInc && payload.incident_id === curInc.id) {
             setActiveIncident((prev: any) => (prev ? { ...prev, status: "RESOLVED" } : prev));
           }
-
           if (eventType === "INCIDENT_CANCELLED" && curInc && payload.incident_id === curInc.id) {
             setActiveIncident((prev: any) => (prev ? { ...prev, status: "CANCELLED" } : prev));
           }
-
           if (eventType === "INCIDENT_CLOSED" && curInc && payload.incident_id === curInc.id) {
             setActiveIncident((prev: any) => (prev ? { ...prev, status: "CLOSED" } : prev));
           }
@@ -448,22 +536,21 @@ export default function CitizenPortalPage() {
     };
   }, [backendUrl]);
 
-  // Speech Recognition Setup
+  // Voice Recording Implementation
   const stopListening = useCallback(() => {
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
       } catch (_) {}
     }
-    setIsListening(false);
   }, []);
 
   const startListening = useCallback(() => {
     if (typeof window === "undefined") return;
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      setVoiceSupported(false);
-      setVoiceFeedback("Voice recognition is not supported in this browser. Please type details below.");
+      setVoiceState("UNAVAILABLE");
+      setIsDescriptionVisible(true);
       return;
     }
 
@@ -479,11 +566,13 @@ export default function CitizenPortalPage() {
       recognition.lang = "en-IN";
 
       recognition.onstart = () => {
-        setIsListening(true);
-        setVoiceFeedback("Listening... Speak clearly about your emergency.");
+        setVoiceState("LISTENING");
+        setIsDescriptionVisible(true);
       };
 
       recognition.onresult = (event: any) => {
+        setVoiceState("TRANSCRIBING");
+        setIsDescriptionVisible(true);
         let interim = "";
         let final = "";
         for (let i = event.resultIndex; i < event.results.length; ++i) {
@@ -493,171 +582,129 @@ export default function CitizenPortalPage() {
             interim += event.results[i][0].transcript;
           }
         }
-        const combined = final || interim;
-        if (combined) {
-          setSpokenTranscript((prev) => {
+        const text = (final || interim).trim();
+        if (text) {
+          setIncidentDescription((prev) => {
             const trimmedPrev = prev.trim();
             if (trimmedPrev && final) {
-              return `${trimmedPrev} ${final.trim()}`;
+              const combined = `${trimmedPrev} ${final.trim()}`;
+              return combined.slice(0, MAX_DESCRIPTION_LENGTH);
             }
-            return combined;
+            return (final || interim).slice(0, MAX_DESCRIPTION_LENGTH);
           });
-          setVoiceFeedback(`Captured: "${combined.trim()}"`);
         }
       };
 
       recognition.onerror = (e: any) => {
-        if (e.error !== "no-speech") {
-          setVoiceFeedback("Voice recognition stopped. You can tap to record again or edit text below.");
+        if (e.error === "not-allowed" || e.error === "permission-denied") {
+          setVoiceState("PERMISSION_DENIED");
+          setIsDescriptionVisible(true);
+        } else if (e.error !== "no-speech") {
+          setVoiceState("FAILED");
+          setIsDescriptionVisible(true);
+        } else {
+          setVoiceState("READY");
         }
-        setIsListening(false);
       };
 
       recognition.onend = () => {
-        setIsListening(false);
+        setVoiceState((prev) => (prev === "LISTENING" || prev === "TRANSCRIBING" ? "TRANSCRIPT_READY" : prev));
       };
 
       recognition.start();
     } catch (_) {
-      setIsListening(false);
+      setVoiceState("FAILED");
+      setIsDescriptionVisible(true);
     }
   }, []);
 
-  const toggleVoiceRecording = () => {
-    if (isListening) {
+  // Primary Call 112 click handler: activates simulated voice input
+  const handleSimulatedCall112 = () => {
+    setIsDescriptionVisible(true);
+    if (voiceState === "LISTENING") {
       stopListening();
+      setVoiceState("TRANSCRIPT_READY");
     } else {
       startListening();
     }
   };
 
-  // Symptom keyword extraction from transcript
-  const detectedSymptomTags = React.useMemo(() => {
-    const text = spokenTranscript.toLowerCase();
-    const tags: { id: string; label: string; icon: any }[] = [];
-    if (/chest pain|heart|cardiac|angina|attack/.test(text)) {
-      tags.push({ id: "cardiac", label: "Cardiac Distress", icon: Activity });
-    }
-    if (/breath|breathing|shortness|asthma|chok|gasp/.test(text)) {
-      tags.push({ id: "breathing", label: "Breathing Difficulty", icon: Activity });
-    }
-    if (/accident|crash|fall|injury|hit|fracture/.test(text)) {
-      tags.push({ id: "trauma", label: "Trauma / Accident", icon: Car });
-    }
-    if (/bleed|blood|hemorrhage/.test(text)) {
-      tags.push({ id: "bleeding", label: "Severe Bleeding", icon: AlertCircle });
-    }
-    if (/stroke|facial|weakness|slurred|paralysis/.test(text)) {
-      tags.push({ id: "stroke", label: "Suspected Stroke", icon: AlertCircle });
-    }
-    if (/fire|burn|smoke|flame|explosion/.test(text)) {
-      tags.push({ id: "fire", label: "Fire / Burns", icon: Flame });
-    }
-    return tags;
-  }, [spokenTranscript]);
-
-  // Initiate either Talk or Text workflow
-  const handleSelectWorkflow = (targetFlow: "TALK" | "TEXT") => {
-    if (!isLocationReady) {
-      setPendingFlow(targetFlow);
-      setManualInput(selectedAddress || "");
-      setIsLocationModalOpen(true);
-      return;
-    }
-    setView(targetFlow);
-    if (targetFlow === "TALK") {
-      setTimeout(() => startListening(), 400);
-    }
+  // Secondary Text SOS click handler: reveals and focuses description textarea
+  const handleTextSosClick = () => {
+    setIsDescriptionVisible(true);
+    setTimeout(() => {
+      descriptionInputRef.current?.focus();
+      descriptionInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 50);
   };
 
-  // Confirm manual location from modal
+  // Manual Landmark Selection
+  const handleSelectLandmark = (landmark: Landmark) => {
+    setGpsCoords({ lat: landmark.lat, lng: landmark.lng, accuracy: 25 });
+    const fullAddr = `${landmark.name}, ${landmark.area}, Mangaluru`;
+    setSelectedAddress(fullAddr);
+    setManualInput(fullAddr);
+    setGpsStatus("MANUAL");
+    setHasConfirmedLocation(true);
+    setIsManualLocationOpen(false);
+  };
+
   const handleConfirmManualLocation = () => {
     const trimmed = manualInput.trim();
     if (!trimmed) return;
-
     setSelectedAddress(trimmed);
     setGpsStatus("MANUAL");
     setHasConfirmedLocation(true);
-    setIsLocationModalOpen(false);
-
-    if (pendingFlow) {
-      const flow = pendingFlow;
-      setPendingFlow(null);
-      setView(flow);
-      if (flow === "TALK") {
-        setTimeout(() => startListening(), 400);
-      }
-    }
+    setIsManualLocationOpen(false);
   };
 
-  // Quick select landmark
-  const handleSelectLandmark = (landmark: Landmark) => {
-    setGpsCoords({ lat: landmark.lat, lng: landmark.lng, accuracy: 20 });
-    setSelectedAddress(`${landmark.name}, ${landmark.area}, Mangaluru`);
-    setManualInput(`${landmark.name}, ${landmark.area}, Mangaluru`);
-    setGpsStatus("MANUAL");
-    setHasConfirmedLocation(true);
-  };
+  // Validation Logic
+  const isDescriptionValid = incidentDescription.trim().length >= 3;
+  const isCategoryValid = Boolean(selectedCategory);
+  const isOtherValid = selectedCategory !== "OTHER" || customOtherType.trim().length >= 2;
+  const isLocationValid =
+    Boolean(selectedAddress.trim()) &&
+    ((gpsStatus === "ACQUIRED" && gpsCoords.lat !== 0 && gpsCoords.lng !== 0) ||
+      manualInput.trim().length >= 3 ||
+      selectedAddress.trim().length >= 3);
+
+  const isFormValid = isDescriptionValid && isCategoryValid && isOtherValid && isLocationValid;
 
   // Submit Emergency Request
-  const handleSubmitEmergency = async (sourceFlow: "TALK" | "TEXT") => {
-    if (isSubmittingRef.current || isSubmitting) return;
+  const handleSubmitEmergency = async () => {
+    if (isSubmittingRef.current || isSubmitting || !isFormValid) return;
     isSubmittingRef.current = true;
     setIsSubmitting(true);
     setErrorMessage(null);
 
-    const token = localStorage.getItem("lifelink_token");
+    const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+    const activeCat = EMERGENCY_CATEGORIES.find((c) => c.id === selectedCategory) || EMERGENCY_CATEGORIES[1];
 
-    let complaintText = "";
-    let isCardiac = false;
-    let isBreathingDifficult = false;
-    let isTrauma = false;
-    let isStroke = false;
-    let isBleeding = false;
-
-    if (sourceFlow === "TALK") {
-      complaintText = spokenTranscript.trim() || "Immediate emergency assistance requested via voice SOS.";
-      const lower = complaintText.toLowerCase();
-      isCardiac = /chest pain|heart|cardiac|angina/.test(lower);
-      isBreathingDifficult = /breath|breathing|asthma|chok|gasp/.test(lower);
-      isTrauma = /accident|crash|fall|injury|fracture/.test(lower);
-      isStroke = /stroke|facial|weakness|slurred|paralysis/.test(lower);
-      isBleeding = /bleed|blood/.test(lower);
-    } else {
-      const typeLabel =
-        emergencyType === "MEDICAL"
-          ? "Medical Emergency"
-          : emergencyType === "ACCIDENT"
-          ? "Road Accident"
-          : emergencyType === "FIRE"
-          ? "Fire / Rescue"
-          : "Urgent Emergency";
-
-      const details = incidentDescription.trim() || "Immediate responders required.";
-      const injuredStr = injuredCount !== "Unknown" ? `Injured: ${injuredCount}` : "Injured count unknown";
-      const landmarkStr = specificLandmark.trim() ? `Near: ${specificLandmark.trim()}` : "";
-
-      complaintText = [typeLabel, details, injuredStr, landmarkStr].filter(Boolean).join(" - ");
-
-      isCardiac = flagChestPain || emergencyType === "MEDICAL";
-      isBreathingDifficult = flagBreathing;
-      isTrauma = flagSevereBleeding || emergencyType === "ACCIDENT";
-      isStroke = false;
-      isBleeding = flagSevereBleeding;
+    let categoryPrefix = activeCat.code;
+    if (selectedCategory === "OTHER" && customOtherType.trim()) {
+      categoryPrefix = `Other (${customOtherType.trim()})`;
     }
+
+    const descriptionText = incidentDescription.trim();
+    const landmarkStr = specificLandmark.trim() ? `Near: ${specificLandmark.trim()}` : "";
+    const injuredStr = injuredCount !== "Unknown" ? `Injured: ${injuredCount}` : "";
+
+    const combinedComplaint = [categoryPrefix, descriptionText, injuredStr, landmarkStr]
+      .filter(Boolean)
+      .join(" - ");
 
     const payload = {
       caller_name: user?.full_name || "Citizen Reporter",
       caller_phone: user?.phone_number || "+91 98450 11200",
-      location_address: selectedAddress || "Mangaluru, Karnataka",
+      location_address: selectedAddress.trim() || manualInput.trim() || "Mangaluru, Karnataka",
       latitude: gpsCoords.lat,
       longitude: gpsCoords.lng,
-      chief_complaint: complaintText,
-      chest_pain: isCardiac,
-      breathing_status: isBreathingDifficult ? "Difficult" : "Normal",
-      severe_trauma: isTrauma,
-      suspected_stroke: isStroke,
-      severe_bleeding: isBleeding,
+      chief_complaint: combinedComplaint,
+      chest_pain: activeCat.isCardiac || false,
+      breathing_status: flagBreathing ? "Difficult" : "Normal",
+      severe_trauma: activeCat.isTrauma || flagSevereBleeding || false,
+      suspected_stroke: false,
+      severe_bleeding: flagSevereBleeding,
     };
 
     try {
@@ -671,14 +718,15 @@ export default function CitizenPortalPage() {
       });
 
       if (!resp.ok) {
-        const err = await resp.json();
+        const err = await resp.json().catch(() => ({}));
         throw new Error(err.detail || "Emergency request transmission failed.");
       }
 
       const createdInc: IncidentRecord = await resp.json();
       setActiveIncident(createdInc);
+      setHasNoActiveEmergency(false);
       localStorage.setItem("lifelink_active_incident_id", String(createdInc.id));
-      setView("MAIN");
+      setIsTrackingViewOpen(true);
 
       setTimeout(async () => {
         try {
@@ -692,7 +740,7 @@ export default function CitizenPortalPage() {
         } catch (_) {}
       }, 1000);
     } catch (err: any) {
-      setErrorMessage(err.message || "Failed to broadcast emergency SOS.");
+      setErrorMessage(err.message || "Failed to broadcast emergency SOS. Please retry.");
     } finally {
       setIsSubmitting(false);
       isSubmittingRef.current = false;
@@ -734,10 +782,13 @@ export default function CitizenPortalPage() {
     localStorage.removeItem("lifelink_active_incident_id");
     setActiveIncident(null);
     setActiveDispatch(null);
-    setSpokenTranscript("");
+    setHasNoActiveEmergency(false);
     setIncidentDescription("");
+    setCustomOtherType("");
+    setSelectedCategory("MEDICAL");
+    setIsDescriptionVisible(false);
     setErrorMessage(null);
-    setView("MAIN");
+    setIsTrackingViewOpen(false);
     acquireGps();
   };
 
@@ -751,27 +802,14 @@ export default function CitizenPortalPage() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-white flex items-center justify-center p-4">
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 font-sans">
         <div className="flex flex-col items-center gap-3">
           <RefreshCw className="w-8 h-8 animate-spin text-red-600" />
-          <span className="text-xs font-bold text-slate-700">Connecting to LIFELINK Emergency Corridor...</span>
+          <span className="text-xs font-bold text-slate-700">Connecting to ResQFlow Network...</span>
         </div>
       </div>
     );
   }
-
-  // Emergency Category Detector
-  const getEmergencyCategory = (complaint?: string, triageLevel?: string) => {
-    const text = (complaint || "").toLowerCase();
-    if (/cardiac|chest pain|heart|angina/.test(text)) return "Cardiac Emergency";
-    if (/accident|crash|collision|trauma|fall|fracture/.test(text)) return "Road Trauma / Accident";
-    if (/breath|respiratory|asthma|chok/.test(text)) return "Respiratory Distress";
-    if (/fire|burn|flame|smoke/.test(text)) return "Fire & Rescue";
-    if (/bleed|hemorrhage/.test(text)) return "Severe Hemorrhage";
-    if (/stroke|paralysis/.test(text)) return "Neurological / Stroke";
-    if (triageLevel) return `Triage ${triageLevel} Priority`;
-    return "Medical Emergency";
-  };
 
   // Calculate timeline stage (1 to 5)
   const getTimelineStage = () => {
@@ -800,103 +838,94 @@ export default function CitizenPortalPage() {
     return 2;
   };
 
-  // Contextual stage description for citizen
-  const getStageDescription = () => {
-    const stage = getTimelineStage();
-    if (activeIncident?.status === "CANCELLED") {
-      return "This emergency incident was cancelled. Dispatched ambulance and hospital bed reservations have been returned to active service.";
-    }
-    if (
-      activeIncident?.status === "RESOLVED" ||
-      activeIncident?.status === "CLOSED" ||
-      activeDispatch?.status === "COMPLETED"
-    ) {
-      return "Emergency mission complete. Patient has been safely transferred to emergency department clinical care.";
-    }
-    switch (stage) {
-      case 1:
-        return "Your emergency SOS has been received and verified by the regional dispatch system. Clinical triage completed.";
-      case 2:
-        return activeDispatch?.ambulance_call_sign
-          ? `Unit ${activeDispatch.ambulance_call_sign} provisionally allocated. Awaiting crew response and hospital ER bed reservation.`
-          : "Regional emergency control is allocating the nearest available paramedic unit and receiving emergency department.";
-      case 3:
-        return activeDispatch?.ambulance_call_sign
-          ? `Ambulance ${activeDispatch.ambulance_call_sign} has confirmed dispatch and is en route to your location. Keep phone line open.`
-          : "Emergency crew has accepted the mission and is actively en route.";
-      case 4:
-        return activeDispatch?.status === "EN_ROUTE_HOSPITAL" || activeIncident?.status === "TRANSPORTING"
-          ? "Paramedics have stabilized the patient on scene and are actively transporting to the receiving trauma department."
-          : "Paramedic crew has arrived on scene and is evaluating and stabilizing the patient.";
-      case 5:
-        return "Ambulance has arrived at the emergency department. Clinical handover to hospital trauma bay is in progress.";
-      default:
-        return "Emergency services are actively responding to your emergency.";
-    }
-  };
-
   const currentStage = getTimelineStage();
 
-  // Location display helper
-  const getLocationStatusText = () => {
-    if (gpsStatus === "ACQUIRING") return "Detecting location...";
-    if (gpsStatus === "ACQUIRED") return "Location detected (GPS)";
-    if (gpsStatus === "MANUAL" || hasConfirmedLocation) return "Location set";
-    if (gpsStatus === "DENIED") return "Location denied - tap to set";
-    if (gpsStatus === "TIMEOUT") return "Location timed out - tap to set";
-    return "Location unavailable - tap to set";
+  // Location display badge helper
+  const getLocationBadge = () => {
+    if (gpsStatus === "ACQUIRING") {
+      return {
+        text: "Detecting location...",
+        color: "text-blue-700 bg-blue-50 border-blue-200",
+        icon: <Crosshair className="w-3.5 h-3.5 animate-spin text-blue-600 shrink-0" />,
+      };
+    }
+    if (gpsStatus === "ACQUIRED" || gpsStatus === "MANUAL" || hasConfirmedLocation) {
+      return {
+        text: "Location detected",
+        color: "text-emerald-700 bg-emerald-50 border-emerald-200",
+        icon: <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />,
+      };
+    }
+    if (gpsStatus === "DENIED") {
+      return {
+        text: "Permission denied",
+        color: "text-amber-800 bg-amber-50 border-amber-200",
+        icon: <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />,
+      };
+    }
+    return {
+      text: "Location unavailable",
+      color: "text-amber-800 bg-amber-50 border-amber-200",
+      icon: <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />,
+    };
   };
 
+  const locationBadge = getLocationBadge();
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans antialiased">
-      {/* Top Header */}
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-900 flex flex-col font-sans antialiased selection:bg-red-100 selection:text-red-900">
+      {/* Header */}
       <header className="border-b border-slate-200 bg-white sticky top-0 z-30 px-4 py-3 sm:px-6 shadow-2xs">
-        <div className="max-w-4xl mx-auto flex items-center justify-between">
+        <div className="max-w-2xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-red-600 flex items-center justify-center text-white shadow-xs">
+            <div className="w-9 h-9 rounded-xl bg-red-600 flex items-center justify-center text-white shadow-xs">
               <Radio className="w-5 h-5 animate-pulse" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-extrabold text-base tracking-tight text-slate-900">LIFELINK</span>
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200 uppercase tracking-wider">
-                  Citizen Portal
+                <span className="font-extrabold text-base tracking-tight text-slate-900">ResQFlow</span>
+                <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200 uppercase tracking-wider">
+                  Citizen
                 </span>
               </div>
-              <p className="text-[11px] text-slate-500 font-medium">Mangaluru Emergency Coordination</p>
+              <p className="text-xs text-slate-600 font-medium">Emergency Response Platform</p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
-            {/* Location Pill */}
+            {/* "My Emergency" Entry Point */}
             <button
               type="button"
-              onClick={() => {
-                setManualInput(selectedAddress);
-                setIsLocationModalOpen(true);
-              }}
-              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition max-w-[220px] truncate bg-white hover:bg-slate-50 border-slate-200 text-slate-700"
-              title="Click to view or edit emergency location"
+              onClick={handleOpenMyEmergency}
+              disabled={isCheckingMyEmergency}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs sm:text-sm font-bold transition shadow-2xs cursor-pointer active:scale-95 ${
+                activeIncident && !isTrackingViewOpen
+                  ? "bg-red-50 border-red-300 text-red-800 hover:bg-red-100 ring-2 ring-red-200"
+                  : "bg-white border-slate-200 text-slate-800 hover:bg-slate-50"
+              }`}
+              title="Access your emergency tracking"
             >
-              <MapPin className="w-3.5 h-3.5 text-red-600 shrink-0" />
-              <span className="truncate">{getLocationStatusText()}</span>
+              {isCheckingMyEmergency ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-red-600" />
+              ) : (
+                <Radio className={`w-3.5 h-3.5 ${activeIncident ? "text-red-600 animate-pulse" : "text-slate-500"}`} />
+              )}
+              <span>My Emergency</span>
+              {activeIncident && (
+                <span className="w-2 h-2 rounded-full bg-red-600 animate-ping" />
+              )}
             </button>
 
-            {/* Direct Call 112 Action */}
-            <a
-              href="tel:112"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 text-xs font-bold transition"
-              title="Direct call to India ERSS 112"
-            >
-              <PhoneCall className="w-3.5 h-3.5" />
-              <span>Call 112</span>
-            </a>
-
-            {/* Sign Out */}
+            {user?.full_name && (
+              <span className="hidden sm:inline-block text-xs font-bold text-slate-700 mr-1">
+                {user.full_name}
+              </span>
+            )}
             <button
               onClick={handleLogout}
-              className="p-2 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-900 hover:bg-slate-50 transition"
+              className="p-2 rounded-xl border border-slate-200 text-slate-600 hover:text-slate-900 hover:bg-slate-50 transition cursor-pointer"
               title="Sign Out"
+              aria-label="Sign Out"
             >
               <LogOut className="w-4 h-4" />
             </button>
@@ -904,848 +933,773 @@ export default function CitizenPortalPage() {
         </div>
       </header>
 
-      {/* Main Container */}
-      <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 flex flex-col justify-center">
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-2xl w-full mx-auto p-4 sm:p-6 flex flex-col justify-center">
         {errorMessage && (
-          <div className="mb-6 p-4 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs flex items-center justify-between">
+          <div className="mb-6 p-4 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs sm:text-sm flex items-center justify-between shadow-2xs animate-in fade-in">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
-              <span>{errorMessage}</span>
+              <span className="font-medium">{errorMessage}</span>
             </div>
-            <button onClick={() => setErrorMessage(null)} className="text-red-700 font-bold ml-2">
+            <button
+              onClick={() => setErrorMessage(null)}
+              className="text-red-700 hover:text-red-900 font-bold ml-2 p-1 cursor-pointer"
+              aria-label="Dismiss error"
+            >
               <X className="w-4 h-4" />
             </button>
           </div>
         )}
 
         {/* ============================================================== */}
-        {/* VIEW: ACTIVE INCIDENT TRACKING (Replaces intake when active)   */}
+        {/* POST-SUBMISSION / ACTIVE INCIDENT TRACKING VIEW               */}
         {/* ============================================================== */}
-        {activeIncident ? (
-          <div className="space-y-6 py-2">
-            {/* Status Banner */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 text-center space-y-3 shadow-xs">
-              <div className="flex flex-wrap items-center justify-center gap-2">
-                {/* WebSocket Pulse Badge */}
-                <span
-                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold tracking-wide border ${
-                    wsConnected
-                      ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-                      : "bg-amber-50 border-amber-200 text-amber-700"
-                  }`}
-                >
-                  <Radio className={`w-3.5 h-3.5 ${wsConnected ? "animate-pulse text-emerald-600" : "text-amber-600"}`} />
-                  <span>{wsConnected ? "Live Tracking Active" : "Corridor Syncing..."}</span>
-                </span>
-
-                {/* Emergency Category Badge */}
-                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-50 border border-red-200 text-red-700 text-xs font-bold tracking-wide">
-                  <Activity className="w-3.5 h-3.5 text-red-600" />
-                  <span>{getEmergencyCategory(activeIncident.chief_complaint, activeIncident.triage_level)}</span>
-                </span>
-
-                {/* Triage Priority Badge */}
-                {activeIncident.triage_level && (
-                  <span
-                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold tracking-wide border ${
-                      activeIncident.triage_color === "RED"
-                        ? "bg-red-50 border-red-300 text-red-800"
-                        : activeIncident.triage_color === "YELLOW"
-                        ? "bg-amber-50 border-amber-300 text-amber-800"
-                        : "bg-emerald-50 border-emerald-300 text-emerald-800"
-                    }`}
-                  >
-                    <span className="w-2 h-2 rounded-full bg-current" />
-                    <span>Priority: {activeIncident.triage_level}</span>
-                  </span>
-                )}
+        {isTrackingViewOpen ? (
+          hasNoActiveEmergency || !activeIncident ? (
+            /* Clean Reassuring Empty State */
+            <div className="bg-white border border-slate-200 rounded-2xl p-8 sm:p-10 text-center space-y-6 shadow-xs max-w-lg mx-auto my-6 animate-in fade-in">
+              <div className="w-16 h-16 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-600 flex items-center justify-center mx-auto shadow-2xs">
+                <ShieldCheck className="w-8 h-8" />
               </div>
 
-              <div>
-                <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
-                  Emergency Incident #{activeIncident.id}
-                </h1>
-                <div className="mt-1 flex items-center justify-center gap-2">
-                  <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Status:</span>
+              <div className="space-y-2">
+                <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+                  No Active Emergency
+                </h2>
+                <p className="text-sm sm:text-base text-slate-700 font-medium leading-relaxed max-w-md mx-auto">
+                  You don't have an active emergency request right now.
+                </p>
+                <p className="text-xs sm:text-sm text-slate-600 max-w-sm mx-auto">
+                  All previous emergency requests have been safely completed or cancelled. If you or someone nearby needs emergency assistance, you can report a new emergency at any time.
+                </p>
+              </div>
+
+              <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsTrackingViewOpen(false);
+                    setHasNoActiveEmergency(false);
+                  }}
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm shadow-sm transition active:scale-95 cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>Back to Emergency Home</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleResetForNewSos();
+                    setIsTrackingViewOpen(false);
+                    setHasNoActiveEmergency(false);
+                  }}
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 font-bold text-sm transition cursor-pointer"
+                >
+                  Report New Emergency
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-6 py-2">
+              {/* Top Navigation Bar for Tracking View */}
+              <div className="flex items-center justify-between pb-1">
+                <button
+                  type="button"
+                  onClick={() => setIsTrackingViewOpen(false)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs sm:text-sm font-bold text-slate-800 transition shadow-2xs cursor-pointer active:scale-95"
+                >
+                  <ArrowLeft className="w-4 h-4 text-slate-600" />
+                  <span>Back to Emergency Home</span>
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-xs sm:text-sm font-extrabold text-slate-800">
+                    My Emergency
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => fetchActiveIncident(true)}
+                    disabled={isRefreshingTracking}
+                    className="p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 transition cursor-pointer"
+                    title="Refresh tracking status"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingTracking ? "animate-spin text-blue-600" : ""}`} />
+                  </button>
+                </div>
+              </div>
+
+              {/* 1. Reassuring Request Confirmation & Status Card */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-6 text-center space-y-4 shadow-xs">
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold tracking-wide border bg-emerald-50 border-emerald-200 text-emerald-800">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span>Live Tracking Active</span>
+                  </span>
+
                   <span
-                    className={`text-xs font-extrabold px-2.5 py-0.5 rounded-md ${
+                    className={`text-xs sm:text-sm font-extrabold px-3 py-1 rounded-full border ${
                       activeIncident.status === "CANCELLED"
-                        ? "bg-slate-100 text-slate-600"
+                        ? "bg-slate-100 border-slate-200 text-slate-800"
                         : activeIncident.status === "RESOLVED" || activeIncident.status === "CLOSED"
-                        ? "bg-emerald-100 text-emerald-800"
-                        : activeDispatch?.status === "AT_HOSPITAL" || activeIncident.status === "AT_HOSPITAL"
-                        ? "bg-purple-100 text-purple-800"
+                        ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                        : activeDispatch?.status === "AT_HOSPITAL"
+                        ? "bg-purple-50 border-purple-200 text-purple-800"
                         : activeDispatch?.status === "ON_SCENE"
-                        ? "bg-blue-100 text-blue-800"
-                        : "bg-red-100 text-red-800"
+                        ? "bg-blue-50 border-blue-200 text-blue-800"
+                        : activeDispatch?.status === "EN_ROUTE_INCIDENT"
+                        ? "bg-blue-50 border-blue-200 text-blue-800"
+                        : activeDispatch?.status === "ASSIGNED"
+                        ? "bg-blue-50 border-blue-200 text-blue-800"
+                        : "bg-red-50 border-red-200 text-red-800"
                     }`}
                   >
                     {activeIncident.status === "CANCELLED"
-                      ? "CANCELLED"
+                      ? "Cancelled"
                       : activeIncident.status === "RESOLVED" || activeIncident.status === "CLOSED"
-                      ? "CASE RESOLVED"
-                      : activeDispatch?.status
-                      ? activeDispatch.status.replace(/_/g, " ")
-                      : activeIncident.status}
+                      ? "Care Completed"
+                      : activeDispatch?.status === "AT_HOSPITAL"
+                      ? "At Hospital"
+                      : activeDispatch?.status === "ON_SCENE"
+                      ? "Responders On Scene"
+                      : activeDispatch?.status === "EN_ROUTE_INCIDENT"
+                      ? "Ambulance En Route"
+                      : activeDispatch?.status === "ASSIGNED"
+                      ? "Ambulance Assigned"
+                      : "Dispatching Ambulance"}
                   </span>
                 </div>
-              </div>
 
-              <div className="pt-1 space-y-1">
-                <p className="text-xs sm:text-sm text-slate-700 max-w-lg mx-auto flex items-center justify-center gap-1.5">
-                  <MapPin className="w-4 h-4 text-red-600 shrink-0" />
-                  <span>
-                    <strong className="text-slate-900 font-semibold">Location:</strong> {activeIncident.location_address}
-                  </span>
-                </p>
-                <p className="text-xs text-slate-500 max-w-lg mx-auto">
-                  <strong className="text-slate-700 font-medium">Complaint:</strong> {activeIncident.chief_complaint}
-                </p>
-              </div>
-            </div>
-
-            {/* 5-STAGE PROGRESS TIMELINE */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-900 uppercase tracking-wider block">
-                  Emergency Response Timeline
-                </span>
-                <span className="text-[11px] font-semibold text-slate-400">
-                  Step {currentStage} of 5
-                </span>
-              </div>
-
-              <div className="relative flex items-center justify-between pt-2">
-                {/* Horizontal Track Line */}
-                <div className="absolute left-6 right-6 top-6 h-1 bg-slate-100 z-0" />
-                <div
-                  className="absolute left-6 top-6 h-1 bg-emerald-500 z-0 transition-all duration-500"
-                  style={{ width: `${((currentStage - 1) / 4) * 85}%` }}
-                />
-
-                {[
-                  { num: 1, label: "SOS Received" },
-                  { num: 2, label: "Unit Allocated" },
-                  { num: 3, label: "En Route" },
-                  { num: 4, label: "On Scene / Care" },
-                  { num: 5, label: "Hospital ER" },
-                ].map((step) => {
-                  const isDone = currentStage >= step.num;
-                  const isCurrent = currentStage === step.num;
-                  return (
-                    <div key={step.num} className="relative z-10 flex flex-col items-center">
-                      <div
-                        className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs transition-all ${
-                          isDone
-                            ? "bg-emerald-600 text-white shadow-xs"
-                            : isCurrent
-                            ? "bg-blue-600 text-white ring-4 ring-blue-100"
-                            : "bg-white border-2 border-slate-200 text-slate-400"
-                        }`}
-                      >
-                        {isDone ? <Check className="w-4 h-4 stroke-[3]" /> : step.num}
-                      </div>
-                      <span
-                        className={`text-[11px] font-semibold mt-2 text-center max-w-[80px] sm:max-w-none ${
-                          isCurrent ? "text-blue-700 font-bold" : isDone ? "text-slate-800" : "text-slate-400"
-                        }`}
-                      >
-                        {step.label}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Real-Time Stage Explainer Card */}
-              <div className="mt-4 p-3.5 rounded-xl bg-blue-50/60 border border-blue-100 flex items-start gap-3 text-xs text-blue-900 leading-relaxed">
-                <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
                 <div>
-                  <span className="font-bold text-blue-950 block mb-0.5">Response Status</span>
-                  <span>{getStageDescription()}</span>
+                  <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                    {activeIncident.status === "CANCELLED"
+                      ? "Emergency Request Cancelled"
+                      : activeIncident.status === "RESOLVED" || activeIncident.status === "CLOSED"
+                      ? "Emergency Care Completed"
+                      : activeDispatch?.status === "ON_SCENE"
+                      ? "Help Has Arrived On Scene"
+                      : activeDispatch?.status === "EN_ROUTE_INCIDENT"
+                      ? "Help Is On The Way"
+                      : activeDispatch?.status === "ASSIGNED"
+                      ? "Ambulance Dispatched"
+                      : "Emergency Assistance"}
+                  </h1>
+                  <p className="text-sm sm:text-base text-slate-700 mt-1 max-w-md mx-auto font-medium">
+                    {activeIncident.status === "CANCELLED"
+                      ? "This emergency request was cancelled. Emergency resources have been returned to service."
+                      : activeIncident.status === "RESOLVED" || activeIncident.status === "CLOSED"
+                      ? "Patient safely transferred to emergency department care."
+                      : activeDispatch?.status === "ON_SCENE"
+                      ? "Paramedics are with the patient providing emergency medical care."
+                      : activeDispatch?.status === "EN_ROUTE_INCIDENT"
+                      ? `Ambulance ${activeDispatch.ambulance_call_sign || ""} is traveling directly to your location.`
+                      : activeDispatch?.status === "ASSIGNED"
+                      ? `Ambulance ${activeDispatch.ambulance_call_sign || ""} assigned. Crew preparing to respond.`
+                      : "Your emergency request is registered and responders are mobilized."}
+                  </p>
+                </div>
+
+                <div className="pt-3 border-t border-slate-100 text-left space-y-2 text-sm">
+                  <div className="flex items-start gap-2 text-slate-800">
+                    <MapPin className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                    <span className="font-bold text-slate-900">{activeIncident.location_address}</span>
+                  </div>
+                  <div className="flex items-start gap-2 text-slate-700 pl-6">
+                    <span>
+                      <strong>Emergency:</strong> {activeIncident.chief_complaint}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 text-slate-700 pl-6 text-xs sm:text-sm">
+                    <Clock className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <span>
+                      <strong>Requested Time:</strong> {formatIST(activeIncident.created_at)}
+                    </span>
+                  </div>
+                  <div className="text-xs font-semibold text-slate-600 pl-6">
+                    Reference: #{activeIncident.id}
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* DISPATCH ASSIGNMENT CARDS */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Ambulance Assignment */}
-              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3 flex flex-col justify-between">
-                <div className="space-y-3">
+              {/* 2. Interactive Live Map */}
+              <div className="space-y-1.5">
+                <span className="text-xs sm:text-sm font-bold text-slate-900 uppercase tracking-wider block">
+                  Emergency Location & Route Map
+                </span>
+                <DynamicCitizenTrackingMap
+                  incidentLat={activeIncident.latitude}
+                  incidentLng={activeIncident.longitude}
+                  incidentAddress={activeIncident.location_address}
+                  ambulanceLat={activeDispatch?.ambulance_current_latitude}
+                  ambulanceLng={activeDispatch?.ambulance_current_longitude}
+                  ambulanceCallSign={activeDispatch?.ambulance_call_sign}
+                  ambulanceType={activeDispatch?.ambulance_vehicle_type}
+                  hospitalLat={activeDispatch?.destination_hospital_latitude}
+                  hospitalLng={activeDispatch?.destination_hospital_longitude}
+                  hospitalName={activeDispatch?.destination_hospital_name}
+                />
+              </div>
+
+              {/* 3. Resource Allocation Cards (Ambulance & Hospital) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Assigned Ambulance */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 rounded-xl bg-blue-50 border border-blue-200 flex items-center justify-center text-blue-600 shrink-0">
                         <Ambulance className="w-5 h-5" />
                       </div>
                       <div>
-                        <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+                        <span className="text-xs font-bold text-slate-600 uppercase tracking-wider block">
                           Assigned Ambulance
                         </span>
-                        <p className="text-sm font-bold text-slate-900">
-                          {activeDispatch?.ambulance_call_sign || "Matching closest available unit..."}
+                        <p className="text-base font-black text-slate-900">
+                          {activeDispatch?.ambulance_call_sign || "Matching closest ambulance..."}
                         </p>
                       </div>
                     </div>
                     {activeDispatch?.ambulance_vehicle_type && (
-                      <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 uppercase">
+                      <span className="text-xs font-extrabold px-2.5 py-0.5 rounded-md bg-blue-50 text-blue-700 border border-blue-200 uppercase">
                         {activeDispatch.ambulance_vehicle_type}
                       </span>
                     )}
                   </div>
 
-                  {/* Confirmation / Mission Status */}
-                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700 font-medium flex items-center justify-between">
-                    <span>Crew Confirmation:</span>
-                    <strong
-                      className={`font-bold ${
-                        activeDispatch?.ambulance_confirmation_status === "ACCEPTED"
-                          ? "text-emerald-700"
-                          : activeDispatch?.ambulance_confirmation_status === "REJECTED"
-                          ? "text-red-700"
-                          : "text-amber-700"
-                      }`}
-                    >
-                      {activeDispatch?.ambulance_confirmation_status === "ACCEPTED"
-                        ? "Confirmed & Dispatched ✓"
-                        : activeDispatch?.ambulance_confirmation_status === "REJECTED"
-                        ? "Reassigning alternate unit..."
-                        : "Awaiting Crew Acceptance"}
-                    </strong>
+                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs sm:text-sm font-semibold text-slate-800 flex items-center justify-between">
+                    <span>Unit Status:</span>
+                    <span className="font-bold text-blue-700">
+                      {activeDispatch?.status === "ON_SCENE"
+                        ? "Arrived On Scene"
+                        : activeDispatch?.status === "EN_ROUTE_INCIDENT"
+                        ? "En Route to Location"
+                        : activeDispatch?.status === "EN_ROUTE_HOSPITAL"
+                        ? "Transporting to Hospital"
+                        : activeDispatch?.status === "AT_HOSPITAL"
+                        ? "Arrived at Hospital"
+                        : activeDispatch?.status === "ASSIGNED"
+                        ? "Assigned • Preparing"
+                        : "Locating Unit"}
+                    </span>
                   </div>
 
-                  {/* Estimated Arrival Time (ETA) */}
+                  {/* Actual ETA */}
                   {activeDispatch?.estimated_eta_seconds && activeDispatch.estimated_eta_seconds > 0 ? (
-                    <div className="p-3 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-between text-xs font-semibold text-blue-900">
+                    <div className="p-2.5 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-between text-xs sm:text-sm font-semibold text-blue-900">
                       <span className="flex items-center gap-1.5">
-                        <Clock className="w-3.5 h-3.5 text-blue-600" />
-                        <span>Estimated Arrival Time:</span>
+                        <Clock className="w-4 h-4 text-blue-600" />
+                        <span>Estimated Arrival:</span>
                       </span>
-                      <span className="font-bold font-mono text-sm text-blue-700">
+                      <span className="font-black font-mono text-base text-blue-700">
                         ~{Math.round(activeDispatch.estimated_eta_seconds / 60)} mins
-                        {activeDispatch.route_distance_meters && (
-                          <span className="text-[11px] text-blue-600 font-normal ml-1">
-                            ({(activeDispatch.route_distance_meters / 1000).toFixed(1)} km)
-                          </span>
-                        )}
                       </span>
                     </div>
                   ) : (
-                    <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 font-medium flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                      <span>ETA: Calculating based on live road conditions</span>
+                    <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs sm:text-sm text-slate-700 font-medium flex items-center gap-1.5">
+                      <Clock className="w-4 h-4 text-slate-500 shrink-0" />
+                      <span>ETA: Calculated upon crew route activation</span>
                     </div>
                   )}
 
-                  {/* Live GPS Telemetry */}
-                  {activeDispatch?.ambulance_current_latitude && activeDispatch?.ambulance_current_longitude ? (
-                    <div className="p-2.5 rounded-xl bg-emerald-50/70 border border-emerald-100 flex items-center justify-between text-xs text-emerald-900 font-medium">
-                      <span className="flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
-                        <Navigation className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                        <span>Ambulance GPS Fix:</span>
+                  {activeDispatch?.ambulance_current_latitude && activeDispatch?.ambulance_current_longitude && (
+                    <div className="p-2 rounded-lg bg-emerald-50/70 border border-emerald-100 text-xs text-emerald-900 font-medium flex items-center justify-between font-mono">
+                      <span className="flex items-center gap-1 font-semibold">
+                        <Navigation className="w-3.5 h-3.5 text-emerald-600" />
+                        GPS Telemetry:
                       </span>
-                      <span className="font-mono font-bold text-emerald-800 text-[11px]">
+                      <span>
                         {activeDispatch.ambulance_current_latitude.toFixed(4)},{" "}
                         {activeDispatch.ambulance_current_longitude.toFixed(4)}
                       </span>
                     </div>
-                  ) : (
-                    <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-500 font-medium flex items-center gap-1.5">
-                      <Navigation className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                      <span>Live GPS coordinates: Awaiting ambulance stream</span>
-                    </div>
                   )}
                 </div>
-              </div>
 
-              {/* Hospital Assignment */}
-              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3 flex flex-col justify-between">
-                <div className="space-y-3">
+                {/* Destination Hospital */}
+                <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 shrink-0">
                       <Building2 className="w-5 h-5" />
                     </div>
                     <div>
-                      <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+                      <span className="text-xs font-bold text-slate-600 uppercase tracking-wider block">
                         Destination Hospital
                       </span>
-                      <p className="text-sm font-bold text-slate-900">
-                        {activeDispatch?.destination_hospital_name || "Coordinating receiving trauma facility..."}
+                      <p className="text-base font-black text-slate-900 truncate max-w-[200px]">
+                        {activeDispatch?.destination_hospital_name || "Coordinating hospital facility..."}
                       </p>
                     </div>
                   </div>
 
-                  {activeDispatch?.destination_hospital_address && (
-                    <p className="text-xs text-slate-500 flex items-start gap-1.5">
-                      <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-                      <span className="truncate">{activeDispatch.destination_hospital_address}</span>
-                    </p>
-                  )}
-
-                  {/* Bed Reservation Status */}
-                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700 font-medium flex items-center justify-between">
+                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs sm:text-sm text-slate-800 font-medium flex items-center justify-between">
                     <span>Bed Reservation:</span>
                     <strong
                       className={`font-bold ${
                         activeDispatch?.hospital_confirmation_status === "ACCEPTED"
                           ? "text-emerald-700"
-                          : activeDispatch?.hospital_confirmation_status === "REJECTED"
-                          ? "text-red-700"
                           : "text-amber-700"
                       }`}
                     >
                       {activeDispatch?.hospital_confirmation_status === "ACCEPTED"
-                        ? "Bed Reserved & ER Notified ✓"
-                        : activeDispatch?.hospital_confirmation_status === "REJECTED"
-                        ? "Finding Alternate Facility..."
+                        ? "Bed Reserved & ER Ready"
                         : "Awaiting ER Confirmation"}
                     </strong>
                   </div>
 
-                  {/* Emergency Department Reception Status */}
-                  {activeDispatch?.patient_arrived_hospital_confirmed_at ||
-                  activeDispatch?.status === "AT_HOSPITAL" ||
-                  activeIncident.status === "AT_HOSPITAL" ? (
-                    <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-semibold flex items-center gap-2">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                      <span>Patient Arrival Confirmed at Trauma Bay ✓</span>
-                    </div>
-                  ) : (
-                    <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 font-medium flex items-center gap-1.5">
-                      <Building2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                      <span>ER Trauma Bay Preparing for Arrival</span>
-                    </div>
+                  {activeDispatch?.destination_hospital_address && (
+                    <p className="text-xs sm:text-sm text-slate-700 truncate flex items-center gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                      <span>{activeDispatch.destination_hospital_address}</span>
+                    </p>
                   )}
                 </div>
               </div>
-            </div>
 
-            {/* LIVE INCIDENT TELEMETRY STRIP */}
-            <div className="bg-white border border-slate-200 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs shadow-2xs">
-              <div className="flex flex-wrap items-center gap-4 text-slate-600">
-                <span>
-                  <strong className="text-slate-800">Incident:</strong> #{activeIncident.id}
-                </span>
-                <span>
-                  <strong className="text-slate-800">Dispatch:</strong>{" "}
-                  {activeDispatch ? `#${activeDispatch.id}` : "Pending Allocation"}
-                </span>
-                <span>
-                  <strong className="text-slate-800">Coordination:</strong>{" "}
-                  <span className="font-semibold text-slate-900">
-                    {activeDispatch?.coordination_status || "PENDING"}
+              {/* 4. Response Timeline */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs sm:text-sm font-bold text-slate-900 uppercase tracking-wider block">
+                    Response Progress
                   </span>
-                </span>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => fetchActiveIncident(true)}
-                disabled={isRefreshingTracking}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-semibold text-xs transition disabled:opacity-50"
-                title="Refresh tracking data from server"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingTracking ? "animate-spin text-blue-600" : ""}`} />
-                <span>{isRefreshingTracking ? "Refreshing..." : "Refresh"}</span>
-              </button>
-            </div>
-
-            {/* Helpline Banner */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4 text-center sm:text-left shadow-xs">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-red-50 border border-red-200 flex items-center justify-center text-red-600 shrink-0">
-                  <PhoneCall className="w-5 h-5" />
+                  <span className="text-xs font-bold text-slate-600">Step {currentStage} of 5</span>
                 </div>
-                <div>
-                  <p className="text-xs font-bold text-slate-900">Need Immediate Advice or Question?</p>
-                  <p className="text-[11px] text-slate-500">Government 112 emergency control room is operating 24/7.</p>
-                </div>
-              </div>
-              <a
-                href="tel:112"
-                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center justify-center gap-2 transition shadow-xs"
-              >
-                <PhoneCall className="w-4 h-4" />
-                <span>Call 112 Now</span>
-              </a>
-            </div>
 
-            {/* Incident Status Alert Banner if Cancelled or Closed/Resolved */}
-            {activeIncident?.status === "CANCELLED" && (
-              <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold flex items-center gap-2.5">
-                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-                <span>This emergency request was cancelled. Dispatched ambulance and hospital reservations have been released.</span>
-              </div>
-            )}
-            {(activeIncident?.status === "RESOLVED" || activeIncident?.status === "CLOSED") && (
-              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center gap-2.5">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Emergency case {activeIncident?.status === "CLOSED" ? "formally closed" : "resolved"}. Patient handover and clinical care completed.</span>
-              </div>
-            )}
+                <div className="relative flex items-center justify-between pt-2">
+                  <div className="absolute left-6 right-6 top-6 h-1 bg-slate-100 z-0" />
+                  <div
+                    className="absolute left-6 top-6 h-1 bg-emerald-500 z-0 transition-all duration-500"
+                    style={{ width: `${((currentStage - 1) / 4) * 85}%` }}
+                  />
 
-            {/* Actions: Cancel Emergency Request & Reset */}
-            <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
-              {activeIncident?.status !== "CANCELLED" && activeIncident?.status !== "RESOLVED" && activeIncident?.status !== "CLOSED" && (
-                <button
-                  type="button"
-                  onClick={() => setIsCancelModalOpen(true)}
-                  className="w-full sm:w-auto px-4 py-2 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-xs font-bold text-red-700 transition"
-                >
-                  Cancel Emergency Request
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={handleResetForNewSos}
-                className="w-full sm:w-auto px-4 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-white transition"
-              >
-                Report Another Emergency / Start Over
-              </button>
-            </div>
-          </div>
-        ) : view === "MAIN" ? (
-          /* ============================================================== */
-          /* VIEW 1: CENTERED MAIN SCREEN (Two Primary Options)            */
-          /* ============================================================== */
-          <div className="max-w-2xl mx-auto w-full space-y-8 py-6">
-            {/* Title & Introduction */}
-            <div className="text-center space-y-2">
-              <h1 className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight">
-                Need emergency help?
-              </h1>
-              <p className="text-sm sm:text-base text-slate-600 max-w-md mx-auto">
-                Choose how you want to reach emergency assistance.
-              </p>
-            </div>
-
-            {/* Location Pill for mobile or quick change */}
-            <div className="flex justify-center">
-              <button
-                type="button"
-                onClick={() => {
-                  setManualInput(selectedAddress);
-                  setIsLocationModalOpen(true);
-                }}
-                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-full border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 shadow-2xs transition"
-              >
-                <MapPin className="w-3.5 h-3.5 text-red-600 shrink-0" />
-                <span className="font-semibold text-slate-900 truncate max-w-[260px]">
-                  {selectedAddress || "Tap to set emergency location"}
-                </span>
-                <span className="text-[11px] text-blue-600 underline font-medium ml-1">Change</span>
-              </button>
-            </div>
-
-            {/* Two Primary Large Option Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6 pt-2">
-              {/* Option 1: Talk for Help */}
-              <button
-                type="button"
-                onClick={() => handleSelectWorkflow("TALK")}
-                className="group relative flex flex-col items-center justify-center p-8 rounded-2xl bg-white border-2 border-slate-200 hover:border-red-500 hover:shadow-lg transition-all duration-200 text-center cursor-pointer active:scale-[0.99] focus:outline-none focus:ring-4 focus:ring-red-100"
-              >
-                <div className="w-20 h-20 rounded-full bg-red-50 border-2 border-red-200 group-hover:bg-red-600 group-hover:border-red-600 group-hover:text-white flex items-center justify-center text-red-600 transition-colors duration-200 mb-5 shadow-xs">
-                  <Mic className="w-10 h-10 stroke-[2.2]" />
-                </div>
-                <h2 className="text-xl font-black text-slate-900 tracking-tight mb-2 group-hover:text-red-600 transition-colors">
-                  Talk for Help
-                </h2>
-                <p className="text-xs sm:text-sm text-slate-500 leading-relaxed max-w-xs">
-                  Speak and explain your emergency.
-                </p>
-                <div className="mt-5 inline-flex items-center gap-1.5 text-xs font-bold text-red-600 group-hover:translate-x-0.5 transition-transform">
-                  <span>Start speaking</span>
-                  <span>→</span>
-                </div>
-              </button>
-
-              {/* Option 2: Text for Help */}
-              <button
-                type="button"
-                onClick={() => handleSelectWorkflow("TEXT")}
-                className="group relative flex flex-col items-center justify-center p-8 rounded-2xl bg-white border-2 border-slate-200 hover:border-blue-500 hover:shadow-lg transition-all duration-200 text-center cursor-pointer active:scale-[0.99] focus:outline-none focus:ring-4 focus:ring-blue-100"
-              >
-                <div className="w-20 h-20 rounded-full bg-blue-50 border-2 border-blue-200 group-hover:bg-blue-600 group-hover:border-blue-600 group-hover:text-white flex items-center justify-center text-blue-600 transition-colors duration-200 mb-5 shadow-xs">
-                  <MessageSquare className="w-10 h-10 stroke-[2.2]" />
-                </div>
-                <h2 className="text-xl font-black text-slate-900 tracking-tight mb-2 group-hover:text-blue-600 transition-colors">
-                  Text for Help
-                </h2>
-                <p className="text-xs sm:text-sm text-slate-500 leading-relaxed max-w-xs">
-                  Send your emergency details without speaking.
-                </p>
-                <div className="mt-5 inline-flex items-center gap-1.5 text-xs font-bold text-blue-600 group-hover:translate-x-0.5 transition-transform">
-                  <span>Enter details</span>
-                  <span>→</span>
-                </div>
-              </button>
-            </div>
-
-            {/* Direct Helpline Reminder */}
-            <div className="pt-4 text-center">
-              <p className="text-xs text-slate-500">
-                If you need immediate emergency assistance, you can also{" "}
-                <a href="tel:112" className="text-red-600 font-bold hover:underline inline-flex items-center gap-1">
-                  <PhoneCall className="w-3 h-3" />
-                  call 112
-                </a>
-                .
-              </p>
-            </div>
-          </div>
-        ) : view === "TALK" ? (
-          /* ============================================================== */
-          /* VIEW 2: DEDICATED TALK FOR HELP EXPERIENCE                     */
-          /* ============================================================== */
-          <div className="max-w-2xl mx-auto w-full space-y-6 py-2">
-            {/* Navigation Header */}
-            <div className="flex items-center justify-between">
-              <button
-                type="button"
-                onClick={() => {
-                  stopListening();
-                  setView("MAIN");
-                }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 transition"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Back to options</span>
-              </button>
-
-              {/* Location indicator */}
-              <button
-                type="button"
-                onClick={() => {
-                  setManualInput(selectedAddress);
-                  setIsLocationModalOpen(true);
-                }}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[11px] font-medium text-slate-700 hover:bg-slate-50 transition max-w-[200px] truncate"
-              >
-                <MapPin className="w-3 h-3 text-red-600 shrink-0" />
-                <span className="truncate">{selectedAddress}</span>
-              </button>
-            </div>
-
-            {/* Title Card */}
-            <div className="text-center space-y-1">
-              <h2 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
-                Tell us what happened
-              </h2>
-              <p className="text-xs sm:text-sm text-slate-600 max-w-md mx-auto">
-                Speak naturally. We will help collect the details needed to send assistance.
-              </p>
-            </div>
-
-            {/* Central Interactive Voice Card */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 shadow-xs flex flex-col items-center text-center space-y-6">
-              {/* Circular Microphone Button with Pulsing Rings */}
-              <div className="relative flex items-center justify-center my-2">
-                {isListening && (
-                  <>
-                    <span className="absolute w-36 h-36 rounded-full bg-red-400/20 animate-ping" />
-                    <span className="absolute w-44 h-44 rounded-full border-2 border-red-300/40 animate-pulse" />
-                  </>
-                )}
-
-                <button
-                  type="button"
-                  onClick={toggleVoiceRecording}
-                  className={`relative w-28 h-28 sm:w-32 sm:h-32 rounded-full flex flex-col items-center justify-center shadow-lg transition-all duration-200 cursor-pointer active:scale-95 focus:outline-none focus:ring-4 ${
-                    isListening
-                      ? "bg-red-600 text-white ring-red-200 shadow-red-200"
-                      : "bg-red-50 hover:bg-red-100 text-red-600 border-2 border-red-200 ring-slate-100"
-                  }`}
-                  aria-label={isListening ? "Stop Listening" : "Start Speaking"}
-                >
-                  {isListening ? (
-                    <Mic className="w-12 h-12 stroke-[2.2] animate-bounce" />
-                  ) : (
-                    <Mic className="w-12 h-12 stroke-[2.2]" />
-                  )}
-                  <span className="text-[10px] font-bold uppercase tracking-wider mt-1">
-                    {isListening ? "Listening" : "Tap to Speak"}
-                  </span>
-                </button>
-              </div>
-
-              {/* Status & Feedback */}
-              <div className="space-y-1">
-                <p className="text-sm font-bold text-slate-900">
-                  {isListening ? "Listening to your voice..." : "Microphone ready"}
-                </p>
-                <p className="text-xs text-slate-500">
-                  {voiceFeedback || "State symptoms, injuries, or what assistance is needed."}
-                </p>
-                {!voiceSupported && (
-                  <p className="text-xs text-amber-600 font-medium">
-                    Web Speech API is not supported in this browser. Please type details below.
-                  </p>
-                )}
-              </div>
-
-              {/* Detected Symptom Tags (Real-time Extraction) */}
-              {detectedSymptomTags.length > 0 && (
-                <div className="w-full pt-2 border-t border-slate-100">
-                  <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2 text-left">
-                    Detected Emergency Indicators
-                  </span>
-                  <div className="flex flex-wrap gap-2">
-                    {detectedSymptomTags.map((tag) => {
-                      const IconComp = tag.icon;
-                      return (
-                        <span
-                          key={tag.id}
-                          className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-50 border border-red-200 text-red-700 text-xs font-bold"
+                  {[
+                    { num: 1, label: "Request Received" },
+                    { num: 2, label: "Ambulance Assigned" },
+                    { num: 3, label: "Ambulance En Route" },
+                    { num: 4, label: "Arrived at Location" },
+                    { num: 5, label: "Hospital Arrival" },
+                  ].map((step) => {
+                    const isDone = currentStage >= step.num;
+                    const isCurrent = currentStage === step.num;
+                    return (
+                      <div key={step.num} className="relative z-10 flex flex-col items-center">
+                        <div
+                          className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs transition-all ${
+                            isDone
+                              ? "bg-emerald-600 text-white shadow-xs"
+                              : isCurrent
+                              ? "bg-blue-600 text-white ring-4 ring-blue-100"
+                              : "bg-white border-2 border-slate-200 text-slate-400"
+                          }`}
                         >
-                          <IconComp className="w-3.5 h-3.5 text-red-600" />
-                          <span>{tag.label}</span>
+                          {isDone ? <Check className="w-4 h-4 stroke-[3]" /> : step.num}
+                        </div>
+                        <span
+                          className={`text-xs font-bold mt-2 text-center max-w-[70px] sm:max-w-none leading-tight ${
+                            isCurrent ? "text-blue-700" : isDone ? "text-slate-800" : "text-slate-500"
+                          }`}
+                        >
+                          {step.label}
                         </span>
-                      );
-                    })}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-4 p-4 rounded-xl bg-blue-50/70 border border-blue-100 flex items-start gap-2.5 text-xs sm:text-sm text-blue-900 leading-relaxed">
+                  <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold text-blue-950 block">Current Status</span>
+                    <span className="font-medium">
+                      {activeIncident.status === "CANCELLED"
+                        ? "This emergency request was cancelled. Emergency resources have been returned to service."
+                        : activeIncident.status === "RESOLVED" || activeIncident.status === "CLOSED"
+                        ? "Patient safely transferred to hospital emergency care."
+                        : currentStage === 1
+                        ? "Request received. Identifying nearest available ambulance and emergency department."
+                        : currentStage === 2
+                        ? `Ambulance unit ${activeDispatch?.ambulance_call_sign || "assigned"}. Crew preparing to respond.`
+                        : currentStage === 3
+                        ? `Ambulance ${activeDispatch?.ambulance_call_sign || "assigned"} is actively on the way to your location.`
+                        : currentStage === 4
+                        ? "Paramedic crew has arrived at your location."
+                        : "Patient transferred to hospital emergency care."}
+                    </span>
                   </div>
                 </div>
-              )}
-
-              {/* Editable Review Textarea */}
-              <div className="w-full space-y-1.5 text-left">
-                <label className="text-xs font-bold text-slate-700 block">
-                  Transcribed Emergency Details (tap to edit)
-                </label>
-                <textarea
-                  value={spokenTranscript}
-                  onChange={(e) => setSpokenTranscript(e.target.value)}
-                  placeholder="Your spoken words will appear here. You can also edit or type additional information..."
-                  rows={3}
-                  className="w-full px-3.5 py-2.5 text-xs sm:text-sm rounded-xl border border-slate-200 bg-slate-50 text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500 transition"
-                />
               </div>
 
-              {/* Action: Send Emergency Request */}
-              <div className="w-full pt-2">
+              {/* 5. Tracking Actions */}
+              <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
                 <button
                   type="button"
-                  onClick={() => handleSubmitEmergency("TALK")}
-                  disabled={isSubmitting}
-                  className={`w-full py-4 px-6 rounded-xl bg-red-600 hover:bg-red-700 text-white font-extrabold text-sm sm:text-base flex items-center justify-center gap-2 shadow-md shadow-red-200 transition active:scale-[0.99] cursor-pointer ${
-                    isSubmitting ? "opacity-75 cursor-not-allowed" : ""
-                  }`}
+                  onClick={() => fetchActiveIncident(true)}
+                  disabled={isRefreshingTracking}
+                  className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs sm:text-sm font-bold text-slate-800 transition flex items-center justify-center gap-1.5 cursor-pointer"
                 >
-                  {isSubmitting ? (
-                    <>
-                      <RefreshCw className="w-5 h-5 animate-spin" />
-                      <span>Transmitting Emergency Request...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Send className="w-5 h-5" />
-                      <span>Send Emergency Request</span>
-                    </>
-                  )}
+                  <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingTracking ? "animate-spin text-blue-600" : ""}`} />
+                  <span>{isRefreshingTracking ? "Refreshing..." : "Refresh Tracking"}</span>
                 </button>
-              </div>
 
-              {/* Fallback Switcher */}
-              <div className="pt-1">
+                {activeIncident.status !== "CANCELLED" &&
+                  activeIncident.status !== "RESOLVED" &&
+                  activeIncident.status !== "CLOSED" && (
+                    <button
+                      type="button"
+                      onClick={() => setIsCancelModalOpen(true)}
+                      className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-xs sm:text-sm font-bold text-red-700 transition cursor-pointer"
+                    >
+                      Cancel Emergency Request
+                    </button>
+                  )}
+
                 <button
                   type="button"
-                  onClick={() => {
-                    stopListening();
-                    setIncidentDescription(spokenTranscript);
-                    setView("TEXT");
-                  }}
-                  className="text-xs font-semibold text-slate-600 hover:text-blue-600 underline"
+                  onClick={() => setIsTrackingViewOpen(false)}
+                  className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs sm:text-sm font-bold text-slate-800 transition cursor-pointer"
                 >
-                  Prefer to type? Switch to Text for Help
+                  Back to Emergency Home
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResetForNewSos}
+                  className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs sm:text-sm font-semibold text-slate-700 transition cursor-pointer"
+                >
+                  Report Another Emergency / Start Over
                 </button>
               </div>
             </div>
-          </div>
+          )
         ) : (
           /* ============================================================== */
-          /* VIEW 3: DEDICATED TEXT FOR HELP EXPERIENCE                     */
+          /* CITIZEN HOMEPAGE — MINIMAL REPORTING INTERFACE               */
           /* ============================================================== */
-          <div className="max-w-2xl mx-auto w-full space-y-6 py-2">
-            {/* Navigation Header */}
-            <div className="flex items-center justify-between">
-              <button
-                type="button"
-                onClick={() => setView("MAIN")}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 transition"
-              >
-                <ArrowLeft className="w-3.5 h-3.5" />
-                <span>Back to options</span>
-              </button>
-
-              {/* Location indicator */}
-              <button
-                type="button"
-                onClick={() => {
-                  setManualInput(selectedAddress);
-                  setIsLocationModalOpen(true);
-                }}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[11px] font-medium text-slate-700 hover:bg-slate-50 transition max-w-[200px] truncate"
-              >
-                <MapPin className="w-3 h-3 text-red-600 shrink-0" />
-                <span className="truncate">{selectedAddress}</span>
-              </button>
-            </div>
-
-            {/* Title Card */}
+          <div className="space-y-6 py-4">
+            {/* 1. Main Heading */}
             <div className="text-center space-y-1">
-              <h2 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
-                Send emergency details
-              </h2>
-              <p className="text-xs sm:text-sm text-slate-600 max-w-md mx-auto">
-                Provide what you know. You can send the request even if some details are unknown.
+              <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                Emergency Assistance
+              </h1>
+              <p className="text-sm sm:text-base text-slate-700 max-w-md mx-auto font-medium">
+                Tap Call 112 to speak or select Text SOS to type your emergency.
               </p>
             </div>
 
-            {/* Text Intake Form */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 shadow-xs space-y-6">
-              {/* Emergency Type Chips */}
+            {/* 2. PRIMARY ACTION — CALL 112 (Speech-to-Text Prototype) */}
+            <div className="flex flex-col items-center justify-center pt-2 pb-1">
+              <button
+                type="button"
+                onClick={handleSimulatedCall112}
+                aria-label="Call 112 emergency intake"
+                className={`group relative w-44 h-44 sm:w-48 sm:h-48 rounded-full text-white flex flex-col items-center justify-center transition-all duration-200 active:scale-95 cursor-pointer focus:outline-none focus:ring-4 focus:ring-red-200 ${
+                  voiceState === "LISTENING"
+                    ? "bg-red-700 shadow-2xl shadow-red-300 ring-4 ring-red-400"
+                    : "bg-red-600 hover:bg-red-700 shadow-xl shadow-red-200/80"
+                }`}
+              >
+                <span
+                  className={`absolute -inset-2 rounded-full border-2 border-red-400/40 pointer-events-none ${
+                    voiceState === "LISTENING" ? "animate-ping opacity-75" : "animate-pulse"
+                  }`}
+                />
+
+                <div className="flex flex-col items-center gap-1 z-10">
+                  {voiceState === "LISTENING" ? (
+                    <Mic className="w-12 h-12 stroke-[2.2] animate-bounce text-white" />
+                  ) : (
+                    <Phone className="w-12 h-12 stroke-[2.2] group-hover:scale-105 transition-transform" />
+                  )}
+                  <span className="text-3xl sm:text-4xl font-black tracking-tight mt-1">Call 112</span>
+                  {voiceState === "LISTENING" && (
+                    <span className="text-xs font-bold text-red-100 uppercase tracking-widest mt-1">
+                      Listening...
+                    </span>
+                  )}
+                </div>
+              </button>
+
+              {/* Readable prototype disclaimer */}
+              <p className="text-xs sm:text-sm text-slate-600 font-medium mt-3 text-center">
+                Prototype demonstration — does not dial real emergency services.
+              </p>
+            </div>
+
+            {/* 3. SECONDARY ACTION — TEXT SOS */}
+            <div className="flex items-center justify-center max-w-xs mx-auto w-full pt-1">
+              <button
+                type="button"
+                onClick={handleTextSosClick}
+                className="w-full py-2.5 px-4 rounded-xl border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-blue-900 text-sm sm:text-base font-bold shadow-2xs flex items-center justify-center gap-2 transition cursor-pointer active:scale-[0.98]"
+              >
+                <MessageSquare className="w-4 h-4 text-blue-600" />
+                <span>Text SOS</span>
+              </button>
+            </div>
+
+            {/* ============================================================ */}
+            {/* UNIFIED EMERGENCY REPORT FORM (SAME SCREEN)                  */}
+            {/* ============================================================ */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-sm space-y-5">
+              {/* Emergency Description Field (Hidden by default; revealed on Text SOS or Voice Input) */}
+              {isDescriptionVisible && (
+                <div className="space-y-1.5 animate-in fade-in duration-200">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs sm:text-sm font-bold text-slate-900 uppercase tracking-wider block">
+                      Emergency Description <span className="text-red-600">*</span>
+                    </label>
+                    <span className="text-xs font-semibold text-slate-600 font-mono">
+                      {incidentDescription.length} / {MAX_DESCRIPTION_LENGTH}
+                    </span>
+                  </div>
+                  <textarea
+                    ref={descriptionInputRef}
+                    value={incidentDescription}
+                    onChange={(e) => setIncidentDescription(e.target.value.slice(0, MAX_DESCRIPTION_LENGTH))}
+                    placeholder="Describe what happened, patient symptoms or condition..."
+                    rows={3}
+                    maxLength={MAX_DESCRIPTION_LENGTH}
+                    className="w-full px-3.5 py-2.5 text-sm sm:text-base rounded-xl border border-slate-200 bg-slate-50 text-slate-900 placeholder-slate-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500 transition"
+                  />
+                </div>
+              )}
+
+              {/* Emergency Category Selector (Same Screen) */}
               <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-900 block uppercase tracking-wider">
-                  Select Emergency Type
+                <label className="text-xs sm:text-sm font-bold text-slate-900 uppercase tracking-wider block">
+                  Select Emergency Category <span className="text-red-600">*</span>
                 </label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                  {[
-                    { id: "MEDICAL", label: "Medical emergency", icon: Activity },
-                    { id: "ACCIDENT", label: "Road accident", icon: Car },
-                    { id: "FIRE", label: "Fire", icon: Flame },
-                    { id: "OTHER", label: "Other", icon: ShieldAlert },
-                  ].map((type) => {
-                    const IconComp = type.icon;
-                    const isSelected = emergencyType === type.id;
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {EMERGENCY_CATEGORIES.map((category) => {
+                    const IconComp = category.icon;
+                    const isSelected = selectedCategory === category.id;
                     return (
                       <button
-                        key={type.id}
+                        key={category.id}
                         type="button"
-                        onClick={() => setEmergencyType(type.id as EmergencyType)}
-                        className={`p-3 rounded-xl border text-left transition flex flex-col items-center justify-center text-center gap-1.5 cursor-pointer ${
+                        onClick={() => setSelectedCategory(category.id)}
+                        className={`p-3 rounded-xl border text-left transition flex items-center gap-2.5 cursor-pointer ${
                           isSelected
-                            ? "bg-red-50 border-red-500 text-red-900 ring-2 ring-red-400 shadow-2xs font-bold"
+                            ? "bg-red-50 border-red-500 text-red-900 ring-2 ring-red-300 font-bold shadow-2xs"
                             : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50 font-medium"
                         }`}
                       >
-                        <IconComp className={`w-5 h-5 ${isSelected ? "text-red-600" : "text-slate-500"}`} />
-                        <span className="text-xs leading-tight">{type.label}</span>
+                        <div
+                          className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
+                            isSelected ? "bg-red-600 text-white" : "bg-slate-100 text-slate-600"
+                          }`}
+                        >
+                          <IconComp className="w-4 h-4" />
+                        </div>
+                        <span className="text-sm font-bold leading-tight">{category.label}</span>
                       </button>
                     );
                   })}
                 </div>
+
+                {/* Specific Emergency Type Input (Revealed only when 'Other' is selected) */}
+                {selectedCategory === "OTHER" && (
+                  <div className="pt-2 space-y-1 animate-in fade-in slide-in-from-top-1 duration-150">
+                    <label className="text-xs sm:text-sm font-bold text-slate-800 block">
+                      Specify emergency type <span className="text-red-600">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={customOtherType}
+                      onChange={(e) => setCustomOtherType(e.target.value)}
+                      placeholder="e.g. Hazardous chemical spill, drowning, structure fire..."
+                      className="w-full px-3 py-2 text-sm rounded-xl border border-slate-300 bg-white text-slate-900 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500 transition"
+                    />
+                  </div>
+                )}
               </div>
 
-              {/* What happened? textarea */}
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-slate-900 block uppercase tracking-wider">
-                  What happened?
-                </label>
-                <textarea
-                  value={incidentDescription}
-                  onChange={(e) => setIncidentDescription(e.target.value)}
-                  placeholder="Describe the emergency briefly..."
-                  rows={3}
-                  className="w-full px-3.5 py-2.5 text-xs sm:text-sm rounded-xl border border-slate-200 bg-slate-50 text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500 transition"
-                />
-              </div>
+              {/* Automatic GPS Location Status & Manual Fallback */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-8 h-8 rounded-lg bg-white border border-slate-200 flex items-center justify-center shrink-0">
+                      <MapPin className="w-4 h-4 text-red-600" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold border ${locationBadge.color}`}
+                        >
+                          {locationBadge.icon}
+                          <span>{locationBadge.text}</span>
+                        </span>
+                      </div>
+                      <p className="text-sm font-semibold text-slate-900 truncate mt-0.5">
+                        {selectedAddress || "Detecting live GPS location..."}
+                      </p>
+                    </div>
+                  </div>
 
-              {/* Number of injured people */}
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-900 block uppercase tracking-wider">
-                  Number of injured people
-                </label>
-                <div className="grid grid-cols-4 gap-2">
-                  {["1", "2", "3+", "Unknown"].map((count) => {
-                    const isSelected = injuredCount === count;
-                    return (
+                  <button
+                    type="button"
+                    onClick={() => setIsManualLocationOpen((prev) => !prev)}
+                    className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-800 text-xs sm:text-sm font-bold transition shrink-0 cursor-pointer"
+                  >
+                    {isManualLocationOpen ? "Close" : "Change Location"}
+                  </button>
+                </div>
+
+                {/* Auto-revealed if GPS fails, or toggled by Change Location */}
+                {(isManualLocationOpen ||
+                  gpsStatus === "DENIED" ||
+                  gpsStatus === "UNAVAILABLE" ||
+                  gpsStatus === "TIMEOUT") && (
+                  <div className="pt-2 border-t border-slate-200 space-y-2 animate-in fade-in duration-150">
+                    <label className="text-xs sm:text-sm font-bold text-slate-800 block">
+                      Address, area or landmark in Mangaluru:
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={manualInput}
+                        onChange={(e) => {
+                          setManualInput(e.target.value);
+                          setSelectedAddress(e.target.value);
+                        }}
+                        placeholder="e.g. Hampankatta Circle, KMC Hospital Ambedkar Road..."
+                        className="w-full pl-8 pr-3 py-2 text-sm rounded-lg border border-slate-300 bg-white text-slate-900 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-red-500"
+                      />
+                      <MapPin className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    </div>
+
+                    <div className="space-y-1 pt-1">
+                      <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
+                        Quick select landmark:
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {MANGALURU_LANDMARKS.map((landmark) => (
+                          <button
+                            key={landmark.name}
+                            type="button"
+                            onClick={() => handleSelectLandmark(landmark)}
+                            className="px-2.5 py-1 rounded-md text-xs font-medium border border-slate-200 bg-white hover:bg-slate-100 text-slate-800 transition cursor-pointer"
+                          >
+                            {landmark.name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="pt-1 flex items-center justify-between">
                       <button
-                        key={count}
                         type="button"
-                        onClick={() => setInjuredCount(count)}
-                        className={`py-2 px-3 rounded-xl border text-xs font-bold transition text-center cursor-pointer ${
-                          isSelected
-                            ? "bg-blue-50 border-blue-500 text-blue-900 ring-1 ring-blue-400"
-                            : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
-                        }`}
+                        onClick={acquireGps}
+                        className="text-xs font-bold text-blue-700 hover:text-blue-900 flex items-center gap-1 cursor-pointer"
                       >
-                        {count === "1"
-                          ? "1 person"
-                          : count === "2"
-                          ? "2 people"
-                          : count === "3+"
-                          ? "3+ people"
-                          : "Unknown"}
+                        <Crosshair className={`w-3.5 h-3.5 ${gpsStatus === "ACQUIRING" ? "animate-spin" : ""}`} />
+                        <span>Detect Live GPS Again</span>
                       </button>
-                    );
-                  })}
-                </div>
+
+                      {manualInput.trim() && (
+                        <button
+                          type="button"
+                          onClick={handleConfirmManualLocation}
+                          className="px-3.5 py-1.5 bg-red-600 text-white rounded-md text-xs font-bold shadow-2xs cursor-pointer hover:bg-red-700"
+                        >
+                          Confirm
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {/* Collapsible "Add more information" */}
+              {/* Collapsible Additional Details (Optional) */}
               <div className="border border-slate-200 rounded-xl overflow-hidden">
                 <button
                   type="button"
                   onClick={() => setShowAdditionalInfo((prev) => !prev)}
-                  className="w-full p-3.5 bg-slate-50 hover:bg-slate-100 flex items-center justify-between text-xs font-bold text-slate-800 transition text-left"
+                  className="w-full p-3 bg-slate-50 hover:bg-slate-100 flex items-center justify-between text-xs sm:text-sm font-bold text-slate-800 transition text-left cursor-pointer"
                 >
-                  <span>Add more information (landmark, special assistance)</span>
+                  <span>Additional Details (Optional)</span>
                   {showAdditionalInfo ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
                 </button>
 
                 {showAdditionalInfo && (
-                  <div className="p-4 bg-white space-y-4 border-t border-slate-200">
+                  <div className="p-4 bg-white space-y-3.5 border-t border-slate-200">
                     <div className="space-y-1">
-                      <label className="text-xs font-semibold text-slate-700 block">
-                        Nearby landmark or specific directions
+                      <label className="text-xs sm:text-sm font-semibold text-slate-800 block">
+                        Specific floor, building or nearby landmark
                       </label>
                       <input
                         type="text"
                         value={specificLandmark}
                         onChange={(e) => setSpecificLandmark(e.target.value)}
-                        placeholder="e.g. Near bus stop, opposite temple, 2nd floor..."
-                        className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="e.g. 2nd floor, opposite bus stand, near signal..."
+                        className="w-full px-3 py-2 text-sm rounded-lg border border-slate-200 text-slate-900 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-red-500"
                       />
                     </div>
 
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-semibold text-slate-700 block">Critical Conditions</label>
-                      <div className="grid grid-cols-2 gap-2">
-                        {[
-                          { label: "Patient is unconscious", state: flagUnconscious, setter: setFlagUnconscious },
-                          { label: "Difficulty breathing", state: flagBreathing, setter: setFlagBreathing },
-                          { label: "Severe bleeding", state: flagSevereBleeding, setter: setFlagSevereBleeding },
-                          { label: "Severe chest pain", state: flagChestPain, setter: setFlagChestPain },
-                        ].map((item, idx) => (
-                          <label
-                            key={idx}
-                            className={`flex items-center gap-2 p-2 rounded-lg border text-xs cursor-pointer transition ${
-                              item.state ? "bg-red-50 border-red-300 text-red-900 font-bold" : "bg-white border-slate-200 text-slate-700"
+                    <div className="space-y-1">
+                      <label className="text-xs sm:text-sm font-semibold text-slate-800 block">Number of injured people</label>
+                      <div className="grid grid-cols-4 gap-2">
+                        {["1", "2", "3+", "Unknown"].map((count) => (
+                          <button
+                            key={count}
+                            type="button"
+                            onClick={() => setInjuredCount(count)}
+                            className={`py-1.5 px-2 rounded-lg border text-xs sm:text-sm font-bold transition text-center cursor-pointer ${
+                              injuredCount === count
+                                ? "bg-blue-50 border-blue-500 text-blue-900 ring-1 ring-blue-300"
+                                : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
                             }`}
                           >
-                            <input
-                              type="checkbox"
-                              checked={item.state}
-                              onChange={(e) => item.setter(e.target.checked)}
-                              className="rounded text-red-600 focus:ring-red-500"
-                            />
-                            <span>{item.label}</span>
-                          </label>
+                            {count === "Unknown" ? "Unknown" : `${count} ${count === "1" ? "person" : "people"}`}
+                          </button>
                         ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-xs sm:text-sm font-semibold text-slate-800 block">Critical Condition Flags</label>
+                      <div className="grid grid-cols-2 gap-2 text-xs sm:text-sm">
+                        <label className="flex items-center gap-2 p-2.5 rounded-lg border border-slate-200 hover:bg-slate-50 cursor-pointer text-slate-800 font-medium">
+                          <input
+                            type="checkbox"
+                            checked={flagUnconscious}
+                            onChange={(e) => setFlagUnconscious(e.target.checked)}
+                            className="rounded text-red-600 focus:ring-red-500 w-4 h-4"
+                          />
+                          <span>Patient Unconscious</span>
+                        </label>
+                        <label className="flex items-center gap-2 p-2.5 rounded-lg border border-slate-200 hover:bg-slate-50 cursor-pointer text-slate-800 font-medium">
+                          <input
+                            type="checkbox"
+                            checked={flagBreathing}
+                            onChange={(e) => setFlagBreathing(e.target.checked)}
+                            className="rounded text-red-600 focus:ring-red-500 w-4 h-4"
+                          />
+                          <span>Breathing Difficulty</span>
+                        </label>
+                        <label className="flex items-center gap-2 p-2.5 rounded-lg border border-slate-200 hover:bg-slate-50 cursor-pointer text-slate-800 font-medium">
+                          <input
+                            type="checkbox"
+                            checked={flagSevereBleeding}
+                            onChange={(e) => setFlagSevereBleeding(e.target.checked)}
+                            className="rounded text-red-600 focus:ring-red-500 w-4 h-4"
+                          />
+                          <span>Severe Bleeding</span>
+                        </label>
                       </div>
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* Action: Send Emergency Request */}
-              <div className="pt-2">
+              {/* Primary Emergency Submission Button (Duplicate Click Protection) */}
+              <div className="pt-1">
                 <button
                   type="button"
-                  onClick={() => handleSubmitEmergency("TEXT")}
-                  disabled={isSubmitting}
-                  className={`w-full py-4 px-6 rounded-xl bg-red-600 hover:bg-red-700 text-white font-extrabold text-sm sm:text-base flex items-center justify-center gap-2 shadow-md shadow-red-200 transition active:scale-[0.99] cursor-pointer ${
-                    isSubmitting ? "opacity-75 cursor-not-allowed" : ""
+                  onClick={handleSubmitEmergency}
+                  disabled={!isFormValid || isSubmitting}
+                  className={`w-full py-4 px-6 rounded-xl font-black text-sm sm:text-base flex items-center justify-center gap-2.5 transition active:scale-[0.99] shadow-md ${
+                    isFormValid && !isSubmitting
+                      ? "bg-red-600 hover:bg-red-700 text-white shadow-red-200/80 cursor-pointer"
+                      : "bg-slate-200 text-slate-400 cursor-not-allowed shadow-none"
                   }`}
                 >
                   {isSubmitting ? (
@@ -1760,20 +1714,17 @@ export default function CitizenPortalPage() {
                     </>
                   )}
                 </button>
-              </div>
-
-              {/* Fallback Switcher */}
-              <div className="text-center pt-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSpokenTranscript(incidentDescription);
-                    setView("TALK");
-                  }}
-                  className="text-xs font-semibold text-slate-600 hover:text-red-600 underline"
-                >
-                  Prefer to speak? Switch to Talk for Help
-                </button>
+                {!isFormValid && (
+                  <p className="text-xs sm:text-sm text-slate-600 font-medium text-center mt-2">
+                    {!incidentDescription.trim()
+                      ? "Select Call 112 to speak or Text SOS to provide emergency details."
+                      : selectedCategory === "OTHER" && !customOtherType.trim()
+                      ? "Please specify the custom emergency type."
+                      : !isLocationValid
+                      ? "Please confirm emergency location."
+                      : "Complete required fields to send emergency SOS."}
+                  </p>
+                )}
               </div>
             </div>
           </div>
@@ -1781,10 +1732,10 @@ export default function CitizenPortalPage() {
       </main>
 
       {/* ============================================================== */}
-      {/* CANCELLATION CONFIRMATION MODAL                                */}
+      {/* CANCELLATION MODAL                                             */}
       {/* ============================================================== */}
       {isCancelModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs font-sans">
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-start justify-between">
               <div className="flex items-center gap-2 text-red-600">
@@ -1794,22 +1745,23 @@ export default function CitizenPortalPage() {
               <button
                 type="button"
                 onClick={() => setIsCancelModalOpen(false)}
-                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg"
+                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg cursor-pointer"
+                aria-label="Close modal"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <p className="text-xs text-slate-600 leading-relaxed">
+            <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
               Canceling will notify dispatchers and immediately release any dispatched ambulance crew and reserved hospital trauma beds back into public service.
             </p>
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-slate-700 block">
+              <label className="text-xs sm:text-sm font-semibold text-slate-700 block">
                 Reason for cancellation (optional):
               </label>
               <select
                 value={cancelReason}
                 onChange={(e) => setCancelReason(e.target.value)}
-                className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 text-slate-800 focus:outline-none focus:ring-2 focus:ring-red-500"
+                className="w-full px-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-200 bg-slate-50 text-slate-800 focus:outline-none focus:ring-2 focus:ring-red-500"
               >
                 <option value="">Select a common reason...</option>
                 <option value="Situation resolved on site">Situation resolved on site</option>
@@ -1823,7 +1775,7 @@ export default function CitizenPortalPage() {
               <button
                 type="button"
                 onClick={() => setIsCancelModalOpen(false)}
-                className="px-4 py-2 text-xs font-semibold rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 transition"
+                className="px-4 py-2 text-xs sm:text-sm font-semibold rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 transition cursor-pointer"
               >
                 Keep Active
               </button>
@@ -1831,7 +1783,7 @@ export default function CitizenPortalPage() {
                 type="button"
                 onClick={handleCancelIncident}
                 disabled={isCancelling}
-                className="px-4 py-2 text-xs font-bold rounded-xl bg-red-600 hover:bg-red-700 text-white transition flex items-center gap-1.5"
+                className="px-4 py-2 text-xs sm:text-sm font-bold rounded-xl bg-red-600 hover:bg-red-700 text-white transition flex items-center gap-1.5 cursor-pointer"
               >
                 {isCancelling ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : null}
                 <span>Confirm Cancellation</span>
@@ -1841,105 +1793,9 @@ export default function CitizenPortalPage() {
         </div>
       )}
 
-      {/* ============================================================== */}
-      {/* MISSING LOCATION MODAL (Shared Across Both Flows)               */}
-      {/* ============================================================== */}
-      {isLocationModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 sm:p-7 shadow-xl space-y-5 animate-in fade-in zoom-in-95 duration-150">
-            {/* Modal Header */}
-            <div className="flex items-start justify-between">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2 text-red-600">
-                  <MapPin className="w-5 h-5" />
-                  <h3 className="text-lg font-black text-slate-900 tracking-tight">We need your location</h3>
-                </div>
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  We couldn't automatically detect your location. Enter where you need emergency assistance so responders can find you.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsLocationModalOpen(false)}
-                className="text-slate-400 hover:text-slate-700 p-1 rounded-lg"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Manual Location Input */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-bold text-slate-700 block">
-                Address, area or nearby landmark
-              </label>
-              <div className="relative">
-                <input
-                  type="text"
-                  value={manualInput}
-                  onChange={(e) => setManualInput(e.target.value)}
-                  placeholder="Enter address, area or nearby landmark..."
-                  className="w-full pl-9 pr-3 py-2.5 text-xs sm:text-sm rounded-xl border border-slate-300 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500 transition"
-                />
-                <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              </div>
-            </div>
-
-            {/* Quick-Select Mangaluru Landmark Chips */}
-            <div className="space-y-2">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">
-                Or tap a Mangaluru landmark:
-              </span>
-              <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pr-1">
-                {MANGALURU_LANDMARKS.map((landmark) => {
-                  const isSelected = manualInput.includes(landmark.name);
-                  return (
-                    <button
-                      key={landmark.name}
-                      type="button"
-                      onClick={() => handleSelectLandmark(landmark)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition cursor-pointer ${
-                        isSelected
-                          ? "bg-red-50 border-red-400 text-red-800 font-bold"
-                          : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100"
-                      }`}
-                    >
-                      {landmark.name}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Modal Actions */}
-            <div className="space-y-2 pt-2">
-              <button
-                type="button"
-                onClick={handleConfirmManualLocation}
-                disabled={!manualInput.trim()}
-                className={`w-full py-3 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-xs transition ${
-                  !manualInput.trim() ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
-                }`}
-              >
-                <Check className="w-4 h-4" />
-                <span>Confirm location & continue</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => acquireGps(pendingFlow || undefined)}
-                className="w-full py-2.5 px-4 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
-              >
-                <Crosshair className={`w-3.5 h-3.5 text-blue-600 ${gpsStatus === "ACQUIRING" ? "animate-spin" : ""}`} />
-                <span>Try detecting location again</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Minimal Footer */}
-      <footer className="border-t border-slate-200 bg-white py-3 px-4 text-center text-[11px] text-slate-500">
-        LIFELINK Emergency Response Platform • Mangaluru District Administration & Health Services
+      {/* Footer */}
+      <footer className="border-t border-slate-200 bg-white py-3 px-4 text-center text-xs text-slate-600 font-medium">
+        ResQFlow Emergency Response Platform • Mangaluru District Administration & Health Services
       </footer>
     </div>
   );

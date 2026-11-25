@@ -330,6 +330,34 @@ def list_incidents(
 
     return query.order_by(Incident.triage_score.desc(), Incident.created_at.desc()).all()
 
+@router.get("/my-active", response_model=Optional[IncidentOut])
+def get_my_active_incident(
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Returns the authenticated citizen's most recent active (non-terminal) emergency incident.
+    Terminal statuses: RESOLVED, CANCELLED, CLOSED.
+    Scoped strictly to the authenticated user's ID.
+    If unauthenticated, raises 401. If no active incident, returns None (200 with null).
+    """
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to access your active emergency",
+        )
+    terminal_statuses = ["RESOLVED", "CANCELLED", "CLOSED"]
+    incident = (
+        db.query(Incident)
+        .filter(
+            Incident.reporter_user_id == current_user.id,
+            Incident.status.notin_(terminal_statuses),
+        )
+        .order_by(Incident.created_at.desc())
+        .first()
+    )
+    return incident
+
 @router.get("/{incident_id}", response_model=IncidentOut)
 def get_incident(
     incident_id: int,

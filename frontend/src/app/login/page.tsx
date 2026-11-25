@@ -152,6 +152,7 @@ export default function LoginPage() {
       if (typeof window !== "undefined") {
         localStorage.setItem("lifelink_token", token);
         localStorage.setItem("lifelink_user", JSON.stringify(user));
+        localStorage.removeItem("lifelink_active_incident_id");
         document.cookie = `lifelink_token=${token}; path=/; max-age=3600; SameSite=Lax`;
       }
 
@@ -161,6 +162,8 @@ export default function LoginPage() {
         router.push("/ambulance");
       } else if (user.role === "HOSPITAL_STAFF") {
         router.push("/hospital");
+      } else if (user.role === "DISPATCHER" || user.role === "SUPER_ADMIN") {
+        router.push("/dispatcher");
       } else {
         router.push("/dispatcher");
       }
