@@ -179,7 +179,12 @@ class Hospital(Base):
 
     @property
     def occupied_emergency_beds(self) -> int:
-        return max(0, (self.total_emergency_beds or 0) - (self.available_emergency_beds or 0))
+        return max(
+            0,
+            (self.total_emergency_beds or 0)
+            - (self.available_emergency_beds or 0)
+            - (self.reserved_emergency_beds or 0),
+        )
 
     @property
     def occupied_icu_beds(self) -> int:

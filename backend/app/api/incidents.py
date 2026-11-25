@@ -1,9 +1,10 @@
+import json
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
-from backend.app.models.entities import Incident, IncidentEvent, User, Dispatch, Ambulance, Hospital
+from backend.app.models.entities import Incident, IncidentEvent, User, Dispatch, Ambulance, Hospital, CrashAlert
 from backend.app.schemas.incident import (
     IncidentCreate,
     IncidentOut,
@@ -218,6 +219,26 @@ def create_incident(
     )
 
     if incident.is_collision_alert:
+        # Create authoritative CrashAlert record if not already present
+        existing_alert = db.query(CrashAlert).filter(CrashAlert.incident_id == incident.id).first()
+        if not existing_alert:
+            amb = db.query(Ambulance).first()
+            hosp = db.query(Hospital).first()
+            hardware_crash = CrashAlert(
+                ambulance_id=amb.id if amb else 1,
+                incident_id=incident.id,
+                hospital_id=hosp.id if hosp else 1,
+                source="ESP32_HARDWARE",
+                severity="CRITICAL",
+                latitude=incident.latitude,
+                longitude=incident.longitude,
+                location_description=incident.location_address or "ESP32 Hardware Trigger Site",
+                sensor_data_json=json.dumps({"source": "ESP32 Hardware Telemetry", "impact_detected": True}),
+                status="TRIGGERED",
+            )
+            db.add(hardware_crash)
+            db.commit()
+
         log_incident_event(
             db=db,
             incident_id=incident.id,

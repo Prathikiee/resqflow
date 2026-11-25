@@ -247,3 +247,75 @@ def test_triage_preview_and_compatibility(db: Session):
     assert res["triage_score"] >= 90
     assert len(res["justifications"]) > 0
     assert "Cardiology" in res["recommended_specialty"]
+
+
+def test_crash_alert_simulation_debouncing(db: Session):
+    """
+    Verifies that simulating a crash twice within 30 seconds for the same ambulance
+    debounces and returns the existing alert rather than creating a duplicate row.
+    """
+    ambulance = db.query(Ambulance).first()
+    p1 = CrashAlertSimulate(
+        ambulance_id=ambulance.id,
+        severity="CRITICAL",
+        location_description="Location A",
+    )
+    a1 = simulate_crash_alert(payload=p1, db=db)
+    initial_id = a1.id
+
+    p2 = CrashAlertSimulate(
+        ambulance_id=ambulance.id,
+        severity="CRITICAL",
+        location_description="Location B (updated)",
+    )
+    a2 = simulate_crash_alert(payload=p2, db=db)
+
+    assert a2.id == initial_id
+    assert a2.location_description == "Location B (updated)"
+
+
+def test_crash_alert_duplicate_resolution_cleanup(db: Session):
+    """
+    Verifies that marking an alert as RESOLVED also resolves sibling duplicate alerts
+    created within the same 60s burst for that ambulance.
+    """
+    ambulance = db.query(Ambulance).first()
+    hospital = db.query(Hospital).first()
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    a1 = CrashAlert(
+        ambulance_id=ambulance.id,
+        hospital_id=hospital.id,
+        source="DEMO_SIMULATION",
+        severity="CRITICAL",
+        latitude=12.8710,
+        longitude=74.8450,
+        status="TRIGGERED",
+        created_at=now,
+    )
+    a2 = CrashAlert(
+        ambulance_id=ambulance.id,
+        hospital_id=hospital.id,
+        source="DEMO_SIMULATION",
+        severity="CRITICAL",
+        latitude=12.8710,
+        longitude=74.8450,
+        status="TRIGGERED",
+        created_at=now + timedelta(seconds=2),
+    )
+    db.add_all([a1, a2])
+    db.commit()
+    db.refresh(a1)
+    db.refresh(a2)
+
+    respond_to_crash_alert(
+        alert_id=a1.id,
+        payload=CrashAlertResponseUpdate(status="RESOLVED", response_notes="Cleared scene"),
+        db=db,
+    )
+
+    db.refresh(a1)
+    db.refresh(a2)
+    assert a1.status == "RESOLVED"
+    assert a2.status == "RESOLVED"
+

@@ -274,25 +274,50 @@ def simulate_crash_alert(
     lat = ambulance.current_latitude if ambulance.current_latitude else 12.8710
     lng = ambulance.current_longitude if ambulance.current_longitude else 74.8450
 
-    alert = CrashAlert(
-        ambulance_id=ambulance.id,
-        incident_id=incident_id,
-        hospital_id=hospital_id,
-        dispatch_id=dispatch_id,
-        source="DEMO_SIMULATION",
-        severity=severity,
-        latitude=lat,
-        longitude=lng,
-        location_description=payload.location_description if payload and payload.location_description else f"MG Road / Ambedkar Circle intersection near {ambulance.call_sign}",
-        sensor_data_json=json.dumps(sensor_data),
-        status="TRIGGERED",
+    # Debouncing / deduplication for simulation: check for recent active simulated alert within last 30 seconds
+    cutoff_time = get_utc_now() - timedelta(seconds=30)
+    recent_alert = (
+        db.query(CrashAlert)
+        .filter(
+            CrashAlert.ambulance_id == ambulance.id,
+            CrashAlert.source == "DEMO_SIMULATION",
+            CrashAlert.status.in_(["TRIGGERED", "ACKNOWLEDGED", "TEAM_NOTIFIED", "BACKUP_REQUESTED"]),
+            CrashAlert.created_at >= cutoff_time,
+        )
+        .order_by(CrashAlert.created_at.desc())
+        .first()
     )
 
-    db.add(alert)
-    db.commit()
-    db.refresh(alert)
+    if recent_alert:
+        # Debounce: update existing active alert with refreshed telemetry instead of spawning duplicate rows
+        recent_alert.latitude = lat
+        recent_alert.longitude = lng
+        if payload and payload.location_description:
+            recent_alert.location_description = payload.location_description
+        recent_alert.sensor_data = sensor_data
+        recent_alert.updated_at = get_utc_now()
+        db.commit()
+        db.refresh(recent_alert)
+        alert = recent_alert
+    else:
+        alert = CrashAlert(
+            ambulance_id=ambulance.id,
+            incident_id=incident_id,
+            hospital_id=hospital_id,
+            dispatch_id=dispatch_id,
+            source="DEMO_SIMULATION",
+            severity=severity,
+            latitude=lat,
+            longitude=lng,
+            location_description=payload.location_description if payload and payload.location_description else f"MG Road / Ambedkar Circle intersection near {ambulance.call_sign}",
+            sensor_data_json=json.dumps(sensor_data),
+            status="TRIGGERED",
+        )
+        db.add(alert)
+        db.commit()
+        db.refresh(alert)
 
-    if incident_id:
+    if incident_id and not recent_alert:
         log_incident_event(
             db=db,
             incident_id=incident_id,
@@ -450,6 +475,30 @@ def respond_to_crash_alert(
     if not alert.acknowledged_at:
         alert.acknowledged_at = get_utc_now()
         alert.acknowledged_by = payload.acknowledged_by or (auth_user.email if auth_user else "Hospital ER Staff")
+
+    if alert.status == "RESOLVED":
+        # Safely resolve any sibling un-debounced duplicate records from the same burst
+        if alert.created_at:
+            time_lower = alert.created_at - timedelta(seconds=60)
+            time_upper = alert.created_at + timedelta(seconds=60)
+            sibling_duplicates = (
+                db.query(CrashAlert)
+                .filter(
+                    CrashAlert.id != alert.id,
+                    CrashAlert.ambulance_id == alert.ambulance_id,
+                    CrashAlert.source == alert.source,
+                    CrashAlert.status != "RESOLVED",
+                    CrashAlert.created_at >= time_lower,
+                    CrashAlert.created_at <= time_upper,
+                )
+                .all()
+            )
+            for sib in sibling_duplicates:
+                sib.status = "RESOLVED"
+                sib.acknowledged_at = sib.acknowledged_at or alert.acknowledged_at
+                sib.acknowledged_by = sib.acknowledged_by or alert.acknowledged_by
+                if payload.response_notes:
+                    sib.response_notes = (sib.response_notes or "") + f"\n[Resolved via alert #{alert.id}]"
 
     db.commit()
     db.refresh(alert)

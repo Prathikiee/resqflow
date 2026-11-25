@@ -276,7 +276,9 @@ export default function HospitalPortalPage() {
     accepting_emergencies: true,
   });
 
-  // Crash Alert Response note
+  // Crash Alert state
+  const [showResolvedHistory, setShowResolvedHistory] = useState(false);
+  const [isSimulatingCrash, setIsSimulatingCrash] = useState(false);
   const [crashNoteInput, setCrashNoteInput] = useState<{ [alertId: number]: string }>({});
   // Prep status note
   const [prepNoteInput, setPrepNoteInput] = useState<{ [dispatchId: number]: string }>({});
@@ -541,14 +543,28 @@ export default function HospitalPortalPage() {
   // =============================================================================
   const pendingRequests = useMemo(() => {
     return dispatches.filter(
-      (d) => d.coordination_status === "PENDING_CONFIRMATIONS" && d.hospital_confirmation_status === "PENDING"
+      (d) =>
+        d.coordination_status === "PENDING_CONFIRMATIONS" &&
+        d.hospital_confirmation_status === "PENDING" &&
+        d.status !== "CANCELLED"
     );
   }, [dispatches]);
 
   const activeInboundPatients = useMemo(() => {
-    return dispatches.filter(
-      (d) => d.coordination_status === "CONFIRMED" && d.status !== "COMPLETED" && d.status !== "CANCELLED"
+    const active = dispatches.filter(
+      (d) =>
+        d.coordination_status === "CONFIRMED" &&
+        !["COMPLETED", "CANCELLED", "CLOSED", "RESOLVED", "REASSIGNED"].includes(d.status)
     );
+    // Deduplicate by incident_id if multiple dispatches exist for the same incident
+    const seenIncidents = new Set<number>();
+    const deduplicated: typeof active = [];
+    for (const d of active) {
+      if (d.incident_id && seenIncidents.has(d.incident_id)) continue;
+      if (d.incident_id) seenIncidents.add(d.incident_id);
+      deduplicated.push(d);
+    }
+    return deduplicated;
   }, [dispatches]);
 
   const filteredInboundPatients = useMemo(() => {
@@ -564,11 +580,47 @@ export default function HospitalPortalPage() {
   }, [activeInboundPatients, patientsFilter]);
 
   const completedIncidents = useMemo(() => {
-    return dispatches.filter((d) => d.status === "COMPLETED");
+    return dispatches.filter((d) => ["COMPLETED", "CLOSED", "RESOLVED"].includes(d.status));
   }, [dispatches]);
 
   const activeCrashAlerts = useMemo(() => {
     return crashAlerts.filter((c) => c.status !== "RESOLVED");
+  }, [crashAlerts]);
+
+  const resolvedCrashAlerts = useMemo(() => {
+    return crashAlerts.filter((c) => c.status === "RESOLVED");
+  }, [crashAlerts]);
+
+  // Reliable crash event clustering & deduplication:
+  // Combines rapid repeat simulation/telemetry triggers for the same ambulance and source into distinct crash events
+  const distinctCrashEvents = useMemo(() => {
+    const rawActive = crashAlerts.filter((c) => c.status !== "RESOLVED");
+    const sorted = [...rawActive].sort((a, b) => {
+      const ta = new Date(a.created_at || 0).getTime();
+      const tb = new Date(b.created_at || 0).getTime();
+      return tb - ta;
+    });
+
+    const clusters: Array<CrashAlertRecord & { rawAlertIds: number[] }> = [];
+    for (const alert of sorted) {
+      const alertTime = new Date(alert.created_at || 0).getTime();
+      const existingCluster = clusters.find((cl) => {
+        if (cl.ambulance_id !== alert.ambulance_id) return false;
+        if (cl.source !== alert.source) return false;
+        const clTime = new Date(cl.created_at || 0).getTime();
+        return Math.abs(clTime - alertTime) <= 60000; // 60s burst cluster window
+      });
+
+      if (existingCluster) {
+        existingCluster.rawAlertIds.push(alert.id);
+      } else {
+        clusters.push({
+          ...alert,
+          rawAlertIds: [alert.id],
+        });
+      }
+    }
+    return clusters;
   }, [crashAlerts]);
 
   // Active pending request countdown
@@ -600,11 +652,16 @@ export default function HospitalPortalPage() {
     return doctors.filter((d) => d.is_available);
   }, [doctors]);
 
-  // Bed Metrics
+  // Bed Metrics - prevents double-counting reserved beds
   const erBeds = hospital?.bed_capacity_breakdown?.emergency || {
     total: hospital?.total_emergency_beds ?? 20,
     available: hospital?.available_emergency_beds ?? 10,
-    occupied: (hospital?.total_emergency_beds ?? 20) - (hospital?.available_emergency_beds ?? 10),
+    occupied: Math.max(
+      0,
+      (hospital?.total_emergency_beds ?? 20) -
+        (hospital?.available_emergency_beds ?? 10) -
+        (hospital?.reserved_emergency_beds ?? 0)
+    ),
     reserved: hospital?.reserved_emergency_beds ?? 0,
     unavailable: 0,
   };
@@ -612,7 +669,10 @@ export default function HospitalPortalPage() {
   const icuBeds = hospital?.bed_capacity_breakdown?.icu || {
     total: hospital?.total_icu_beds ?? 10,
     available: hospital?.available_icu_beds ?? 5,
-    occupied: (hospital?.total_icu_beds ?? 10) - (hospital?.available_icu_beds ?? 5),
+    occupied: Math.max(
+      0,
+      (hospital?.total_icu_beds ?? 10) - (hospital?.available_icu_beds ?? 5)
+    ),
     reserved: 0,
     unavailable: 0,
   };
@@ -1098,6 +1158,8 @@ export default function HospitalPortalPage() {
 
   // 9. Crash Alert Handlers (Simulation & Response)
   const handleSimulateCrash = async () => {
+    if (isSimulatingCrash || actionLoading) return;
+    setIsSimulatingCrash(true);
     setActionLoading(true);
     const token = localStorage.getItem("lifelink_token");
     try {
@@ -1112,21 +1174,25 @@ export default function HospitalPortalPage() {
           location_description: `MG Road / Bunts Hostel Intersection near ${hospital?.name || "Hospital"}`,
         }),
       });
-      if (resp.ok) {
-        const alert = await resp.json();
-        setFeedbackMsg({
-          text: `CRASH ALERT SIMULATED: Unit ${alert.ambulance_call_sign || `#${alert.ambulance_id}`} reported critical impact!`,
-          type: "error",
-        });
-        await fetchHospitalData();
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.detail || `Server returned HTTP ${resp.status}`);
       }
-    } catch (_) {
+      const alert = await resp.json();
+      setFeedbackMsg({
+        text: `CRASH ALERT SIMULATED: Unit ${alert.ambulance_call_sign || `#${alert.ambulance_id}`} reported critical impact! Telemetry updated.`,
+        type: "error",
+      });
+      await fetchHospitalData();
+    } catch (err: any) {
+      setFeedbackMsg({ text: `Simulation error: ${err.message}`, type: "error" });
     } finally {
+      setIsSimulatingCrash(false);
       setActionLoading(false);
     }
   };
 
-  const handleRespondCrashAlert = async (alertId: number, status: string) => {
+  const handleRespondCrashAlert = async (alertId: number, status: string, siblingIds?: number[]) => {
     setActionLoading(true);
     const token = localStorage.getItem("lifelink_token");
     const notes = crashNoteInput[alertId] || "";
@@ -1144,12 +1210,47 @@ export default function HospitalPortalPage() {
           acknowledged_by: user?.full_name || handoverClinicianName,
         }),
       });
-      if (resp.ok) {
-        setFeedbackMsg({ text: `Crash Alert #${alertId} updated to '${status}'.`, type: "success" });
-        setCrashNoteInput((prev) => ({ ...prev, [alertId]: "" }));
-        await fetchHospitalData();
+
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.detail || `Failed to update alert #${alertId} (${resp.status})`);
       }
-    } catch (_) {
+
+      // If resolving and sibling duplicate IDs exist, resolve them as well for full cluster consistency
+      if (status === "RESOLVED" && siblingIds && siblingIds.length > 1) {
+        for (const sibId of siblingIds) {
+          if (sibId !== alertId) {
+            await fetch(`${backendUrl}/api/crash-alerts/${sibId}/respond`, {
+              method: "PATCH",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                status: "RESOLVED",
+                response_notes: "Cluster resolved",
+                acknowledged_by: user?.full_name || handoverClinicianName,
+              }),
+            }).catch(() => {});
+          }
+        }
+      }
+
+      const statusLabels: Record<string, string> = {
+        ACKNOWLEDGED: "ACKNOWLEDGED",
+        TEAM_NOTIFIED: "NOTIFIED TRAUMA TEAM",
+        BACKUP_REQUESTED: "BACKUP UNIT REQUESTED",
+        RESOLVED: "RESOLVED",
+      };
+
+      setFeedbackMsg({
+        text: `Ambulance Crash Alert #${alertId} successfully marked as ${statusLabels[status] || status}.`,
+        type: "success",
+      });
+      setCrashNoteInput((prev) => ({ ...prev, [alertId]: "" }));
+      await fetchHospitalData();
+    } catch (err: any) {
+      setFeedbackMsg({ text: `Crash alert update error: ${err.message}`, type: "error" });
     } finally {
       setActionLoading(false);
     }
@@ -1273,14 +1374,14 @@ export default function HospitalPortalPage() {
         )}
 
         {/* CRITICAL OPERATIONAL ALERT: Active Crash Alerts Banner */}
-        {activeCrashAlerts.length > 0 && (
+        {distinctCrashEvents.length > 0 && (
           <div className="mx-4 sm:mx-6 mt-4 p-4 rounded-xl border-2 border-red-500 bg-red-50 shadow-sm animate-pulse">
             <div className="flex items-start justify-between">
               <div className="flex items-center gap-3">
                 <AlertTriangle className="w-6 h-6 text-red-600 flex-shrink-0" />
                 <div>
                   <h4 className="text-sm font-bold text-red-900">
-                    CRITICAL COLLISION TELEMETRY: {activeCrashAlerts.length} Ambulance Crash Alert(s) Detected!
+                    CRITICAL COLLISION TELEMETRY: {distinctCrashEvents.length} Ambulance Crash Alert{distinctCrashEvents.length === 1 ? "" : "s"} Detected!
                   </h4>
                   <p className="text-xs text-red-700 mt-0.5">
                     Impact sensors triggered on unit(s) transporting to this facility. Immediate emergency response protocol required.
@@ -1350,57 +1451,55 @@ export default function HospitalPortalPage() {
                 </div>
               </div>
 
-              {/* Dedicated AMBULANCE COLLISION ALERTS Section */}
+              {/* Unified AMBULANCE COLLISION ALERTS Section */}
               <div className="bg-white rounded-xl border border-red-200 shadow-sm p-4 space-y-3">
-                <div className="flex items-center justify-between border-b border-red-100 pb-2">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-red-100 pb-2">
                   <div className="flex items-center gap-2 text-red-700 font-bold text-sm">
                     <ShieldAlert className="w-4 h-4 text-red-600 animate-pulse" />
-                    <span>AMBULANCE COLLISION ALERTS</span>
+                    <span>AMBULANCE COLLISION ALERTS & TELEMETRY</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    {!collisionLoading && (
-                      <span className="text-xs font-semibold px-2 py-0.5 bg-red-100 text-red-800 rounded-full">
-                        {collisionAlerts.length} Event{collisionAlerts.length === 1 ? "" : "s"}
+                    {distinctCrashEvents.length > 0 ? (
+                      <span className="text-xs font-bold px-2.5 py-0.5 bg-red-100 text-red-800 rounded-full border border-red-300 animate-pulse">
+                        {distinctCrashEvents.length} Active Collision Event{distinctCrashEvents.length === 1 ? "" : "s"} ({distinctCrashEvents.length} Unresolved)
                       </span>
+                    ) : (
+                      <span className="text-xs font-medium px-2.5 py-0.5 bg-emerald-50 text-emerald-700 rounded-full border border-emerald-200">
+                        0 Active (Monitoring)
+                      </span>
+                    )}
+                    {resolvedCrashAlerts.length > 0 && (
+                      <button
+                        onClick={() => setShowResolvedHistory((prev) => !prev)}
+                        className="text-xs text-slate-500 hover:text-slate-800 font-medium px-2 py-0.5 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 flex items-center gap-1 transition"
+                      >
+                        <History className="w-3 h-3" />
+                        {showResolvedHistory ? "Hide Resolved" : `Resolved (${resolvedCrashAlerts.length})`}
+                      </button>
                     )}
                   </div>
                 </div>
 
-                {collisionLoading && collisionAlerts.length === 0 ? (
+                {isLoading && distinctCrashEvents.length === 0 ? (
                   <div className="p-6 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-center gap-2 text-slate-500 text-xs">
                     <RefreshCw className="w-4 h-4 animate-spin text-red-600" />
                     <span>Connecting to ambulance collision telemetry stream...</span>
                   </div>
-                ) : collisionError && collisionAlerts.length === 0 ? (
-                  <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                    <div className="flex items-center gap-2 text-red-800">
-                      <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
-                      <span>Telemetry connection error: {collisionError}. Retrying in background...</span>
-                    </div>
-                    <button
-                      onClick={() => {
-                        setCollisionLoading(true);
-                        fetchCollisionAlerts();
-                      }}
-                      className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white font-bold rounded shadow-sm self-start sm:self-auto transition"
-                    >
-                      Retry Connection
-                    </button>
-                  </div>
-                ) : collisionAlerts.length === 0 ? (
+                ) : distinctCrashEvents.length === 0 ? (
                   <div className="p-4 bg-slate-50 border border-dashed border-slate-200 rounded-lg text-center text-slate-500 text-xs">
                     <Radio className="w-4 h-4 text-slate-400 mx-auto mb-1 animate-pulse" />
-                    No active ambulance collision alerts detected. System is actively listening for ESP32 hardware triggers.
+                    No active ambulance collision alerts detected. System is actively listening for ESP32 hardware triggers and impact telemetry.
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {collisionAlerts.map((alert) => {
-                      const latNum = Number(alert.latitude ?? 12.899259);
-                      const lonNum = Number(alert.longitude ?? 74.984388);
-                      const latStr = isNaN(latNum) ? "12.899259" : latNum.toFixed(6);
-                      const lonStr = isNaN(lonNum) ? "74.984388" : lonNum.toFixed(6);
+                    {distinctCrashEvents.map((alert) => {
+                      const latNum = Number(alert.latitude ?? 12.8710);
+                      const lonNum = Number(alert.longitude ?? 74.8450);
+                      const latStr = isNaN(latNum) ? "12.871000" : latNum.toFixed(6);
+                      const lonStr = isNaN(lonNum) ? "74.845000" : lonNum.toFixed(6);
                       const mapUrl = `https://www.google.com/maps?q=${latStr},${lonStr}`;
                       const osmUrl = `https://www.openstreetmap.org/?mlat=${latStr}&mlon=${lonStr}#map=16/${latStr}/${lonStr}`;
+                      const sensor = alert.sensor_data || {};
 
                       return (
                         <div
@@ -1408,17 +1507,42 @@ export default function HospitalPortalPage() {
                           className="p-4 bg-gradient-to-r from-red-50/80 via-white to-red-50/40 rounded-xl border-2 border-red-300 shadow-sm space-y-3"
                         >
                           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-red-100 pb-2">
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-2">
                               <span className="text-lg">🚨</span>
                               <span className="text-sm font-extrabold text-red-900 tracking-tight">
-                                Ambulance Collision Detected
+                                Unit #{alert.ambulance_id} ({alert.ambulance_call_sign || "ALS Unit"})
                               </span>
+                              {alert.source === "DEMO_SIMULATION" ? (
+                                <span className="text-[10px] font-bold px-2 py-0.5 bg-purple-100 text-purple-700 rounded border border-purple-200">
+                                  Simulation
+                                </span>
+                              ) : (
+                                <span className="text-[10px] font-bold px-2 py-0.5 bg-red-100 text-red-700 rounded border border-red-200">
+                                  Hardware Telemetry (ESP32)
+                                </span>
+                              )}
+                              {alert.rawAlertIds && alert.rawAlertIds.length > 1 && (
+                                <span className="text-[10px] font-medium px-2 py-0.5 bg-slate-100 text-slate-600 rounded border border-slate-200">
+                                  Deduplicated ({alert.rawAlertIds.length} triggers)
+                                </span>
+                              )}
                             </div>
                             <div className="flex items-center gap-2">
                               <span className="text-xs font-mono font-bold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
-                                Incident ID: #{alert.id}
+                                Alert #{alert.id}
                               </span>
-                              <span className="text-xs font-bold px-2 py-0.5 bg-red-600 text-white rounded">
+                              <span
+                                className={`text-xs font-bold px-2 py-0.5 rounded ${
+                                  alert.severity === "CRITICAL"
+                                    ? "bg-red-600 text-white"
+                                    : alert.severity === "SEVERE"
+                                      ? "bg-amber-600 text-white"
+                                      : "bg-blue-600 text-white"
+                                }`}
+                              >
+                                {alert.severity} IMPACT
+                              </span>
+                              <span className="text-xs font-bold px-2 py-0.5 bg-slate-800 text-white rounded">
                                 {alert.status}
                               </span>
                             </div>
@@ -1427,27 +1551,43 @@ export default function HospitalPortalPage() {
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
                             <div className="space-y-1 bg-white/80 p-2.5 rounded-lg border border-red-100">
                               <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
-                                Detection Date & Time
+                                Detection Date & Time & Telemetry
                               </div>
                               <div className="font-semibold text-slate-800 flex items-center gap-1.5">
                                 <Clock className="w-3.5 h-3.5 text-red-600 shrink-0" />
                                 <span>{formatCollisionTimeIST(alert.created_at)}</span>
                               </div>
-                              <div className="text-[11px] text-slate-500">
-                                Source: ESP32 Hardware Trigger
+                              <div className="text-[11px] text-slate-600 pt-1 space-y-0.5">
+                                {sensor.g_force !== undefined && (
+                                  <div>
+                                    G-Force: <strong>{sensor.g_force}g</strong>
+                                  </div>
+                                )}
+                                {sensor.impact_velocity_kmh !== undefined && (
+                                  <div>
+                                    Impact Velocity: <strong>{sensor.impact_velocity_kmh} km/h</strong>
+                                  </div>
+                                )}
+                                {sensor.airbag_deployed !== undefined && (
+                                  <div>
+                                    Airbag: <strong>{sensor.airbag_deployed ? "DEPLOYED" : "Not Deployed"}</strong>
+                                  </div>
+                                )}
                               </div>
                             </div>
 
                             <div className="space-y-1 bg-white/80 p-2.5 rounded-lg border border-red-100">
                               <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">
-                                Fixed Collision Coordinates & Site
+                                Collision Site & Route Coordinates
                               </div>
                               <div className="font-semibold text-slate-900 flex items-center gap-1.5">
-                                <MapPin className="w-3.5 h-3.5 text-red-600" />
-                                <span>{alert.location_address || "Canara Engineering College"}</span>
+                                <MapPin className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                                <span>{alert.location_description || "Near Hospital Transport Corridor"}</span>
                               </div>
-                              <div className="flex items-center justify-between text-[11px] text-slate-600">
-                                <span className="font-mono">Lat: {latStr}, Lon: {lonStr}</span>
+                              <div className="flex items-center justify-between text-[11px] text-slate-600 pt-1">
+                                <span className="font-mono">
+                                  Lat: {latStr}, Lon: {lonStr}
+                                </span>
                                 <div className="flex items-center gap-2">
                                   <a
                                     href={mapUrl}
@@ -1471,80 +1611,79 @@ export default function HospitalPortalPage() {
                             </div>
                           </div>
 
-                          {(() => {
-                            const rawComplaint = alert.chief_complaint || "";
-                            const complaintText =
-                              rawComplaint === "SIMULATED AMBULANCE COLLISION - triggered by physical ESP32 button" ||
-                                rawComplaint.includes("SIMULATED AMBULANCE COLLISION")
-                                ? "Ambulance collision detected. Emergency response required."
-                                : rawComplaint;
+                          {alert.response_notes && (
+                            <div className="text-xs bg-slate-50 border border-slate-200 rounded p-2 text-slate-700 font-mono whitespace-pre-wrap">
+                              <span className="font-bold text-slate-900 block mb-0.5">Response Log:</span>
+                              {alert.response_notes}
+                            </div>
+                          )}
 
-                            return complaintText ? (
-                              <div className="text-xs bg-red-100/60 p-2 rounded-lg text-red-950 font-medium border border-red-200/60">
-                                {complaintText}
-                              </div>
-                            ) : null;
-                          })()}
+                          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-red-100">
+                            <button
+                              onClick={() => handleRespondCrashAlert(alert.id, "ACKNOWLEDGED", alert.rawAlertIds)}
+                              disabled={actionLoading}
+                              className="text-xs px-2.5 py-1 bg-white border border-slate-300 rounded font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                            >
+                              Acknowledge
+                            </button>
+                            <button
+                              onClick={() => handleRespondCrashAlert(alert.id, "TEAM_NOTIFIED", alert.rawAlertIds)}
+                              disabled={actionLoading}
+                              className="text-xs px-2.5 py-1 bg-blue-600 text-white rounded font-semibold hover:bg-blue-700 disabled:opacity-50"
+                            >
+                              Notify Trauma Team
+                            </button>
+                            <button
+                              onClick={() => handleRespondCrashAlert(alert.id, "BACKUP_REQUESTED", alert.rawAlertIds)}
+                              disabled={actionLoading}
+                              className="text-xs px-2.5 py-1 bg-amber-600 text-white rounded font-semibold hover:bg-amber-700 disabled:opacity-50"
+                            >
+                              Request Backup Unit
+                            </button>
+                            <button
+                              onClick={() => handleRespondCrashAlert(alert.id, "RESOLVED", alert.rawAlertIds)}
+                              disabled={actionLoading}
+                              className="text-xs px-2.5 py-1 bg-emerald-600 text-white rounded font-semibold hover:bg-emerald-700 disabled:opacity-50"
+                            >
+                              Mark Resolved
+                            </button>
+                          </div>
                         </div>
                       );
                     })}
                   </div>
                 )}
-              </div>
 
-              {/* Crash Alerts Telemetry Card if present */}
-              {activeCrashAlerts.length > 0 && (
-                <div className="bg-white rounded-xl border border-red-200 shadow-sm p-4 space-y-3">
-                  <div className="flex items-center justify-between border-b border-red-100 pb-2">
-                    <div className="flex items-center gap-2 text-red-700 font-bold text-sm">
-                      <AlertTriangle className="w-4 h-4" />
-                      Active Crash & Impact Events
+                {/* Optional Resolved Collision History Section */}
+                {showResolvedHistory && resolvedCrashAlerts.length > 0 && (
+                  <div className="mt-4 pt-3 border-t border-slate-200 space-y-2">
+                    <div className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                      <History className="w-3.5 h-3.5 text-slate-500" />
+                      <span>Persistent History — Resolved Collision Events ({resolvedCrashAlerts.length})</span>
                     </div>
-                    <span className="text-xs font-semibold px-2 py-0.5 bg-red-100 text-red-800 rounded-full">
-                      {activeCrashAlerts.length} Unresolved
-                    </span>
-                  </div>
-                  <div className="space-y-3">
-                    {activeCrashAlerts.map((alert) => (
-                      <div key={alert.id} className="p-3 bg-red-50/50 rounded-lg border border-red-100 space-y-2">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="font-bold text-red-900">
-                            Unit #{alert.ambulance_id} ({alert.ambulance_call_sign || "ALS Unit"})
+                    <div className="space-y-2 max-h-60 overflow-y-auto">
+                      {resolvedCrashAlerts.map((rAlert) => (
+                        <div
+                          key={rAlert.id}
+                          className="p-2.5 bg-slate-50 rounded-lg border border-slate-200 text-xs flex items-center justify-between"
+                        >
+                          <div>
+                            <div className="font-semibold text-slate-800">
+                              Unit #{rAlert.ambulance_id} ({rAlert.ambulance_call_sign || "ALS Unit"}) — {rAlert.severity}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {rAlert.location_description || "Near Hospital"} • {formatCollisionTimeIST(rAlert.created_at)}
+                            </div>
+                          </div>
+                          <span className="text-[10px] font-bold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded">
+                            RESOLVED
                           </span>
-                          <span className="text-red-700 font-semibold">{alert.severity} IMPACT</span>
                         </div>
-                        <p className="text-xs text-slate-600">{alert.location_description || "Near Hospital Route"}</p>
-                        <div className="flex flex-wrap items-center gap-2 pt-1">
-                          <button
-                            onClick={() => handleRespondCrashAlert(alert.id, "ACKNOWLEDGED")}
-                            className="text-xs px-2.5 py-1 bg-white border border-slate-300 rounded font-semibold text-slate-700 hover:bg-slate-50"
-                          >
-                            Acknowledge
-                          </button>
-                          <button
-                            onClick={() => handleRespondCrashAlert(alert.id, "TEAM_NOTIFIED")}
-                            className="text-xs px-2.5 py-1 bg-blue-600 text-white rounded font-semibold hover:bg-blue-700"
-                          >
-                            Notify Trauma Team
-                          </button>
-                          <button
-                            onClick={() => handleRespondCrashAlert(alert.id, "BACKUP_REQUESTED")}
-                            className="text-xs px-2.5 py-1 bg-amber-600 text-white rounded font-semibold hover:bg-amber-700"
-                          >
-                            Request Backup Unit
-                          </button>
-                          <button
-                            onClick={() => handleRespondCrashAlert(alert.id, "RESOLVED")}
-                            className="text-xs px-2.5 py-1 bg-emerald-600 text-white rounded font-semibold hover:bg-emerald-700"
-                          >
-                            Mark Resolved
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
 
               {/* Pending Actions Alert Box */}
               {pendingRequests.length > 0 && (
@@ -1748,10 +1887,17 @@ export default function HospitalPortalPage() {
                 </div>
                 <button
                   onClick={handleSimulateCrash}
-                  disabled={actionLoading}
-                  className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg shadow-sm"
+                  disabled={isSimulatingCrash || actionLoading}
+                  className="px-3.5 py-1.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg shadow-sm flex items-center gap-1.5 disabled:opacity-50 transition"
                 >
-                  Simulate Ambulance Crash
+                  {isSimulatingCrash ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Simulating Crash...</span>
+                    </>
+                  ) : (
+                    <span>Simulate Ambulance Crash</span>
+                  )}
                 </button>
               </div>
             </div>
