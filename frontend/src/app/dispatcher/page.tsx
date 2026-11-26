@@ -27,7 +27,6 @@ import {
   Phone,
   Radio,
   RefreshCw,
-  RotateCcw,
   Search,
   Server,
   Shield,
@@ -486,26 +485,6 @@ export default function DispatcherCommandCenterPage() {
     } catch (_) {}
   };
 
-  const handleSeedReset = async () => {
-    if (!confirm("Reset database to clean Mangaluru demonstration state?")) return;
-    try {
-      const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
-      const res = await fetch(`${backendUrl}/api/seed`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-      });
-      if (res.ok) {
-        alert("Database successfully reset and seeded!");
-        await fetchData();
-      }
-    } catch (e) {
-      alert("Reset error: " + e);
-    }
-  };
-
   const handleLogout = () => {
     localStorage.removeItem("lifelink_token");
     localStorage.removeItem("lifelink_user");
@@ -578,22 +557,13 @@ export default function DispatcherCommandCenterPage() {
           wsConnected={wsConnected}
           onMenuToggle={() => setIsMobileMenuOpen(true)}
           actions={
-            <>
-              <button
-                onClick={() => setIsRegistrationOpen(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition shadow-2xs"
-              >
-                <FilePlus2 className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">New Incident</span>
-              </button>
-              <button
-                onClick={handleSeedReset}
-                className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-900 hover:bg-slate-50 transition"
-                title="Reset Database to Demonstration State"
-              >
-                <RotateCcw className="w-4 h-4" />
-              </button>
-            </>
+            <button
+              onClick={() => setIsRegistrationOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition shadow-2xs"
+            >
+              <FilePlus2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">New Incident</span>
+            </button>
           }
         />
 

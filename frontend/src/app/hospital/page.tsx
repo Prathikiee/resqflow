@@ -262,7 +262,8 @@ export default function HospitalPortalPage() {
   const [editingDepartment, setEditingDepartment] = useState<Department | null>(null);
   const [capabilitiesState, setCapabilitiesState] = useState<{ [key: string]: string }>({});
 
-  // Incoming Patients Filter
+  // Unified Inbound Queue Filter
+  const [inboundFilter, setInboundFilter] = useState<"ALL" | "PENDING" | "EN_ROUTE" | "ARRIVING_SOON" | "ARRIVED" | "COMPLETED">("ALL");
   const [patientsFilter, setPatientsFilter] = useState<"ALL" | "PRIORITY_1" | "INCOMING" | "ARRIVING_SOON" | "HANDOVER_PENDING">("ALL");
 
   // Handover & History Tabs & Filters
@@ -610,6 +611,66 @@ export default function HospitalPortalPage() {
   const completedIncidents = useMemo(() => {
     return dispatches.filter((d) => ["COMPLETED", "CLOSED", "RESOLVED"].includes(d.status));
   }, [dispatches]);
+
+  // Unified Inbound Emergency Workflow List (Requests + Confirmed Inbound + Arrived + Completed)
+  type UnifiedInboundItem = {
+    dispatch: DispatchRecord;
+    workflowType: "PENDING_REQUEST" | "ACTIVE_INBOUND" | "ARRIVED" | "COMPLETED";
+  };
+
+  const unifiedInboundItems = useMemo<UnifiedInboundItem[]>(() => {
+    const list: UnifiedInboundItem[] = [];
+    const seenIncidentIds = new Set<number>();
+
+    // 1. Pending reservation requests first
+    for (const req of pendingRequests) {
+      const incId = req.incident_id || req.id;
+      seenIncidentIds.add(incId);
+      list.push({ dispatch: req, workflowType: "PENDING_REQUEST" });
+    }
+
+    // 2. Confirmed and active inbound / arrived patients
+    for (const disp of activeInboundPatients) {
+      const incId = disp.incident_id || disp.id;
+      if (seenIncidentIds.has(incId)) continue;
+      seenIncidentIds.add(incId);
+
+      const isArrived = disp.status === "AT_HOSPITAL" || !!disp.patient_arrived_hospital_confirmed_at;
+      list.push({
+        dispatch: disp,
+        workflowType: isArrived ? "ARRIVED" : "ACTIVE_INBOUND",
+      });
+    }
+
+    // 3. Completed cases
+    for (const comp of completedIncidents) {
+      const incId = comp.incident_id || comp.id;
+      if (seenIncidentIds.has(incId)) continue;
+      seenIncidentIds.add(incId);
+      list.push({ dispatch: comp, workflowType: "COMPLETED" });
+    }
+
+    return list;
+  }, [pendingRequests, activeInboundPatients, completedIncidents]);
+
+  const filteredInboundList = useMemo(() => {
+    return unifiedInboundItems.filter((item) => {
+      const d = item.dispatch;
+      const isPending = item.workflowType === "PENDING_REQUEST";
+      const isArrived = item.workflowType === "ARRIVED";
+      const isCompleted = item.workflowType === "COMPLETED";
+      const isEnRoute = !isPending && !isArrived && !isCompleted && ["EN_ROUTE_SCENE", "AT_SCENE", "EN_ROUTE_HOSPITAL"].includes(d.status);
+      const isArrivingSoon = !isPending && !isArrived && !isCompleted && ((d.estimated_eta_seconds ?? 9999) <= 300 || d.status === "EN_ROUTE_HOSPITAL");
+
+      if (inboundFilter === "PENDING") return isPending;
+      if (inboundFilter === "EN_ROUTE") return isEnRoute;
+      if (inboundFilter === "ARRIVING_SOON") return isArrivingSoon;
+      if (inboundFilter === "ARRIVED") return isArrived;
+      if (inboundFilter === "COMPLETED") return isCompleted;
+      // "ALL": show active workflow (pending + en route + arriving + arrived)
+      return !isCompleted;
+    });
+  }, [unifiedInboundItems, inboundFilter]);
 
   const activeCrashAlerts = useMemo(() => {
     return crashAlerts.filter((c) => c.status !== "RESOLVED");
@@ -1297,16 +1358,10 @@ export default function HospitalPortalPage() {
   const sidebarNavItems: NavItem[] = [
     { id: "overview", label: "Overview", icon: LayoutDashboard },
     {
-      id: "requests",
-      label: "Incoming Requests",
-      icon: Radio,
-      count: pendingRequests.length > 0 ? pendingRequests.length : undefined,
-    },
-    {
-      id: "patients",
-      label: "Incoming Patients",
+      id: "incoming",
+      label: "Inbound Emergencies",
       icon: Ambulance,
-      count: activeInboundPatients.length > 0 ? activeInboundPatients.length : undefined,
+      count: (pendingRequests.length + activeInboundPatients.length) > 0 ? (pendingRequests.length + activeInboundPatients.length) : undefined,
     },
     {
       id: "doctors",
@@ -1741,7 +1796,10 @@ export default function HospitalPortalPage() {
                         </button>
                       )}
                       <button
-                        onClick={() => setCurrentNav("requests")}
+                        onClick={() => {
+                          setCurrentNav("incoming");
+                          setInboundFilter("PENDING");
+                        }}
                         className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-lg shadow-sm"
                       >
                         Review Requests
@@ -1759,10 +1817,13 @@ export default function HospitalPortalPage() {
                     <h3 className="text-sm font-bold text-slate-900">Inbound Emergency Queue</h3>
                   </div>
                   <button
-                    onClick={() => setCurrentNav("patients")}
+                    onClick={() => {
+                      setCurrentNav("incoming");
+                      setInboundFilter("ALL");
+                    }}
                     className="text-xs font-semibold text-blue-600 hover:text-blue-700 flex items-center gap-1"
                   >
-                    View All Patients <ChevronRight className="w-3.5 h-3.5" />
+                    View All Inbound <ChevronRight className="w-3.5 h-3.5" />
                   </button>
                 </div>
 
@@ -1933,218 +1994,241 @@ export default function HospitalPortalPage() {
             </div>
           )}
 
-          {/* SECTION 2: INCOMING REQUESTS */}
-          {currentNav === "requests" && (
-            <div className="space-y-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-900">Incoming Reservation Requests</h2>
-                  <p className="text-xs text-slate-500">
-                    Provisional emergency bed reservations awaiting dual confirmation from hospital clinical staff.
-                  </p>
-                </div>
-                <span className="text-xs font-bold px-2.5 py-1 bg-amber-50 text-amber-800 border border-amber-200 rounded-lg">
-                  {pendingRequests.length} Pending
-                </span>
-              </div>
-
-              {pendingRequests.length === 0 ? (
-                <div className="bg-white p-12 rounded-xl border border-slate-200 text-center space-y-3">
-                  <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center mx-auto">
-                    <CheckCircle2 className="w-6 h-6" />
-                  </div>
-                  <h3 className="text-sm font-bold text-slate-800">No Pending Requests</h3>
-                  <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                    All emergency dispatches have been handled or no incoming requests are currently awaiting your facility's response.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {pendingRequests.map((req) => {
-                    const reqRemainingSec = req.reservation_expires_at
-                      ? Math.max(0, Math.floor((new Date(req.reservation_expires_at).getTime() - nowMs) / 1000))
-                      : null;
-                    return (
-                    <div
-                      key={req.id}
-                      className="bg-white rounded-xl border-2 border-amber-300 shadow-sm p-5 space-y-4"
-                    >
-                      {/* Top Header & Countdown */}
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`text-xs font-bold px-2.5 py-1 rounded-md ${req.incident?.triage_color === "RED"
-                                ? "bg-red-100 text-red-800"
-                                : req.incident?.triage_color === "YELLOW"
-                                  ? "bg-amber-100 text-amber-800"
-                                  : "bg-emerald-100 text-emerald-800"
-                              }`}
-                          >
-                            {req.incident?.triage_level || "Priority 1"}
-                          </span>
-                          <span className="text-sm font-bold text-slate-900">
-                            Incident #{req.incident_id} • Unit {req.ambulance_call_sign || `#${req.ambulance_id}`}
-                          </span>
-                        </div>
-
-                        {reqRemainingSec !== null && (
-                          <div
-                            className={`flex items-center gap-2 text-xs font-bold px-3 py-1 rounded-full border ${
-                              reqRemainingSec <= 15
-                                ? "text-red-700 bg-red-50 border-red-200 animate-pulse"
-                                : "text-amber-700 bg-amber-50 border-amber-200"
-                            }`}
-                          >
-                            <Clock className="w-3.5 h-3.5" />
-                            <span>TTL: {reqRemainingSec}s Remaining</span>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Incident & Patient Breakdown */}
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                        <div className="space-y-1">
-                          <span className="text-slate-400 font-semibold uppercase text-[10px]">Chief Complaint</span>
-                          <p className="font-bold text-slate-900">{req.incident?.chief_complaint || "Acute medical distress"}</p>
-                          <p className="text-slate-500 text-[11px]">{req.incident?.location_address || "Mangaluru Metro"}</p>
-                        </div>
-
-                        <div className="space-y-1">
-                          <span className="text-slate-400 font-semibold uppercase text-[10px]">Patient & Vitals</span>
-                          <p className="font-medium text-slate-800">
-                            Age: {req.incident?.patient_age ?? "Unknown"} • Gender: {req.incident?.patient_gender ?? "Unknown"}
-                          </p>
-                          <p className="text-slate-600 text-[11px]">
-                            Consciousness: {req.incident?.consciousness_level || "Normal"} • Breathing: {req.incident?.breathing_status || "Normal"}
-                          </p>
-                        </div>
-
-                        <div className="space-y-1">
-                          <span className="text-slate-400 font-semibold uppercase text-[10px]">Hospital Capacity Check</span>
-                          <p className="font-medium text-slate-800">
-                            ER Bays Open: <strong className="text-emerald-600">{erBeds.available}</strong>
-                          </p>
-                          <p className="text-slate-600 text-[11px]">
-                            ICU Beds Open: <strong className="text-blue-600">{icuBeds.available}</strong>
-                          </p>
-                        </div>
-                      </div>
-
-                      {/* Working Actions */}
-                      <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100">
-                        <button
-                          onClick={() => setSelectedIncidentModal(req)}
-                          className="text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center gap-1.5"
-                        >
-                          <Eye className="w-3.5 h-3.5" /> View Incident Details
-                        </button>
-
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => setRejectModalDispatch(req)}
-                            disabled={actionLoading}
-                            className="px-4 py-2 bg-white border border-red-300 text-red-700 hover:bg-red-50 text-xs font-bold rounded-lg transition-colors"
-                          >
-                            Reject / Divert
-                          </button>
-                          <button
-                            onClick={() => handleDecideReservation(req.id, "ACCEPTED")}
-                            disabled={actionLoading}
-                            className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-sm transition-colors flex items-center gap-1.5"
-                          >
-                            <Check className="w-4 h-4" /> Accept Bed Reservation
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* SECTION 3: INCOMING PATIENTS */}
-          {currentNav === "patients" && (
+          {/* SECTION 2 & 3 UNIFIED: INBOUND EMERGENCY WORKFLOW & PATIENT QUEUE */}
+          {(currentNav === "incoming" || currentNav === "requests" || currentNav === "patients") && (
             <div className="space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <h2 className="text-lg font-bold text-slate-900">Incoming Patients & Active Emergencies</h2>
+                  <h2 className="text-lg font-bold text-slate-900">Inbound Emergency Workflow & Patient Queue</h2>
                   <p className="text-xs text-slate-500">
-                    Live tracking of confirmed en-route ambulances, pre-arrival preparation, and clinical handovers.
+                    Unified queue for provisional bed requests, en-route ambulances, trauma prep, and clinical handovers.
                   </p>
                 </div>
 
-                {/* Filter Pills */}
-                <div className="flex flex-wrap items-center gap-1.5 bg-white p-1 rounded-lg border border-slate-200">
+                {/* Filter Pills: ALL, PENDING, EN_ROUTE, ARRIVING_SOON, ARRIVED, COMPLETED */}
+                <div className="flex flex-wrap items-center gap-1.5 bg-white p-1 rounded-lg border border-slate-200 shadow-2xs">
                   <button
-                    onClick={() => setPatientsFilter("ALL")}
-                    className={`text-xs px-2.5 py-1 rounded font-semibold ${patientsFilter === "ALL" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
-                      }`}
+                    onClick={() => setInboundFilter("ALL")}
+                    className={`text-xs px-2.5 py-1 rounded font-semibold transition ${
+                      inboundFilter === "ALL" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
+                    }`}
                   >
-                    All ({activeInboundPatients.length})
+                    All ({unifiedInboundItems.filter((i) => i.workflowType !== "COMPLETED").length})
                   </button>
                   <button
-                    onClick={() => setPatientsFilter("PRIORITY_1")}
-                    className={`text-xs px-2.5 py-1 rounded font-semibold ${patientsFilter === "PRIORITY_1" ? "bg-red-600 text-white" : "text-slate-600 hover:bg-slate-100"
-                      }`}
+                    onClick={() => setInboundFilter("PENDING")}
+                    className={`text-xs px-2.5 py-1 rounded font-semibold transition ${
+                      inboundFilter === "PENDING" ? "bg-amber-600 text-white" : "text-slate-600 hover:bg-slate-100"
+                    }`}
                   >
-                    Priority 1
+                    Pending ({pendingRequests.length})
                   </button>
                   <button
-                    onClick={() => setPatientsFilter("ARRIVING_SOON")}
-                    className={`text-xs px-2.5 py-1 rounded font-semibold ${patientsFilter === "ARRIVING_SOON" ? "bg-amber-600 text-white" : "text-slate-600 hover:bg-slate-100"
-                      }`}
+                    onClick={() => setInboundFilter("EN_ROUTE")}
+                    className={`text-xs px-2.5 py-1 rounded font-semibold transition ${
+                      inboundFilter === "EN_ROUTE" ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-100"
+                    }`}
                   >
-                    Arriving Soon
+                    En Route ({unifiedInboundItems.filter((i) => i.workflowType === "ACTIVE_INBOUND" && ["EN_ROUTE_SCENE", "AT_SCENE", "EN_ROUTE_HOSPITAL"].includes(i.dispatch.status)).length})
+                  </button>
+                  <button
+                    onClick={() => setInboundFilter("ARRIVING_SOON")}
+                    className={`text-xs px-2.5 py-1 rounded font-semibold transition ${
+                      inboundFilter === "ARRIVING_SOON" ? "bg-rose-600 text-white" : "text-slate-600 hover:bg-slate-100"
+                    }`}
+                  >
+                    Arriving Soon ({unifiedInboundItems.filter((i) => i.workflowType === "ACTIVE_INBOUND" && ((i.dispatch.estimated_eta_seconds ?? 9999) <= 300 || i.dispatch.status === "EN_ROUTE_HOSPITAL")).length})
+                  </button>
+                  <button
+                    onClick={() => setInboundFilter("ARRIVED")}
+                    className={`text-xs px-2.5 py-1 rounded font-semibold transition ${
+                      inboundFilter === "ARRIVED" ? "bg-emerald-600 text-white" : "text-slate-600 hover:bg-slate-100"
+                    }`}
+                  >
+                    Arrived ({unifiedInboundItems.filter((i) => i.workflowType === "ARRIVED").length})
+                  </button>
+                  <button
+                    onClick={() => setInboundFilter("COMPLETED")}
+                    className={`text-xs px-2.5 py-1 rounded font-semibold transition ${
+                      inboundFilter === "COMPLETED" ? "bg-purple-600 text-white" : "text-slate-600 hover:bg-slate-100"
+                    }`}
+                  >
+                    Completed ({completedIncidents.length})
                   </button>
                 </div>
               </div>
 
-              {filteredInboundPatients.length === 0 ? (
+              {filteredInboundList.length === 0 ? (
                 <div className="bg-white p-12 rounded-xl border border-slate-200 text-center space-y-3">
-                  <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto">
-                    <Ambulance className="w-6 h-6" />
+                  <div className="w-12 h-12 bg-slate-50 text-slate-400 rounded-full flex items-center justify-center mx-auto">
+                    <CheckCircle2 className="w-6 h-6" />
                   </div>
-                  <h3 className="text-sm font-bold text-slate-800">
-                    {patientsFilter === "ALL"
-                      ? "No Active Inbound Patients"
-                      : patientsFilter === "PRIORITY_1"
-                        ? "No Priority 1 Inbound Patients"
-                        : "No Patients Arriving Soon"}
-                  </h3>
+                  <h3 className="text-sm font-bold text-slate-800">No Incidents in this View</h3>
                   <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                    {patientsFilter === "ALL"
-                      ? "There are no confirmed ambulances transporting to your facility right now."
-                      : "No active inbound patients match the selected filter criteria."}
+                    {inboundFilter === "ALL"
+                      ? "There are no active emergency requests or inbound ambulances for your facility right now."
+                      : `No emergency records match the "${inboundFilter}" filter.`}
                   </p>
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {filteredInboundPatients.map((disp) => {
+                  {filteredInboundList.map((item) => {
+                    const disp = item.dispatch;
+                    const isPending = item.workflowType === "PENDING_REQUEST";
+
+                    if (isPending) {
+                      const reqRemainingSec = disp.reservation_expires_at
+                        ? Math.max(0, Math.floor((new Date(disp.reservation_expires_at).getTime() - nowMs) / 1000))
+                        : null;
+
+                      return (
+                        <div
+                          key={`pending-${disp.id}`}
+                          className="bg-white rounded-xl border-2 border-amber-300 shadow-sm p-5 space-y-4"
+                        >
+                          {/* Top Header & Countdown */}
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`text-xs font-bold px-2.5 py-1 rounded-md ${
+                                  disp.incident?.triage_color === "RED"
+                                    ? "bg-red-100 text-red-800"
+                                    : disp.incident?.triage_color === "YELLOW"
+                                      ? "bg-amber-100 text-amber-800"
+                                      : "bg-emerald-100 text-emerald-800"
+                                }`}
+                              >
+                                {disp.incident?.triage_level || "Priority 1"}
+                              </span>
+                              <span className="text-sm font-bold text-slate-900">
+                                Incident #{disp.incident_id} • Unit {disp.ambulance_call_sign || `#${disp.ambulance_id}`}
+                              </span>
+                              <span className="text-xs font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">
+                                ACTION REQUIRED: BED CONFIRMATION
+                              </span>
+                            </div>
+
+                            {reqRemainingSec !== null && (
+                              <div
+                                className={`flex items-center gap-2 text-xs font-bold px-3 py-1 rounded-full border ${
+                                  reqRemainingSec <= 15
+                                    ? "text-red-700 bg-red-50 border-red-200 animate-pulse"
+                                    : "text-amber-700 bg-amber-50 border-amber-200"
+                                }`}
+                              >
+                                <Clock className="w-3.5 h-3.5" />
+                                <span>TTL: {reqRemainingSec}s Remaining</span>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Incident & Patient Breakdown */}
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                            <div className="space-y-1">
+                              <span className="text-slate-400 font-semibold uppercase text-[10px]">Chief Complaint</span>
+                              <p className="font-bold text-slate-900">{disp.incident?.chief_complaint || "Acute medical distress"}</p>
+                              <p className="text-slate-500 text-[11px]">{disp.incident?.location_address || "Mangaluru Metro"}</p>
+                            </div>
+
+                            <div className="space-y-1">
+                              <span className="text-slate-400 font-semibold uppercase text-[10px]">Patient & Vitals</span>
+                              <p className="font-medium text-slate-800">
+                                Age: {disp.incident?.patient_age ?? "Unknown"} • Gender: {disp.incident?.patient_gender ?? "Unknown"}
+                              </p>
+                              <p className="text-slate-600 text-[11px]">
+                                Consciousness: {disp.incident?.consciousness_level || "Normal"} • Breathing: {disp.incident?.breathing_status || "Normal"}
+                              </p>
+                            </div>
+
+                            <div className="space-y-1">
+                              <span className="text-slate-400 font-semibold uppercase text-[10px]">Hospital Capacity Check</span>
+                              <p className="font-medium text-slate-800">
+                                ER Bays Open: <strong className="text-emerald-600">{erBeds.available}</strong>
+                              </p>
+                              <p className="text-slate-600 text-[11px]">
+                                ICU Beds Open: <strong className="text-blue-600">{icuBeds.available}</strong>
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Actions */}
+                          <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100">
+                            <button
+                              onClick={() => setSelectedIncidentModal(disp)}
+                              className="text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center gap-1.5"
+                            >
+                              <Eye className="w-3.5 h-3.5" /> View Incident Details
+                            </button>
+
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => setRejectModalDispatch(disp)}
+                                disabled={actionLoading}
+                                className="px-4 py-2 bg-white border border-red-300 text-red-700 hover:bg-red-50 text-xs font-bold rounded-lg transition-colors"
+                              >
+                                Reject / Divert
+                              </button>
+                              <button
+                                onClick={() => handleDecideReservation(disp.id, "ACCEPTED")}
+                                disabled={actionLoading}
+                                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-sm transition-colors flex items-center gap-1.5"
+                              >
+                                <Check className="w-4 h-4" /> Accept Bed Reservation
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    // ACTIVE_INBOUND / ARRIVED / COMPLETED cards
                     const prepStatus = disp.hospital_preparation_status || "NOT_STARTED";
                     const isArrived = disp.status === "AT_HOSPITAL" || !!disp.patient_arrived_hospital_confirmed_at;
+                    const isCompleted = ["COMPLETED", "CLOSED", "RESOLVED"].includes(disp.status);
 
                     return (
-                      <div key={disp.id} className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 space-y-4">
+                      <div
+                        key={`inbound-${disp.id}`}
+                        className={`bg-white rounded-xl border shadow-sm p-5 space-y-4 ${
+                          isCompleted
+                            ? "border-slate-200 opacity-90"
+                            : isArrived
+                              ? "border-emerald-200 bg-emerald-50/20"
+                              : "border-slate-200"
+                        }`}
+                      >
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
                           <div className="flex items-center gap-2">
                             <span
-                              className={`text-xs font-bold px-2 py-0.5 rounded ${disp.incident?.triage_color === "RED"
+                              className={`text-xs font-bold px-2 py-0.5 rounded ${
+                                disp.incident?.triage_color === "RED"
                                   ? "bg-red-100 text-red-800"
                                   : "bg-amber-100 text-amber-800"
-                                }`}
+                              }`}
                             >
                               {disp.incident?.triage_level || "Priority 1"}
                             </span>
                             <span className="text-sm font-bold text-slate-900">
                               Incident #{disp.incident_id} • Unit {disp.ambulance_call_sign || `#${disp.ambulance_id}`}
                             </span>
+                            {disp.estimated_eta_seconds !== null && disp.estimated_eta_seconds !== undefined && !isArrived && !isCompleted && (
+                              <span className="text-xs font-bold px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">
+                                ETA ~{Math.ceil(disp.estimated_eta_seconds / 60)} min
+                              </span>
+                            )}
                           </div>
 
                           <div className="flex items-center gap-3 text-xs">
                             <span className="font-semibold text-slate-500">Lifecycle:</span>
-                            <span className="font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                            <span
+                              className={`font-bold px-2 py-0.5 rounded border ${
+                                isCompleted
+                                  ? "text-purple-700 bg-purple-50 border-purple-200"
+                                  : isArrived
+                                    ? "text-emerald-700 bg-emerald-50 border-emerald-200"
+                                    : "text-blue-700 bg-blue-50 border-blue-200"
+                              }`}
+                            >
                               {disp.status}
                             </span>
                           </div>
@@ -2161,49 +2245,51 @@ export default function HospitalPortalPage() {
                           </div>
 
                           {/* Trauma Preparation Stepper */}
-                          <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2">
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="font-bold text-slate-700">Trauma Bay Preparation:</span>
-                              <span className="font-bold text-blue-600">{prepStatus}</span>
-                            </div>
+                          {!isCompleted && (
+                            <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2">
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="font-bold text-slate-700">Trauma Bay Preparation:</span>
+                                <span className="font-bold text-blue-600">{prepStatus}</span>
+                              </div>
 
-                            <div className="flex items-center gap-1">
-                              {["NOT_STARTED", "TEAM_NOTIFIED", "BAY_PREPARED", "SPECIALISTS_STANDBY", "READY_FOR_ARRIVAL"].map((step, idx) => {
-                                const stepIdx = ["NOT_STARTED", "TEAM_NOTIFIED", "BAY_PREPARED", "SPECIALISTS_STANDBY", "READY_FOR_ARRIVAL"].indexOf(prepStatus);
-                                const isDone = stepIdx >= idx;
-                                return (
-                                  <div
-                                    key={step}
-                                    className={`flex-1 h-1.5 rounded-full ${isDone ? "bg-blue-600" : "bg-slate-200"}`}
-                                  />
-                                );
-                              })}
-                            </div>
+                              <div className="flex items-center gap-1">
+                                {["NOT_STARTED", "TEAM_NOTIFIED", "BAY_PREPARED", "SPECIALISTS_STANDBY", "READY_FOR_ARRIVAL"].map((step, idx) => {
+                                  const stepIdx = ["NOT_STARTED", "TEAM_NOTIFIED", "BAY_PREPARED", "SPECIALISTS_STANDBY", "READY_FOR_ARRIVAL"].indexOf(prepStatus);
+                                  const isDone = stepIdx >= idx;
+                                  return (
+                                    <div
+                                      key={step}
+                                      className={`flex-1 h-1.5 rounded-full ${isDone ? "bg-blue-600" : "bg-slate-200"}`}
+                                    />
+                                  );
+                                })}
+                              </div>
 
-                            <div className="flex items-center gap-2 pt-1">
-                              <input
-                                type="text"
-                                placeholder="Preparation notes (e.g. Bay 1 ready)..."
-                                value={prepNoteInput[disp.id] || ""}
-                                onChange={(e) => setPrepNoteInput({ ...prepNoteInput, [disp.id]: e.target.value })}
-                                className="flex-1 text-xs px-2 py-1 bg-white border border-slate-300 rounded"
-                              />
-                              <button
-                                onClick={() => {
-                                  const steps = ["NOT_STARTED", "TEAM_NOTIFIED", "BAY_PREPARED", "SPECIALISTS_STANDBY", "READY_FOR_ARRIVAL"];
-                                  const nextIdx = Math.min(steps.length - 1, steps.indexOf(prepStatus) + 1);
-                                  handleUpdatePreparation(disp.id, steps[nextIdx]);
-                                }}
-                                disabled={prepStatus === "READY_FOR_ARRIVAL" || actionLoading}
-                                className="text-xs px-2.5 py-1 bg-blue-600 text-white font-semibold rounded hover:bg-blue-700 disabled:opacity-40"
-                              >
-                                Advance
-                              </button>
+                              <div className="flex items-center gap-2 pt-1">
+                                <input
+                                  type="text"
+                                  placeholder="Preparation notes (e.g. Bay 1 ready)..."
+                                  value={prepNoteInput[disp.id] || ""}
+                                  onChange={(e) => setPrepNoteInput({ ...prepNoteInput, [disp.id]: e.target.value })}
+                                  className="flex-1 text-xs px-2 py-1 bg-white border border-slate-300 rounded"
+                                />
+                                <button
+                                  onClick={() => {
+                                    const steps = ["NOT_STARTED", "TEAM_NOTIFIED", "BAY_PREPARED", "SPECIALISTS_STANDBY", "READY_FOR_ARRIVAL"];
+                                    const nextIdx = Math.min(steps.length - 1, steps.indexOf(prepStatus) + 1);
+                                    handleUpdatePreparation(disp.id, steps[nextIdx]);
+                                  }}
+                                  disabled={prepStatus === "READY_FOR_ARRIVAL" || actionLoading}
+                                  className="text-xs px-2.5 py-1 bg-blue-600 text-white font-semibold rounded hover:bg-blue-700 disabled:opacity-40"
+                                >
+                                  Advance
+                                </button>
+                              </div>
                             </div>
-                          </div>
+                          )}
                         </div>
 
-                        {/* Live Vitals Telemetry Chip Bar (Phase 2 Handover Integration) */}
+                        {/* Live Vitals Telemetry Chip Bar */}
                         {disp.latest_vitals && (
                           <div className="bg-rose-50/60 border border-rose-200/90 rounded-lg p-3 space-y-2">
                             <div className="flex items-center justify-between text-xs">
@@ -2265,16 +2351,19 @@ export default function HospitalPortalPage() {
                             </button>
                           </div>
 
-                          <button
-                            onClick={() => handleConfirmArrival(disp.id)}
-                            disabled={isArrived && !!disp.patient_arrived_hospital_confirmed_at}
-                            className={`text-xs px-4 py-1.5 rounded-lg font-bold shadow-sm ${isArrived
-                                ? "bg-emerald-100 text-emerald-800 border border-emerald-300 cursor-default"
-                                : "bg-emerald-600 hover:bg-emerald-700 text-white"
+                          {!isCompleted && (
+                            <button
+                              onClick={() => handleConfirmArrival(disp.id)}
+                              disabled={isArrived && !!disp.patient_arrived_hospital_confirmed_at}
+                              className={`text-xs px-4 py-1.5 rounded-lg font-bold shadow-sm ${
+                                isArrived
+                                  ? "bg-emerald-100 text-emerald-800 border border-emerald-300 cursor-default"
+                                  : "bg-emerald-600 hover:bg-emerald-700 text-white"
                               }`}
-                          >
-                            {disp.patient_arrived_hospital_confirmed_at ? "Arrival Confirmed ✓" : "Confirm ER Arrival"}
-                          </button>
+                            >
+                              {disp.patient_arrived_hospital_confirmed_at ? "Arrival Confirmed ✓" : "Confirm ER Arrival"}
+                            </button>
+                          )}
                         </div>
                       </div>
                     );

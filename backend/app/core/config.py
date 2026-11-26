@@ -75,9 +75,10 @@ class Settings(BaseSettings):
     DEFAULT_CITY: str = "Mangaluru, Karnataka"
 
     # Authentication & Session Security (JWT)
+    # 43200 minutes = 30 days for persistent sessions across browser restarts/refreshes
     JWT_SECRET_KEY: str = "lifelink-emergency-command-jwt-secret-key-mangaluru-2026-secure-token"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 43200
     DEMO_ACCOUNTS_ENABLED: bool = True
 
     @property

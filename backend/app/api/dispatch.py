@@ -1047,8 +1047,11 @@ def list_dispatches(
                 query = query.filter(Dispatch.ambulance_id == amb_id)
             else:
                 query = query.filter(Dispatch.id == -1)
-        elif auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id:
-            query = query.filter(Dispatch.destination_hospital_id == auth_user.hospital_id)
+        elif auth_user.role == ROLE_HOSPITAL_STAFF:
+            if auth_user.hospital_id:
+                query = query.filter(Dispatch.destination_hospital_id == auth_user.hospital_id)
+            else:
+                query = query.filter(Dispatch.id == -1)
 
     if incident_id:
         query = query.filter(Dispatch.incident_id == incident_id)
@@ -1078,7 +1081,7 @@ def get_dispatch(
             if driver_amb_id and dispatch.ambulance_id != driver_amb_id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot view dispatches assigned to another ambulance unit")
         elif auth_user.role == ROLE_HOSPITAL_STAFF:
-            if auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+            if not auth_user.hospital_id or dispatch.destination_hospital_id != auth_user.hospital_id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot view dispatches routed to another hospital")
 
     expire_single_dispatch_if_due(dispatch, db)
@@ -1263,7 +1266,7 @@ def confirm_hospital(
         if auth_user.role == ROLE_AMBULANCE_CREW:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ambulance crew cannot confirm or reject hospital bed reservations")
         if auth_user.role == ROLE_HOSPITAL_STAFF:
-            if auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
+            if not auth_user.hospital_id or dispatch.destination_hospital_id != auth_user.hospital_id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Hospital staff can only confirm or reject bed reservations for their own facility")
 
     if payload.attempt_number is not None and payload.attempt_number != dispatch.attempt_number:

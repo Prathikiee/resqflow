@@ -153,7 +153,8 @@ export default function LoginPage() {
         localStorage.setItem("lifelink_token", token);
         localStorage.setItem("lifelink_user", JSON.stringify(user));
         localStorage.removeItem("lifelink_active_incident_id");
-        document.cookie = `lifelink_token=${token}; path=/; max-age=3600; SameSite=Lax`;
+        // 30 days = 2592000 seconds for persistent session
+        document.cookie = `lifelink_token=${token}; path=/; max-age=2592000; SameSite=Lax`;
       }
 
       if (user.role === "CITIZEN") {

@@ -137,6 +137,20 @@ export default function CitizenPortalPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isRefreshingTracking, setIsRefreshingTracking] = useState(false);
 
+  // Initialize cached user session immediately to prevent screen flickers
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const stored = localStorage.getItem("lifelink_user");
+      if (stored) {
+        try {
+          setUser(JSON.parse(stored));
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }, []);
+
   // Form State
   const [selectedCategory, setSelectedCategory] = useState<EmergencyCategory>("MEDICAL");
   const [customOtherType, setCustomOtherType] = useState("");
@@ -251,9 +265,17 @@ export default function CitizenPortalPage() {
         const meResp = await fetch(`${backendUrl}/api/auth/me`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        if (!meResp.ok) throw new Error("Session expired");
-        const meData = await meResp.json();
-        setUser(meData);
+        if (meResp.status === 401) {
+          localStorage.removeItem("lifelink_token");
+          localStorage.removeItem("lifelink_user");
+          router.push("/login");
+          return;
+        }
+        if (meResp.ok) {
+          const meData = await meResp.json();
+          setUser(meData);
+          localStorage.setItem("lifelink_user", JSON.stringify(meData));
+        }
 
         // Authoritative query from backend: active non-terminal incident for current citizen
         const myActiveResp = await fetch(`${backendUrl}/api/incidents/my-active`, {
@@ -312,6 +334,8 @@ export default function CitizenPortalPage() {
       });
 
       if (resp.status === 401) {
+        localStorage.removeItem("lifelink_token");
+        localStorage.removeItem("lifelink_user");
         router.push("/login");
         return;
       }
