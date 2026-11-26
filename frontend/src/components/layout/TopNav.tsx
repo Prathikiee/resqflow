@@ -7,6 +7,7 @@ interface TopNavProps {
   title: string;
   subtitle?: string;
   wsConnected: boolean;
+  connectionStatus?: "connected" | "connecting" | "offline";
   onMenuToggle: () => void;
   actions?: React.ReactNode;
 }
@@ -15,6 +16,7 @@ export default function TopNav({
   title,
   subtitle,
   wsConnected,
+  connectionStatus,
   onMenuToggle,
   actions,
 }: TopNavProps) {
@@ -48,11 +50,19 @@ export default function TopNav({
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-50 border border-slate-200 text-xs font-semibold">
             <span
               className={`w-2 h-2 rounded-full ${
-                wsConnected ? "bg-emerald-500 animate-pulse" : "bg-amber-500"
+                wsConnected
+                  ? "bg-emerald-500 animate-pulse"
+                  : connectionStatus === "connecting"
+                  ? "bg-amber-500 animate-pulse"
+                  : "bg-slate-400"
               }`}
             />
             <span className="text-[11px] text-slate-600 hidden sm:inline">
-              {wsConnected ? "Live Sync" : "Connecting..."}
+              {wsConnected
+                ? "Live Sync"
+                : connectionStatus === "connecting"
+                ? "Connecting..."
+                : "Offline (Polling Active)"}
             </span>
           </div>
 

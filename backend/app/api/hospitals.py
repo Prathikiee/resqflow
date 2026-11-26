@@ -30,6 +30,7 @@ from backend.app.core.auth import (
     ROLE_CITIZEN,
 )
 from backend.app.core.ws import broadcast_sync
+from backend.app.api.dispatch import expire_single_dispatch_if_due
 
 router = APIRouter(prefix="/api/hospitals", tags=["hospitals"])
 
@@ -1043,4 +1044,7 @@ def get_allocated_incidents(
         .filter(Dispatch.destination_hospital_id == hospital_id)
         .order_by(Dispatch.created_at.desc())
     )
-    return query.all()
+    dispatches = query.all()
+    for d in dispatches:
+        expire_single_dispatch_if_due(d, db)
+    return dispatches

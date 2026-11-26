@@ -107,6 +107,20 @@ class HandoverPacketOut(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+class IncidentSummaryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    caller_name: str
+    caller_phone: str
+    location_address: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    chief_complaint: str
+    triage_level: str
+    triage_color: str
+    status: str
+
 class DispatchOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -115,6 +129,9 @@ class DispatchOut(BaseModel):
     ambulance_id: int
     destination_hospital_id: Optional[int] = None
     status: str
+
+    # Embedded incident details for field responder and hospital context
+    incident: Optional[IncidentSummaryOut] = None
 
     # Hospital Preparation Workflow fields
     hospital_preparation_status: str = "NOT_STARTED"

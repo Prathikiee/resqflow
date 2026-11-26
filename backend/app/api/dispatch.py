@@ -395,6 +395,47 @@ def auto_escalate_dispatch(
             hosp_new_q = hosp_new_q.with_for_update()
         new_hosp = hosp_new_q.first()
 
+    if not new_hosp:
+        # All candidate hospitals exhausted or unavailable
+        history_entry = {
+            "attempt_number": dispatch.attempt_number,
+            "failed_ambulance_id": dispatch.ambulance_id,
+            "failed_ambulance_call_sign": old_amb.call_sign if old_amb else f"ID #{dispatch.ambulance_id}",
+            "failed_hospital_id": dispatch.destination_hospital_id,
+            "failed_hospital_name": old_hosp.name if old_hosp else None,
+            "failure_source": failure_source,
+            "failure_reason": failure_reason,
+            "timestamp": now.isoformat(),
+            "replacement_ambulance_id": None,
+            "replacement_ambulance_call_sign": None,
+            "replacement_hospital_id": None,
+            "replacement_hospital_name": None,
+            "escalation_result": "REASSIGNMENT_REQUIRED_NO_HOSPITAL",
+        }
+        history.append(history_entry)
+        dispatch.escalation_history = history
+        dispatch.coordination_status = "REASSIGNMENT_REQUIRED"
+        dispatch.rejection_source = failure_source
+        dispatch.rejection_reason = failure_reason or "All regional hospitals exhausted or declining emergency intake."
+        if incident and incident.status == "ALLOCATED":
+            incident.status = "TRIAGED"
+        db.commit()
+        db.refresh(dispatch)
+
+        broadcast_sync("DISPATCH_ESCALATION_FAILED", {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "failure_source": failure_source,
+            "reason": "No hospital capacity available in region.",
+        }, broadcast_to_all=True)
+        broadcast_sync("DISPATCH_CONFIRMATION_UPDATED", {
+            "dispatch_id": dispatch.id,
+            "coordination_status": dispatch.coordination_status,
+            "ambulance_confirmation": dispatch.ambulance_confirmation_status,
+            "hospital_confirmation": dispatch.hospital_confirmation_status,
+        }, broadcast_to_all=True)
+        return dispatch
+
     # 5. Calculate new route
     route = calculate_route(
         start_lat=new_amb.current_latitude,
@@ -987,8 +1028,25 @@ def list_dispatches(
     if auth_user:
         if auth_user.role == ROLE_CITIZEN:
             query = query.join(Incident).filter(Incident.reporter_user_id == auth_user.id)
-        elif auth_user.role == ROLE_AMBULANCE_CREW and auth_user.ambulance_id:
-            query = query.filter(Dispatch.ambulance_id == auth_user.ambulance_id)
+        elif auth_user.role == ROLE_AMBULANCE_CREW:
+            amb_id = auth_user.ambulance_id
+            if not amb_id and auth_user.ambulance:
+                amb_id = auth_user.ambulance.id
+            if not amb_id:
+                user_call_sign = getattr(auth_user, "ambulance_call_sign", None)
+                if user_call_sign:
+                    matched_amb = db.query(Ambulance).filter(Ambulance.call_sign == user_call_sign).first()
+                    if matched_amb:
+                        amb_id = matched_amb.id
+                        auth_user.ambulance_id = matched_amb.id
+                        try:
+                            db.commit()
+                        except Exception:
+                            db.rollback()
+            if amb_id:
+                query = query.filter(Dispatch.ambulance_id == amb_id)
+            else:
+                query = query.filter(Dispatch.id == -1)
         elif auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id:
             query = query.filter(Dispatch.destination_hospital_id == auth_user.hospital_id)
 
@@ -1016,7 +1074,8 @@ def get_dispatch(
             if dispatch.incident and dispatch.incident.reporter_user_id != auth_user.id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot view another citizen's emergency dispatch")
         elif auth_user.role == ROLE_AMBULANCE_CREW:
-            if auth_user.ambulance_id and dispatch.ambulance_id != auth_user.ambulance_id:
+            driver_amb_id = auth_user.ambulance_id or (auth_user.ambulance.id if auth_user.ambulance else None)
+            if driver_amb_id and dispatch.ambulance_id != driver_amb_id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot view dispatches assigned to another ambulance unit")
         elif auth_user.role == ROLE_HOSPITAL_STAFF:
             if auth_user.hospital_id and dispatch.destination_hospital_id != auth_user.hospital_id:
@@ -1052,7 +1111,8 @@ def confirm_ambulance(
         if auth_user.role == ROLE_HOSPITAL_STAFF:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Hospital staff cannot confirm or reject ambulance assignments")
         if auth_user.role == ROLE_AMBULANCE_CREW:
-            if auth_user.ambulance_id and dispatch.ambulance_id != auth_user.ambulance_id:
+            driver_amb_id = auth_user.ambulance_id or (auth_user.ambulance.id if auth_user.ambulance else None)
+            if not driver_amb_id or dispatch.ambulance_id != driver_amb_id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Paramedic crew can only confirm or reject assignments for their own ambulance unit")
 
     if payload.attempt_number is not None and payload.attempt_number != dispatch.attempt_number:
@@ -1237,6 +1297,33 @@ def confirm_hospital(
     now = get_utc_now()
 
     if decision == "ACCEPTED":
+        hosp_query = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id)
+        if is_postgres(db):
+            hosp_query = hosp_query.with_for_update()
+        hospital = hosp_query.first()
+        if not hospital:
+            raise HTTPException(status_code=404, detail="Destination hospital record not found")
+        if not hospital.accepting_emergencies:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Hospital {hospital.name} is currently not accepting emergency intakes"
+            )
+        if hospital.readiness_status in ["DIVERT", "OFFLINE"]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Hospital {hospital.name} is in {hospital.readiness_status} status and cannot accept emergency admissions"
+            )
+        if (hospital.available_emergency_beds or 0) <= 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Hospital {hospital.name} has 0 available emergency beds"
+            )
+        if (hospital.available_emergency_beds or 0) < (hospital.reserved_emergency_beds or 0):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Hospital {hospital.name} emergency bed capacity is exhausted"
+            )
+
         dispatch.hospital_confirmation_status = "ACCEPTED"
         dispatch.hospital_confirmed_at = now
 
@@ -1301,6 +1388,12 @@ def confirm_hospital(
         return dispatch
 
     elif decision == "REJECTED":
+        reason = (payload.reason or "").strip()
+        if not reason:
+            raise HTTPException(
+                status_code=400,
+                detail="A valid rejection reason is required when declining an emergency bed reservation."
+            )
         # AUTOMATIC EMERGENCY ESCALATION TRIGGER
         dispatch.hospital_confirmation_status = "REJECTED"
         log_incident_event(
@@ -1309,16 +1402,16 @@ def confirm_hospital(
             dispatch_id=dispatch.id,
             event_type="HOSPITAL_REJECTED",
             event_title="Hospital ER Declined Intake",
-            event_description=f"Receiving hospital declined emergency admission: {payload.reason or 'Declined by ER'}.",
+            event_description=f"Receiving hospital declined emergency admission: {reason}.",
             actor_type="HOSPITAL_ER",
             actor_reference=f"Hospital #{dispatch.destination_hospital_id}",
-            metadata={"reason": payload.reason, "attempt_number": dispatch.attempt_number},
+            metadata={"reason": reason, "attempt_number": dispatch.attempt_number},
             commit=False,
         )
         return auto_escalate_dispatch(
             dispatch=dispatch,
             failure_source="HOSPITAL",
-            failure_reason=payload.reason or "Hospital ER unit declined admission.",
+            failure_reason=reason,
             db=db,
             expected_attempt=dispatch.attempt_number,
         )
@@ -1332,7 +1425,7 @@ def simulate_decision(dispatch_id: int, payload: SimulateDecisionRequest, db: Se
         confirm_ambulance(dispatch_id, ConfirmationDecision(decision=decision, reason=payload.reason), db)
 
     if party in ["HOSPITAL", "BOTH"]:
-        confirm_hospital(dispatch_id, ConfirmationDecision(decision=decision, reason=payload.reason), db)
+        confirm_hospital(dispatch_id, ConfirmationDecision(decision=decision, reason=payload.reason or "Simulated hospital decision"), db)
 
     db.expire_all()
     return db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()

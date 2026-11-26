@@ -86,6 +86,21 @@ class ConnectionManager:
         raw_hosp_id = meta.get("hospital_id")
         hosp_id = int(raw_hosp_id) if raw_hosp_id is not None else None
 
+        # Fallback for affiliation if missing from token claims
+        if (amb_id is None or hosp_id is None) and uid:
+            try:
+                from backend.app.core.database import SessionLocal
+                from backend.app.models.entities import User
+                with SessionLocal() as db_session:
+                    user_record = db_session.query(User).filter(User.id == uid).first()
+                    if user_record:
+                        if amb_id is None and user_record.ambulance_id:
+                            amb_id = user_record.ambulance_id
+                        if hosp_id is None and user_record.hospital_id:
+                            hosp_id = user_record.hospital_id
+            except Exception as e:
+                logger.warning(f"Failed to lookup affiliation for WebSocket user {uid}: {e}")
+
         client = WebSocketClient(
             websocket=websocket,
             user_id=uid,

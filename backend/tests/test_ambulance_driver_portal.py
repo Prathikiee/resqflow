@@ -9,11 +9,16 @@ from backend.app.schemas.ambulance import AmbulanceIssueReport
 from backend.app.api.ambulances import update_ambulance_status, report_ambulance_issue
 from backend.app.api.dispatch import (
     confirm_ambulance,
+    confirm_hospital,
     confirm_patient_pickup,
     request_mission_assistance,
     confirm_patient_arrival_at_hospital,
     advance_dispatch_lifecycle,
+    list_dispatches,
+    get_dispatch,
 )
+from backend.app.schemas.dispatch import DispatchOut
+from backend.app.core.ws import ws_manager, WebSocketClient
 
 def get_or_create_driver(db: Session, amb_id: int):
     driver = db.query(User).filter(User.role == "AMBULANCE_CREW").first()
@@ -271,3 +276,165 @@ def test_ambulance_request_operational_assistance(db: Session):
 
     assert result["status"] == "ok"
     assert "POLICE" in result["message"]
+
+
+def test_dispatch_assignment_to_als101_and_driver_portal_retrieval(db: Session):
+    """
+    CRITICAL REGRESSION TEST: Dispatch-to-Ambulance Mission Assignment Integration.
+    Verifies that:
+      1. A dispatch assigned to ambulance KA-19-ALS-101 (id=1) is correctly queried by
+         driver als101@lifelink.demo.
+      2. DispatchOut includes full embedded incident summary details for clinical and scene context.
+      3. Strict tenant/unit isolation: driver for unit 2 (als102) cannot see unit 1's mission.
+      4. Driver accepts assignment, hospital confirms, and mission state transitions consistently.
+      5. Driver progresses mission lifecycle through EN_ROUTE_INCIDENT -> ON_SCENE -> EN_ROUTE_HOSPITAL -> COMPLETED.
+    """
+    from datetime import timedelta
+    from backend.app.services.seed_service import seed_demo_users
+
+    seed_demo_users(db)
+
+    # 1. Resolve seed driver als101 and ambulance
+    driver_101 = db.query(User).filter(User.email == "als101@lifelink.demo").first()
+    driver_102 = db.query(User).filter(User.email == "als102@lifelink.demo").first()
+    hosp_staff = db.query(User).filter(User.email == "kmc@lifelink.demo").first()
+    assert driver_101 is not None and driver_101.ambulance_id == 1
+    assert driver_102 is not None and driver_102.ambulance_id == 2
+
+    amb_101 = db.query(Ambulance).filter(Ambulance.id == 1).first()
+    hosp = db.query(Hospital).filter(Hospital.id == 1).first()
+    assert amb_101 is not None and hosp is not None
+
+    # Ensure ambulance is AVAILABLE
+    amb_101.status = "AVAILABLE"
+    amb_101.reservation_dispatch_id = None
+    db.commit()
+
+    # 2. Create emergency incident
+    incident = Incident(
+        caller_name="Rahul Alva",
+        caller_phone="+91 98451 99887",
+        location_address="Live GPS Fix (12.8516, 74.8702) - Mangaluru",
+        latitude=12.851559,
+        longitude=74.870218,
+        chief_complaint="Severe vehicular collision with high-energy blunt trauma",
+        triage_level="Priority 1 (Critical)",
+        triage_color="RED",
+        triage_score=85,
+        required_ambulance_type="ALS",
+        status="ALLOCATED",
+    )
+    db.add(incident)
+    db.commit()
+    db.refresh(incident)
+
+    # 3. Create dispatch assigned to unit 1 (KA-19-ALS-101)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    dispatch = Dispatch(
+        incident_id=incident.id,
+        ambulance_id=amb_101.id,
+        destination_hospital_id=hosp.id,
+        status="ASSIGNED",
+        coordination_status="PENDING_CONFIRMATIONS",
+        ambulance_confirmation_status="PENDING",
+        hospital_confirmation_status="PENDING",
+        reservation_expires_at=now + timedelta(seconds=90),
+        dispatched_at=now,
+    )
+    db.add(dispatch)
+    amb_101.status = "RESERVED"
+    amb_101.reservation_dispatch_id = dispatch.id
+    db.commit()
+    db.refresh(dispatch)
+
+    # 4. Driver ALS-101 queries missions via list_dispatches
+    my_dispatches = list_dispatches(db=db, current_user=driver_101)
+    assert len(my_dispatches) >= 1
+    matched_disp = next((d for d in my_dispatches if d.id == dispatch.id), None)
+    assert matched_disp is not None, "Driver ALS-101 must receive assigned mission"
+    assert matched_disp.ambulance_id == 1
+
+    # 5. Verify DispatchOut serialization has embedded incident summary
+    serialized = DispatchOut.model_validate(matched_disp)
+    assert serialized.incident is not None
+    assert serialized.incident.caller_name == "Rahul Alva"
+    assert serialized.incident.chief_complaint == "Severe vehicular collision with high-energy blunt trauma"
+    assert serialized.incident.triage_level == "Priority 1 (Critical)"
+    assert serialized.incident.triage_color == "RED"
+
+    # 6. Verify isolation: Driver ALS-102 (Ambulance 2) must NOT see unit 1's dispatch
+    unit2_dispatches = list_dispatches(db=db, current_user=driver_102)
+    assert all(d.id != dispatch.id for d in unit2_dispatches), "Ambulance 2 crew must not see Ambulance 1 dispatches"
+
+    # 7. Driver ALS-101 accepts mission
+    accept_res = confirm_ambulance(
+        dispatch_id=dispatch.id,
+        payload=ConfirmationDecision(decision="ACCEPTED"),
+        db=db,
+        current_user=driver_101,
+    )
+    assert accept_res.ambulance_confirmation_status == "ACCEPTED"
+
+    # Hospital accepts
+    hosp_res = confirm_hospital(
+        dispatch_id=dispatch.id,
+        payload=ConfirmationDecision(decision="ACCEPTED"),
+        db=db,
+        current_user=hosp_staff,
+    )
+    assert hosp_res.coordination_status == "CONFIRMED"
+
+    # 8. Driver progresses mission lifecycle through active states
+    s1 = advance_dispatch_lifecycle(dispatch_id=dispatch.id, db=db, current_user=driver_101)
+    assert s1.status == "EN_ROUTE_INCIDENT"
+
+    s2 = advance_dispatch_lifecycle(dispatch_id=dispatch.id, db=db, current_user=driver_101)
+    assert s2.status == "ON_SCENE"
+
+    s3 = advance_dispatch_lifecycle(dispatch_id=dispatch.id, db=db, current_user=driver_101)
+    assert s3.status == "EN_ROUTE_HOSPITAL"
+
+    s4 = advance_dispatch_lifecycle(dispatch_id=dispatch.id, db=db, current_user=driver_101)
+    assert s4.status == "COMPLETED"
+
+    # 9. Verify reconciled database state
+    db.refresh(amb_101)
+    db.refresh(incident)
+    assert amb_101.status == "AVAILABLE"
+    assert amb_101.reservation_dispatch_id is None
+    assert incident.status == "RESOLVED"
+
+
+def test_ambulance_crew_ws_affiliation_and_event_routing(db: Session):
+    """
+    Verifies that WebSocket targeting directs events to the assigned ambulance crew
+    and that ConnectionManager properly resolves ambulance_id.
+    """
+    from backend.app.core.auth import ROLE_AMBULANCE_CREW
+
+    # Client with ambulance_id=1
+    client_1 = WebSocketClient(
+        websocket=None,
+        user_id=13,
+        email="als101@lifelink.demo",
+        role=ROLE_AMBULANCE_CREW,
+        ambulance_id=1,
+    )
+
+    # Client with ambulance_id=2
+    client_2 = WebSocketClient(
+        websocket=None,
+        user_id=14,
+        email="als102@lifelink.demo",
+        role=ROLE_AMBULANCE_CREW,
+        ambulance_id=2,
+    )
+
+    # Eligible check for ambulance_id=1
+    assert ws_manager.is_client_eligible(client_1, ambulance_id=1) is True
+    assert ws_manager.is_client_eligible(client_2, ambulance_id=1) is False
+
+    # Eligible check for ambulance_id=2
+    assert ws_manager.is_client_eligible(client_1, ambulance_id=2) is False
+    assert ws_manager.is_client_eligible(client_2, ambulance_id=2) is True
+

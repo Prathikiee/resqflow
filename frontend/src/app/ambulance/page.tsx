@@ -173,7 +173,17 @@ function playEmergencyAlarm(durationSeconds = 3): () => void {
 
 export default function AmbulancePortalPage() {
   const router = useRouter();
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<any>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const cached = localStorage.getItem("lifelink_user");
+        return cached ? JSON.parse(cached) : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  });
   const [ambulance, setAmbulance] = useState<AmbulanceEntity | null>(null);
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([]);
   const [currentTab, setCurrentTab] = useState<
@@ -292,9 +302,12 @@ export default function AmbulancePortalPage() {
       });
       if (dispResp.ok) {
         const allDispatches: DispatchRecord[] = await dispResp.json();
-        const myDispatches = allDispatches.filter(
-          (d) => d.ambulance_id === userData.ambulance_id
-        );
+        const targetAmbId = userData?.ambulance_id ?? user?.ambulance_id;
+        const myDispatches = targetAmbId
+          ? allDispatches.filter(
+              (d) => Number(d.ambulance_id) === Number(targetAmbId)
+            )
+          : allDispatches;
         setDispatches(myDispatches);
       }
     } catch (err: any) {

@@ -1,5 +1,6 @@
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from unittest.mock import AsyncMock
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
@@ -35,6 +36,7 @@ from backend.app.api.hospitals import (
     update_hospital_bed_capacity,
     update_hospital_profile,
     get_hospital,
+    get_allocated_incidents,
 )
 from backend.app.api.dispatch import (
     confirm_hospital,
@@ -42,7 +44,9 @@ from backend.app.api.dispatch import (
     acknowledge_handover_packet,
     complete_handover_packet,
     get_handover_packet,
+    auto_escalate_dispatch,
 )
+from backend.app.core.ws import ws_manager
 
 def test_doctor_shift_and_schedule_availability_engine():
     # 1. Daytime Doctor: 08:00 - 16:00, Mon-Fri
@@ -410,3 +414,216 @@ def test_sbar_handover_review_and_completion_lifecycle(db: Session):
             current_user=user_b,
         )
     assert exc.value.status_code == 403
+
+
+# =========================================================================
+# HOSPITAL INCOMING RESERVATION AUDIT VERIFICATION TESTS
+# =========================================================================
+
+def test_hospital_rejection_requires_valid_reason(db: Session):
+    hosp = db.query(Hospital).first()
+    amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
+    inc = db.query(Incident).first()
+    inc.status = "ALLOCATED"
+    db.commit()
+
+    disp = Dispatch(
+        incident_id=inc.id,
+        ambulance_id=amb.id,
+        destination_hospital_id=hosp.id,
+        coordination_status="PENDING_CONFIRMATIONS",
+        ambulance_confirmation_status="PENDING",
+        hospital_confirmation_status="PENDING",
+        status="ASSIGNED",
+        attempt_number=1,
+    )
+    db.add(disp)
+    db.commit()
+    db.refresh(disp)
+
+    # Empty rejection reason must be rejected with 400
+    with pytest.raises(HTTPException) as exc:
+        confirm_hospital(
+            dispatch_id=disp.id,
+            payload=ConfirmationDecision(decision="REJECTED", reason="   "),
+            db=db,
+        )
+    assert exc.value.status_code == 400
+    assert "rejection reason is required" in exc.value.detail.lower()
+
+
+def test_hospital_acceptance_validates_readiness_and_capacity(db: Session):
+    hosp = db.query(Hospital).first()
+    amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
+    inc = db.query(Incident).first()
+    inc.status = "ALLOCATED"
+    db.commit()
+
+    disp = Dispatch(
+        incident_id=inc.id,
+        ambulance_id=amb.id,
+        destination_hospital_id=hosp.id,
+        coordination_status="PENDING_CONFIRMATIONS",
+        ambulance_confirmation_status="PENDING",
+        hospital_confirmation_status="PENDING",
+        status="ASSIGNED",
+        attempt_number=1,
+    )
+    db.add(disp)
+    db.commit()
+    db.refresh(disp)
+
+    orig_accepting = hosp.accepting_emergencies
+    orig_readiness = hosp.readiness_status
+    orig_beds = hosp.available_emergency_beds
+    try:
+        # 1. Attempting to accept when accepting_emergencies=False raises 409
+        hosp.accepting_emergencies = False
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            confirm_hospital(
+                dispatch_id=disp.id,
+                payload=ConfirmationDecision(decision="ACCEPTED"),
+                db=db,
+            )
+        assert exc.value.status_code == 409
+        assert "not accepting emergency intakes" in exc.value.detail
+
+        # 2. When accepting_emergencies=True but readiness is DIVERT, raises 409
+        hosp.accepting_emergencies = True
+        hosp.readiness_status = "DIVERT"
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            confirm_hospital(
+                dispatch_id=disp.id,
+                payload=ConfirmationDecision(decision="ACCEPTED"),
+                db=db,
+            )
+        assert exc.value.status_code == 409
+        assert "DIVERT" in exc.value.detail
+
+        # 3. When available beds is 0, raises 409
+        hosp.readiness_status = "READY"
+        hosp.available_emergency_beds = 0
+        db.commit()
+        with pytest.raises(HTTPException) as exc:
+            confirm_hospital(
+                dispatch_id=disp.id,
+                payload=ConfirmationDecision(decision="ACCEPTED"),
+                db=db,
+            )
+        assert exc.value.status_code == 409
+        assert "0 available emergency beds" in exc.value.detail
+    finally:
+        hosp.accepting_emergencies = orig_accepting
+        hosp.readiness_status = orig_readiness
+        hosp.available_emergency_beds = orig_beds
+        db.commit()
+
+
+def test_hospital_rejection_no_alternative_fallback(db: Session):
+    hosp = db.query(Hospital).first()
+    amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
+    inc = db.query(Incident).first()
+    inc.status = "ALLOCATED"
+    db.commit()
+
+    disp = Dispatch(
+        incident_id=inc.id,
+        ambulance_id=amb.id,
+        destination_hospital_id=hosp.id,
+        coordination_status="PENDING_CONFIRMATIONS",
+        ambulance_confirmation_status="PENDING",
+        hospital_confirmation_status="PENDING",
+        status="ASSIGNED",
+        attempt_number=1,
+    )
+    db.add(disp)
+    db.commit()
+    db.refresh(disp)
+
+    # All other hospitals in DB set to not accepting emergencies
+    db.query(Hospital).filter(Hospital.id != hosp.id).update({"accepting_emergencies": False})
+    db.commit()
+
+    try:
+        # Reject hospital
+        escalated = confirm_hospital(
+            dispatch_id=disp.id,
+            payload=ConfirmationDecision(decision="REJECTED", reason="Trauma wing under structural repair"),
+            db=db,
+        )
+        assert escalated.coordination_status == "REASSIGNMENT_REQUIRED"
+        assert escalated.rejection_source == "HOSPITAL"
+        db.refresh(inc)
+        assert inc.status == "TRIAGED"
+    finally:
+        db.query(Hospital).update({"accepting_emergencies": True})
+        db.commit()
+
+
+def test_get_allocated_incidents_auto_expires_overdue_dispatches(db: Session):
+    hosp = db.query(Hospital).first()
+    user = db.query(User).filter(User.role == "HOSPITAL_STAFF", User.hospital_id == hosp.id).first()
+    amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
+    inc = db.query(Incident).first()
+    inc.status = "ALLOCATED"
+    db.commit()
+
+    past_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+    disp = Dispatch(
+        incident_id=inc.id,
+        ambulance_id=amb.id,
+        destination_hospital_id=hosp.id,
+        coordination_status="PENDING_CONFIRMATIONS",
+        ambulance_confirmation_status="PENDING",
+        hospital_confirmation_status="PENDING",
+        status="ASSIGNED",
+        attempt_number=1,
+        reservation_expires_at=past_time,
+    )
+    db.add(disp)
+    db.commit()
+    db.refresh(disp)
+
+    # Calling get_allocated_incidents automatically runs expire_single_dispatch_if_due
+    results = get_allocated_incidents(hospital_id=hosp.id, db=db, current_user=user)
+    db.refresh(disp)
+    assert disp.coordination_status in ["EXPIRED", "REASSIGNMENT_REQUIRED", "PENDING_CONFIRMATIONS"]
+    assert disp.attempt_number >= 1
+
+
+def test_websocket_envelope_and_eligibility():
+    from backend.app.core.ws import create_event_envelope, WebSocketClient
+
+    env = create_event_envelope(
+        "DISPATCH_CONFIRMATION_UPDATED",
+        {"dispatch_id": 999, "status": "CONFIRMED"},
+        entity_type="dispatch",
+        entity_id=999,
+    )
+    assert env["event"] == "DISPATCH_CONFIRMATION_UPDATED"
+    assert env["event_type"] == "DISPATCH_CONFIRMATION_UPDATED"
+    assert env["payload"]["dispatch_id"] == 999
+
+    # Test client eligibility filtering
+    mock_ws = AsyncMock()
+    client = WebSocketClient(
+        websocket=mock_ws,
+        user_id=10,
+        email="hospital@lifelink.demo",
+        role="HOSPITAL_STAFF",
+        hospital_id=1,
+    )
+    # Target same hospital -> True
+    assert ws_manager.is_client_eligible(client, hospital_id=1) is True
+    # Target different hospital -> False
+    assert ws_manager.is_client_eligible(client, hospital_id=2) is False
+    # Target dispatcher -> True for regional coordinator
+    disp_client = WebSocketClient(
+        websocket=mock_ws,
+        user_id=1,
+        email="dispatcher@lifelink.demo",
+        role="DISPATCHER",
+    )
+    assert ws_manager.is_client_eligible(disp_client, hospital_id=2) is True

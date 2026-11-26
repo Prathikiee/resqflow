@@ -211,11 +211,18 @@ export default function HospitalPortalPage() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<"connected" | "connecting" | "offline">("connecting");
+  const [nowMs, setNowMs] = useState<number>(Date.now());
   const [actionLoading, setActionLoading] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: "success" | "error" | "info" } | null>(null);
 
   // Reservation countdown timer
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
+
+  useEffect(() => {
+    const interval = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Modals & Selected items state
   const [selectedIncidentModal, setSelectedIncidentModal] = useState<DispatchRecord | null>(null);
@@ -462,13 +469,21 @@ export default function HospitalPortalPage() {
     }
   }, [getBackendUrl, router, handoverClinicianName, fetchCollisionAlerts]);
 
+  const fetchCollisionAlertsRef = useRef(fetchCollisionAlerts);
+  fetchCollisionAlertsRef.current = fetchCollisionAlerts;
+  const fetchHospitalDataRef = useRef(fetchHospitalData);
+  fetchHospitalDataRef.current = fetchHospitalData;
+
   // WebSocket Subscription
   useEffect(() => {
-    fetchCollisionAlerts();
-    fetchHospitalData();
+    fetchCollisionAlertsRef.current();
+    fetchHospitalDataRef.current();
 
     const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
-    if (!token) return;
+    if (!token) {
+      setConnectionStatus("offline");
+      return;
+    }
 
     const activeUrl = getBackendUrl();
     const wsUrl = activeUrl.replace(/^http/, "ws") + `/ws/live?token=${encodeURIComponent(token)}`;
@@ -476,10 +491,12 @@ export default function HospitalPortalPage() {
     let reconnectTimeout: NodeJS.Timeout | null = null;
 
     const connect = () => {
+      setConnectionStatus("connecting");
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
         setWsConnected(true);
+        setConnectionStatus("connected");
       };
 
       ws.onmessage = (event) => {
@@ -508,27 +525,29 @@ export default function HospitalPortalPage() {
             "INCIDENT_CREATED",
           ];
           if (relevantTypes.includes(type)) {
-            fetchCollisionAlerts();
-            fetchHospitalData();
+            fetchCollisionAlertsRef.current();
+            fetchHospitalDataRef.current();
           }
         } catch (_) { }
       };
 
       ws.onclose = () => {
         setWsConnected(false);
+        setConnectionStatus("offline");
         reconnectTimeout = setTimeout(connect, 3000);
       };
 
       ws.onerror = () => {
         setWsConnected(false);
+        setConnectionStatus("offline");
       };
     };
 
     connect();
 
     const pollInterval = setInterval(() => {
-      fetchCollisionAlerts();
-      fetchHospitalData();
+      fetchCollisionAlertsRef.current();
+      fetchHospitalDataRef.current();
     }, 5000);
 
     return () => {
@@ -536,18 +555,27 @@ export default function HospitalPortalPage() {
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) ws.close();
     };
-  }, [getBackendUrl, fetchHospitalData, fetchCollisionAlerts]);
+  }, [getBackendUrl]);
 
   // =============================================================================
   // DERIVED METRICS & FILTERED DISPATCHES
   // =============================================================================
   const pendingRequests = useMemo(() => {
-    return dispatches.filter(
+    const pending = dispatches.filter(
       (d) =>
         d.coordination_status === "PENDING_CONFIRMATIONS" &&
         d.hospital_confirmation_status === "PENDING" &&
         d.status !== "CANCELLED"
     );
+    const byIncident = new Map<number, DispatchRecord>();
+    for (const d of pending) {
+      const incId = d.incident_id || d.id;
+      const existing = byIncident.get(incId);
+      if (!existing || (d.attempt_number ?? 1) >= (existing.attempt_number ?? 1)) {
+        byIncident.set(incId, d);
+      }
+    }
+    return Array.from(byIncident.values());
   }, [dispatches]);
 
   const activeInboundPatients = useMemo(() => {
@@ -687,9 +715,10 @@ export default function HospitalPortalPage() {
     isActionInProgressRef.current = true;
     setActionLoading(true);
     const token = localStorage.getItem("lifelink_token");
+    const activeBackendUrl = getBackendUrl();
 
     try {
-      const resp = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/confirm/hospital`, {
+      const resp = await fetch(`${activeBackendUrl}/api/dispatch/${dispatchId}/confirm/hospital`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -697,7 +726,7 @@ export default function HospitalPortalPage() {
         },
         body: JSON.stringify({
           decision,
-          reason: decision === "REJECTED" ? reason || rejectionReason : undefined,
+          reason: decision === "REJECTED" ? (reason || rejectionReason).trim() : undefined,
         }),
       });
 
@@ -1330,6 +1359,7 @@ export default function HospitalPortalPage() {
           title={hospital?.name || "Emergency Operations Portal"}
           subtitle={`Facility Code: ${hospital?.facility_code || "KMC-AMB-01"} • ${hospital?.address || "Mangaluru"}`}
           wsConnected={wsConnected}
+          connectionStatus={connectionStatus}
           onMenuToggle={() => setIsMobileMenuOpen(true)}
           actions={
             <div className="flex items-center gap-2">
@@ -1930,7 +1960,11 @@ export default function HospitalPortalPage() {
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {pendingRequests.map((req) => (
+                  {pendingRequests.map((req) => {
+                    const reqRemainingSec = req.reservation_expires_at
+                      ? Math.max(0, Math.floor((new Date(req.reservation_expires_at).getTime() - nowMs) / 1000))
+                      : null;
+                    return (
                     <div
                       key={req.id}
                       className="bg-white rounded-xl border-2 border-amber-300 shadow-sm p-5 space-y-4"
@@ -1953,10 +1987,16 @@ export default function HospitalPortalPage() {
                           </span>
                         </div>
 
-                        {remainingSeconds !== null && (
-                          <div className="flex items-center gap-2 text-xs font-bold text-amber-700 bg-amber-50 px-3 py-1 rounded-full border border-amber-200">
+                        {reqRemainingSec !== null && (
+                          <div
+                            className={`flex items-center gap-2 text-xs font-bold px-3 py-1 rounded-full border ${
+                              reqRemainingSec <= 15
+                                ? "text-red-700 bg-red-50 border-red-200 animate-pulse"
+                                : "text-amber-700 bg-amber-50 border-amber-200"
+                            }`}
+                          >
                             <Clock className="w-3.5 h-3.5" />
-                            <span>TTL: {remainingSeconds}s Remaining</span>
+                            <span>TTL: {reqRemainingSec}s Remaining</span>
                           </div>
                         )}
                       </div>
@@ -2017,7 +2057,8 @@ export default function HospitalPortalPage() {
                         </div>
                       </div>
                     </div>
-                  ))}
+                  );
+                })}
                 </div>
               )}
             </div>
