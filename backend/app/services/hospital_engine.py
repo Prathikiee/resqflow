@@ -112,7 +112,7 @@ def rank_suitable_hospitals(
             s_specialty = 40.0
             reasons.append("Secondary Referral Facility.")
 
-        # Doctor Availability Check
+        # Doctor Availability Check (On-duty matching specialists)
         doctors = getattr(h, "doctors_availability", []) or []
         active_specialists = [
             d["name"] for d in doctors
@@ -121,6 +121,18 @@ def rank_suitable_hospitals(
         if active_specialists:
             s_specialty = min(100.0, s_specialty + 10.0)
             reasons.append(f"On-Duty Medical Staffing: Active specialists on shift ({', '.join(active_specialists[:2])}).")
+
+        # Clinical Equipment Readiness Check
+        equipment = getattr(h, "equipment_readiness", {}) or {}
+        equip_score = 0.0
+        if "Cardiology" in target_specialties and equipment.get("cath_lab") == "OPERATIONAL":
+            equip_score += 5.0
+            reasons.append("Advanced Facility Capability: Active Cardiac Cath Lab Operational.")
+        if "Trauma Level 1" in target_specialties and equipment.get("trauma_ot") == "READY":
+            equip_score += 5.0
+            reasons.append("Advanced Facility Capability: Dedicated Trauma OT Ready.")
+        if equipment.get("ct_scanner") == "OPERATIONAL":
+            equip_score += 2.0
 
         # 2. Transit Proximity Score (Weight: 30%)
         # 100 pts at 1 min, decays by 4 pts per minute
@@ -132,12 +144,18 @@ def rank_suitable_hospitals(
         s_icu = min(100.0, icu_ratio * 100.0)
         reasons.append(f"Critical Bed Status: {h.available_icu_beds}/{h.total_icu_beds} ICU beds vacant.")
 
-        # 4. Emergency Bay Capacity Score (Weight: 15%)
+        # 4. Emergency Bay Capacity Score (Weight: 15%) & Reservation Guard
         reserved_beds = getattr(h, "reserved_emergency_beds", 0) or 0
         effective_er_beds = max(0, h.available_emergency_beds - reserved_beds)
         er_ratio = effective_er_beds / max(1, h.total_emergency_beds)
         s_er = min(100.0, er_ratio * 100.0)
         reasons.append(f"Emergency Bay Status: {effective_er_beds}/{h.total_emergency_beds} unreserved bays open ({reserved_beds} reserved).")
+
+        # Conflicting Reservation & Capacity Penalty
+        capacity_mod = 0.0
+        if effective_er_beds <= 0:
+            capacity_mod = -35.0
+            reasons.append("Capacity Constraint: Zero unreserved emergency bays available. Alternative facility recommended.")
 
         # Operational Readiness Penalty / Note
         readiness_mod = 0.0
@@ -147,7 +165,7 @@ def rank_suitable_hospitals(
         else:
             reasons.append("ED Readiness Status: Facility is READY for immediate inbound reception.")
 
-        total_score = max(5.0, (0.35 * s_specialty) + (0.30 * s_proximity) + (0.20 * s_icu) + (0.15 * s_er) + readiness_mod)
+        total_score = max(5.0, (0.35 * s_specialty) + (0.30 * s_proximity) + (0.20 * s_icu) + (0.15 * s_er) + equip_score + readiness_mod + capacity_mod)
 
         candidates.append(
             HospitalRankingCandidate(
@@ -159,6 +177,8 @@ def rank_suitable_hospitals(
                     "proximity_score": round(s_proximity, 1),
                     "icu_capacity_score": round(s_icu, 1),
                     "er_capacity_score": round(s_er, 1),
+                    "equipment_score": round(equip_score, 1),
+                    "effective_er_beds": effective_er_beds,
                 },
                 reasons=reasons,
                 matched_specialties=matched,

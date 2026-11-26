@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import "leaflet/dist/leaflet.css";
 import {
   MapContainer,
@@ -11,6 +11,7 @@ import {
   useMap,
 } from "react-leaflet";
 import L from "leaflet";
+import { Crosshair, Maximize2, RotateCcw } from "lucide-react";
 
 interface IncidentItem {
   id: number;
@@ -126,8 +127,26 @@ const createHospitalIcon = () => {
 };
 
 // Component to handle auto-resize and view centering
-function MapController({ center, zoom }: { center: [number, number]; zoom: number }) {
+function MapController({
+  centerLat,
+  centerLng,
+  zoom,
+  selectedIncident,
+  recenterTrigger,
+  fitAllTrigger,
+  allCoordinates,
+}: {
+  centerLat: number;
+  centerLng: number;
+  zoom: number;
+  selectedIncident?: IncidentItem | null;
+  recenterTrigger: number;
+  fitAllTrigger: number;
+  allCoordinates: [number, number][];
+}) {
   const map = useMap();
+  const userInteractedRef = useRef(false);
+  const lastSelectedIncidentIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     // Invalidate map size after mount or container layout changes
@@ -138,15 +157,63 @@ function MapController({ center, zoom }: { center: [number, number]; zoom: numbe
     const handleResize = () => map.invalidateSize();
     window.addEventListener("resize", handleResize);
 
+    const handleUserInteraction = () => {
+      userInteractedRef.current = true;
+    };
+
+    map.on("dragstart", handleUserInteraction);
+    map.on("zoomstart", handleUserInteraction);
+
     return () => {
       clearTimeout(timer);
       window.removeEventListener("resize", handleResize);
+      map.off("dragstart", handleUserInteraction);
+      map.off("zoomstart", handleUserInteraction);
     };
   }, [map]);
 
+  // Center once when selected incident changes
   useEffect(() => {
-    map.setView(center, zoom, { animate: true });
-  }, [center, zoom, map]);
+    if (selectedIncident && selectedIncident.id !== lastSelectedIncidentIdRef.current) {
+      lastSelectedIncidentIdRef.current = selectedIncident.id;
+      userInteractedRef.current = false;
+      map.setView([selectedIncident.latitude, selectedIncident.longitude], 15, { animate: true });
+    }
+  }, [selectedIncident, map]);
+
+  // Handle explicit Recenter button
+  useEffect(() => {
+    if (recenterTrigger > 0) {
+      userInteractedRef.current = false;
+      if (selectedIncident) {
+        map.setView([selectedIncident.latitude, selectedIncident.longitude], 15, { animate: true });
+      } else {
+        map.setView([centerLat, centerLng], zoom, { animate: true });
+      }
+    }
+  }, [recenterTrigger, centerLat, centerLng, zoom, selectedIncident, map]);
+
+  // Handle explicit Fit All (Reset View) button
+  useEffect(() => {
+    if (fitAllTrigger > 0 && allCoordinates.length > 0) {
+      userInteractedRef.current = false;
+      const bounds = L.latLngBounds(allCoordinates);
+      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16 });
+    }
+  }, [fitAllTrigger, allCoordinates, map]);
+
+  // Initial mount centering only (does not reset user pan on subsequent renders)
+  const isMountedRef = useRef(false);
+  useEffect(() => {
+    if (!isMountedRef.current) {
+      isMountedRef.current = true;
+      if (selectedIncident) {
+        map.setView([selectedIncident.latitude, selectedIncident.longitude], 15, { animate: false });
+      } else {
+        map.setView([centerLat, centerLng], zoom, { animate: false });
+      }
+    }
+  }, [centerLat, centerLng, zoom, selectedIncident, map]);
 
   return null;
 }
@@ -161,6 +228,16 @@ export default function CommandCenterMap({
   center = [12.891, 74.856], // Centered over Mangaluru
   zoom = 13,
 }: MapProps) {
+  const [recenterTrigger, setRecenterTrigger] = useState(0);
+  const [fitAllTrigger, setFitAllTrigger] = useState(0);
+
+  // Compute all active coordinates for Fit All
+  const allCoordinates: [number, number][] = [
+    ...incidents.map((i) => [i.latitude, i.longitude] as [number, number]),
+    ...ambulances.map((a) => [a.current_latitude, a.current_longitude] as [number, number]),
+    ...hospitals.map((h) => [h.latitude, h.longitude] as [number, number]),
+  ];
+
   // Tile provider configuration:
   // 1. If custom tile URL specified, use it.
   // 2. If Carto API key is provided, use CartoDB Voyager with authorized key.
@@ -189,13 +266,44 @@ export default function CommandCenterMap({
 
   return (
     <div className="w-full h-full min-h-[480px] relative rounded-xl overflow-hidden border border-slate-200 bg-slate-100 shadow-sm">
+      {/* Floating View Controls (Recenter & Reset View) */}
+      <div className="absolute top-3 right-3 z-[1000] flex items-center gap-1.5 bg-white/95 backdrop-blur border border-slate-200 rounded-lg p-1 shadow-md">
+        <button
+          type="button"
+          onClick={() => setRecenterTrigger((prev) => prev + 1)}
+          className="px-2.5 py-1 text-xs font-semibold text-slate-700 hover:text-blue-600 hover:bg-slate-50 rounded flex items-center gap-1 transition"
+          title="Recenter on selected emergency or regional center"
+        >
+          <Crosshair className="w-3.5 h-3.5" />
+          <span>Recenter</span>
+        </button>
+        <span className="w-px h-4 bg-slate-200" />
+        <button
+          type="button"
+          onClick={() => setFitAllTrigger((prev) => prev + 1)}
+          className="px-2.5 py-1 text-xs font-semibold text-slate-700 hover:text-blue-600 hover:bg-slate-50 rounded flex items-center gap-1 transition"
+          title="Reset map view to show all regional resources"
+        >
+          <Maximize2 className="w-3.5 h-3.5" />
+          <span>Fit All</span>
+        </button>
+      </div>
+
       <MapContainer
         center={center}
         zoom={zoom}
         style={{ height: "100%", width: "100%", minHeight: "480px", background: "#f8fafc" }}
         attributionControl={true}
       >
-        <MapController center={center} zoom={zoom} />
+        <MapController
+          centerLat={center[0]}
+          centerLng={center[1]}
+          zoom={zoom}
+          selectedIncident={selectedIncident}
+          recenterTrigger={recenterTrigger}
+          fitAllTrigger={fitAllTrigger}
+          allCoordinates={allCoordinates}
+        />
 
         {/* Dynamic Tile Layer (Configured with API key or OpenStreetMap fallback) */}
         <TileLayer

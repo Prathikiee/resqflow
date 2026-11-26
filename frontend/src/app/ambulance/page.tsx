@@ -126,7 +126,7 @@ function getSharedAudioContext(): AudioContext | null {
   return sharedAudioContext;
 }
 
-function playEmergencyAlarm(durationSeconds = 5): () => void {
+function playEmergencyAlarm(durationSeconds = 7.5): () => void {
   try {
     const audioCtx = getSharedAudioContext();
     if (!audioCtx) return () => {};
@@ -162,9 +162,10 @@ function playEmergencyAlarm(durationSeconds = 5): () => void {
       });
     };
 
-    playBeepTriple(0);
-    playBeepTriple(1.1);
-    playBeepTriple(2.2);
+    // Siren alarm sequence lasting ~7.5 seconds
+    [0, 1.1, 2.2, 3.3, 4.4, 5.5, 6.6].forEach((offset) => {
+      playBeepTriple(offset);
+    });
 
     timerId = setTimeout(stopAlarm, durationSeconds * 1000);
     return stopAlarm;
@@ -202,6 +203,9 @@ export default function AmbulancePortalPage() {
 
   // Modals state
   const [showPickupModal, setShowPickupModal] = useState(false);
+  const [showNotPickedUpModal, setShowNotPickedUpModal] = useState(false);
+  const [notPickedUpReason, setNotPickedUpReason] = useState("Patient Refused Transport (AMA)");
+  const [notPickedUpNotes, setNotPickedUpNotes] = useState("");
   const [showAssistanceModal, setShowAssistanceModal] = useState(false);
   const [showReportIssueModal, setShowReportIssueModal] = useState(false);
   const [selectedMissionDetails, setSelectedMissionDetails] =
@@ -652,6 +656,52 @@ export default function AmbulancePortalPage() {
     } catch (err: any) {
       setFeedbackMsg({
         text: `Pickup confirmation error: ${err.message}`,
+        type: "error",
+      });
+    } finally {
+      isActionInProgressRef.current = false;
+      setActionLoading(false);
+    }
+  };
+
+  const handlePatientNotPickedUp = async () => {
+    if (!activeMission || isActionInProgressRef.current) return;
+    isActionInProgressRef.current = true;
+    setActionLoading(true);
+    setShowNotPickedUpModal(false);
+    setFeedbackMsg(null);
+    const token = localStorage.getItem("lifelink_token");
+
+    try {
+      const resp = await fetch(
+        `${backendUrl}/api/dispatch/${activeMission.id}/patient-not-picked-up`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            reason: notPickedUpReason,
+            notes: notPickedUpNotes.trim() || undefined,
+          }),
+        }
+      );
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to record patient not picked up");
+      }
+
+      setFeedbackMsg({
+        text: `Patient not picked up: ${notPickedUpReason}. Mission concluded safely.`,
+        type: "info",
+      });
+      setNotPickedUpNotes("");
+      await fetchAmbulanceData();
+    } catch (err: any) {
+      setFeedbackMsg({
+        text: `Error: ${err.message}`,
         type: "error",
       });
     } finally {
@@ -1548,65 +1598,112 @@ export default function AmbulancePortalPage() {
 
                   {/* Stage 2: EN_ROUTE_INCIDENT -> ON_SCENE */}
                   {activeMission.status === "EN_ROUTE_INCIDENT" && (
-                    <button
-                      type="button"
-                      disabled={actionLoading}
-                      onClick={() => handleStepLifecycle(activeMission.id)}
-                      className="w-full py-4 px-6 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-base shadow-md flex items-center justify-center space-x-3 transition-colors"
-                    >
-                      {actionLoading ? (
-                        <RefreshCw className="w-5 h-5 animate-spin" />
-                      ) : (
-                        <>
-                          <MapPin className="w-5 h-5" />
-                          <span>Arrived at Scene</span>
-                        </>
-                      )}
-                    </button>
-                  )}
+                    <div className="space-y-3">
+                      {/* External Navigation Link */}
+                      <div className="flex items-center gap-2">
+                        <a
+                          href={`https://www.google.com/maps/dir/?api=1&destination=${activeMission.incident_latitude || activeMission.incident?.latitude || 12.87},${activeMission.incident_longitude || activeMission.incident?.longitude || 74.85}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="w-full py-2.5 px-3 rounded-xl bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                          title="Open external turn-by-turn navigation in Google Maps"
+                        >
+                          <Navigation className="w-3.5 h-3.5 fill-current" />
+                          <span>Navigate to Incident Scene (Google Maps)</span>
+                          <ExternalLink className="w-3 h-3 ml-0.5" />
+                        </a>
+                      </div>
 
-                  {/* Stage 3: ON_SCENE -> CONFIRM PATIENT PICKUP (EXPLICIT CONFIRMATION) */}
-                  {activeMission.status === "ON_SCENE" && (
-                    <div className="space-y-2">
-                      <p className="text-xs text-slate-500">
-                        Paramedic protocol: Arrival at scene does not automatically depart.
-                        Confirm patient is safely inside the ambulance before starting hospital transport.
-                      </p>
                       <button
                         type="button"
                         disabled={actionLoading}
-                        onClick={() => setShowPickupModal(true)}
-                        className="w-full py-4 px-6 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-base shadow-md flex items-center justify-center space-x-3 transition-colors"
+                        onClick={() => handleStepLifecycle(activeMission.id)}
+                        className="w-full py-4 px-6 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-base shadow-md flex items-center justify-center space-x-3 transition-colors"
                       >
                         {actionLoading ? (
                           <RefreshCw className="w-5 h-5 animate-spin" />
                         ) : (
                           <>
-                            <Stethoscope className="w-5 h-5" />
-                            <span>Confirm Patient Pickup & Start Transport</span>
+                            <MapPin className="w-5 h-5" />
+                            <span>Arrived at Scene</span>
                           </>
                         )}
                       </button>
                     </div>
                   )}
 
+                  {/* Stage 3: ON_SCENE -> TWO DISTINCT ACTIONS (PICKED UP vs NOT PICKED UP) */}
+                  {activeMission.status === "ON_SCENE" && (
+                    <div className="space-y-3">
+                      <p className="text-xs text-slate-500 font-medium">
+                        Paramedic triage milestone: Arrival at scene does not automatically depart.
+                        Select the appropriate clinical disposition for the patient:
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <button
+                          type="button"
+                          disabled={actionLoading}
+                          onClick={() => setShowPickupModal(true)}
+                          className="w-full py-3.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-sm shadow-md flex items-center justify-center space-x-2 transition-colors"
+                        >
+                          {actionLoading ? (
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <>
+                              <Stethoscope className="w-4 h-4" />
+                              <span>Patient Picked Up</span>
+                            </>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={actionLoading}
+                          onClick={() => setShowNotPickedUpModal(true)}
+                          className="w-full py-3.5 px-4 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 border-2 border-amber-300 font-extrabold text-sm shadow-xs flex items-center justify-center space-x-2 transition-colors"
+                        >
+                          <AlertTriangle className="w-4 h-4 text-amber-600" />
+                          <span>Patient Not Picked Up</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Stage 4: EN_ROUTE_HOSPITAL -> AT_HOSPITAL */}
                   {activeMission.status === "EN_ROUTE_HOSPITAL" && (
-                    <button
-                      type="button"
-                      disabled={actionLoading}
-                      onClick={handleConfirmArrivalHospital}
-                      className="w-full py-4 px-6 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-base shadow-md flex items-center justify-center space-x-3 transition-colors"
-                    >
-                      {actionLoading ? (
-                        <RefreshCw className="w-5 h-5 animate-spin" />
-                      ) : (
-                        <>
-                          <Building2 className="w-5 h-5" />
-                          <span>Arrived at Hospital ER Trauma Bay</span>
-                        </>
+                    <div className="space-y-3">
+                      {/* External Navigation Link */}
+                      {activeMission.destination_hospital_latitude && (
+                        <div className="flex items-center gap-2">
+                          <a
+                            href={`https://www.google.com/maps/dir/?api=1&destination=${activeMission.destination_hospital_latitude},${activeMission.destination_hospital_longitude}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="w-full py-2.5 px-3 rounded-xl bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                            title="Open hospital route in Google Maps"
+                          >
+                            <Navigation className="w-3.5 h-3.5 fill-current" />
+                            <span>Navigate to {activeMission.destination_hospital_name || "Hospital"} (Google Maps)</span>
+                            <ExternalLink className="w-3 h-3 ml-0.5" />
+                          </a>
+                        </div>
                       )}
-                    </button>
+
+                      <button
+                        type="button"
+                        disabled={actionLoading}
+                        onClick={handleConfirmArrivalHospital}
+                        className="w-full py-4 px-6 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-base shadow-md flex items-center justify-center space-x-3 transition-colors"
+                      >
+                        {actionLoading ? (
+                          <RefreshCw className="w-5 h-5 animate-spin" />
+                        ) : (
+                          <>
+                            <Building2 className="w-5 h-5" />
+                            <span>Arrived at Hospital ER Trauma Bay</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   )}
 
                   {/* Stage 5: AT_HOSPITAL -> COMPLETE */}
@@ -2314,6 +2411,81 @@ export default function AmbulancePortalPage() {
                 className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-extrabold shadow-md transition-colors"
               >
                 Yes, Patient Onboard
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Patient Not Picked Up */}
+      {showNotPickedUpModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full border border-slate-200 p-6 space-y-4 shadow-xl">
+            <div className="flex items-center space-x-3 text-amber-600">
+              <div className="w-10 h-10 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-extrabold text-base text-slate-900">
+                  Patient Not Picked Up
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Mission Abort / Non-Transport Protocol
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              Select the operational reason why patient transport to hospital will not proceed.
+              This will update the mission status, release your unit to available status, and notify dispatch.
+            </p>
+
+            <div className="space-y-2">
+              <label className="text-[11px] font-bold text-slate-700 block uppercase tracking-wider">
+                Reason for Non-Transport
+              </label>
+              <select
+                value={notPickedUpReason}
+                onChange={(e) => setNotPickedUpReason(e.target.value)}
+                className="w-full text-xs p-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 font-semibold focus:outline-none focus:ring-2 focus:ring-amber-500"
+              >
+                <option value="Patient Refused Transport (AMA)">Patient Refused Transport (Against Medical Advice)</option>
+                <option value="Patient Deceased on Scene">Patient Deceased on Scene</option>
+                <option value="Gone on Arrival (GOA)">Gone on Arrival (Patient/Caller Not Found)</option>
+                <option value="Treated at Scene - No Transport Needed">Treated at Scene - No Hospital Transport Needed</option>
+                <option value="Cancelled by Police / On-Scene Authority">Cancelled by Police / On-Scene Authority</option>
+                <option value="Transported by Private Vehicle">Transported by Private Vehicle Prior to Departure</option>
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-bold text-slate-700 block uppercase tracking-wider">
+                Additional Notes / Paramedic Observations
+              </label>
+              <textarea
+                value={notPickedUpNotes}
+                onChange={(e) => setNotPickedUpNotes(e.target.value)}
+                placeholder="Optional clinical notes or witness details..."
+                rows={3}
+                className="w-full text-xs p-2.5 rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500 resize-none"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowNotPickedUpModal(false)}
+                className="w-full py-2.5 px-4 rounded-xl border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={handlePatientNotPickedUp}
+                className="w-full py-2.5 px-4 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-extrabold shadow-md transition-colors"
+              >
+                {actionLoading ? "Submitting..." : "Confirm Non-Transport"}
               </button>
             </div>
           </div>

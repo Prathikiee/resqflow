@@ -463,6 +463,12 @@ class Dispatch(Base):
     attempt_number = Column(Integer, default=1, nullable=False)
     escalation_history_json = Column(Text, default="[]")  # JSON audit trail of all escalation attempts
 
+    # Alternative Ambulance Request & Patient Pickup Failure
+    alternative_ambulance_requested = Column(Boolean, default=False, nullable=True)
+    alternative_ambulance_reason = Column(String(255), nullable=True)
+    patient_pickup_status = Column(String(50), nullable=True)  # PICKED_UP, NOT_PICKED_UP
+    patient_pickup_failure_reason = Column(String(255), nullable=True)
+
     dispatched_at = Column(DateTime, default=utc_now, nullable=False)
     arrived_incident_at = Column(DateTime, nullable=True)
     departed_incident_at = Column(DateTime, nullable=True)

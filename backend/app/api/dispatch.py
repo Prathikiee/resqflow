@@ -18,6 +18,8 @@ from backend.app.schemas.dispatch import (
     HandoverPacketOut,
     HospitalPreparationUpdate,
     MissionAssistanceRequest,
+    AlternativeAmbulanceRequest,
+    PatientNotPickedUpRequest,
 )
 from backend.app.services.allocation_engine import score_and_rank_ambulances
 from backend.app.services.hospital_engine import rank_suitable_hospitals
@@ -2473,6 +2475,203 @@ def request_mission_assistance(
     )
 
     return {"status": "ok", "message": f"Assistance request for {final_type} transmitted to Control Room"}
+
+@router.post("/{dispatch_id}/request-alternative-ambulance", response_model=DispatchOut)
+def request_alternative_ambulance(
+    dispatch_id: int,
+    payload: AlternativeAmbulanceRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Hospital staff action: Arrange/Request Alternative Ambulance unit
+    (e.g., when a crash/collision alert is detected on transit route,
+    or the assigned unit is delayed/immobilized, or patient needs higher care level).
+    Sends request to Dispatcher, records audit event, and flags dispatch.
+    """
+    begin_immediate_if_sqlite(db)
+    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user and auth_user.role == ROLE_CITIZEN:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot request alternative ambulances")
+
+    hospital_id = payload.hospital_id or dispatch.destination_hospital_id
+    hospital = db.query(Hospital).filter(Hospital.id == hospital_id).first() if hospital_id else None
+    ambulance = db.query(Ambulance).filter(Ambulance.id == dispatch.ambulance_id).first() if dispatch.ambulance_id else None
+
+    dispatch.alternative_ambulance_requested = True
+    dispatch.alternative_ambulance_reason = payload.reason
+    now = get_utc_now()
+
+    # Append to escalation history
+    history = list(dispatch.escalation_history or [])
+    history.append({
+        "event": "ALTERNATIVE_AMBULANCE_REQUESTED",
+        "requested_by": auth_user.full_name if auth_user else "Hospital Medical Staff",
+        "role": auth_user.role if auth_user else "HOSPITAL_STAFF",
+        "hospital_id": hospital.id if hospital else None,
+        "hospital_name": hospital.name if hospital else "Receiving Hospital",
+        "reason": payload.reason,
+        "notes": payload.notes,
+        "timestamp": now.isoformat(),
+    })
+    dispatch.escalation_history = history
+
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="ALTERNATIVE_AMBULANCE_REQUESTED",
+        event_title="Alternative Ambulance Requested by Hospital",
+        event_description=f"Hospital {hospital.name if hospital else 'ER'} requested alternative ambulance unit for dispatch #{dispatch.id} (Current: {ambulance.call_sign if ambulance else 'Unit'}). Reason: {payload.reason}. Notes: {payload.notes or 'None'}",
+        actor_type=auth_user.role if auth_user else "HOSPITAL_STAFF",
+        actor_reference=auth_user.full_name if auth_user else (hospital.name if hospital else "Hospital Staff"),
+        metadata={
+            "dispatch_id": dispatch.id,
+            "hospital_id": hospital.id if hospital else None,
+            "reason": payload.reason,
+            "notes": payload.notes,
+        },
+        commit=False,
+    )
+
+    db.commit()
+    db.refresh(dispatch)
+
+    broadcast_sync(
+        "ALTERNATIVE_AMBULANCE_REQUESTED",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "ambulance_id": dispatch.ambulance_id,
+            "current_call_sign": ambulance.call_sign if ambulance else None,
+            "destination_hospital_id": dispatch.destination_hospital_id,
+            "hospital_name": hospital.name if hospital else None,
+            "reason": payload.reason,
+            "notes": payload.notes,
+            "timestamp": now.isoformat(),
+        },
+        ambulance_id=dispatch.ambulance_id,
+        hospital_id=dispatch.destination_hospital_id,
+        entity_type="alternative_ambulance_request",
+        entity_id=dispatch.id,
+    )
+
+    return dispatch
+
+
+@router.post("/{dispatch_id}/patient-not-picked-up", response_model=DispatchOut)
+def record_patient_not_picked_up(
+    dispatch_id: int,
+    payload: PatientNotPickedUpRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    """
+    Paramedic crew explicitly records that the patient was NOT picked up on scene
+    (e.g., patient refused transport AMA, patient deceased on scene, gone on arrival,
+    treated on scene without transport needed, cancelled by police).
+    Safely terminates the mission without starting transport:
+      - Sets dispatch status to CANCELLED
+      - Marks patient_pickup_status = "NOT_PICKED_UP"
+      - Records patient_pickup_failure_reason = payload.reason
+      - Releases assigned ambulance back to AVAILABLE
+      - Releases hospital provisional bed reservation if any
+      - Updates incident status to RESOLVED or CANCELLED with clinical notes
+      - Logs PATIENT_NOT_PICKED_UP audit event
+      - Broadcasts real-time WebSocket update
+    """
+    begin_immediate_if_sqlite(db)
+    dispatch = db.query(Dispatch).filter(Dispatch.id == dispatch_id).first()
+    if not dispatch:
+        raise HTTPException(status_code=404, detail="Dispatch record not found")
+
+    auth_user = current_user if isinstance(current_user, User) else None
+    if auth_user:
+        if auth_user.role == ROLE_CITIZEN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Citizens cannot record patient pickup status")
+        if auth_user.role == ROLE_AMBULANCE_CREW and auth_user.ambulance_id != dispatch.ambulance_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Cannot record pickup status for another unit")
+
+    if dispatch.status != "ON_SCENE":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot record patient not picked up: Unit must be ON_SCENE (current status: '{dispatch.status}').",
+        )
+
+    now = get_utc_now()
+    dispatch.status = "CANCELLED"
+    dispatch.completed_at = now
+    dispatch.patient_pickup_status = "NOT_PICKED_UP"
+    dispatch.patient_pickup_failure_reason = payload.reason
+    dispatch.rejection_reason = f"Patient Not Picked Up: {payload.reason} ({payload.notes or 'No additional notes'})"
+
+    incident = db.query(Incident).filter(Incident.id == dispatch.incident_id).first()
+    ambulance = db.query(Ambulance).filter(Ambulance.id == dispatch.ambulance_id).first()
+
+    # Free ambulance back to AVAILABLE
+    if ambulance:
+        ambulance.status = "AVAILABLE"
+        ambulance.reservation_dispatch_id = None
+
+    # Free reserved hospital emergency bed
+    if dispatch.destination_hospital_id:
+        hospital = db.query(Hospital).filter(Hospital.id == dispatch.destination_hospital_id).first()
+        if hospital and (hospital.reserved_emergency_beds or 0) > 0:
+            hospital.reserved_emergency_beds = max(0, hospital.reserved_emergency_beds - 1)
+
+    # Determine incident outcome status
+    if incident:
+        if "Treated at Scene" in payload.reason:
+            incident.status = "RESOLVED"
+        else:
+            incident.status = "CANCELLED"
+
+    log_incident_event(
+        db=db,
+        incident_id=dispatch.incident_id,
+        dispatch_id=dispatch.id,
+        event_type="PATIENT_NOT_PICKED_UP",
+        event_title="Patient Not Picked Up On Scene",
+        event_description=f"Ambulance {ambulance.call_sign if ambulance else 'crew'} recorded: Patient Not Picked Up. Reason: {payload.reason}. Notes: {payload.notes or 'None'}. Transport to hospital aborted.",
+        actor_type="AMBULANCE_CREW",
+        actor_reference=ambulance.call_sign if ambulance else "Unit Crew",
+        metadata={
+            "dispatch_id": dispatch.id,
+            "reason": payload.reason,
+            "notes": payload.notes,
+            "incident_status": incident.status if incident else None,
+        },
+        commit=False,
+    )
+
+    db.commit()
+    db.refresh(dispatch)
+
+    broadcast_sync(
+        "PATIENT_NOT_PICKED_UP",
+        {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "ambulance_id": dispatch.ambulance_id,
+            "destination_hospital_id": dispatch.destination_hospital_id,
+            "status": dispatch.status,
+            "patient_pickup_status": "NOT_PICKED_UP",
+            "reason": payload.reason,
+            "incident_status": incident.status if incident else "CANCELLED",
+            "ambulance_status": "AVAILABLE",
+        },
+        ambulance_id=dispatch.ambulance_id,
+        hospital_id=dispatch.destination_hospital_id,
+        reporter_user_id=incident.reporter_user_id if incident else None,
+        entity_type="dispatch",
+        entity_id=dispatch.id,
+    )
+
+    return dispatch
 
 @router.get("/route/preview")
 def preview_route(

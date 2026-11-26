@@ -52,6 +52,15 @@ class MissionAssistanceRequest(BaseModel):
     assistance_type: str = Field(..., description="POLICE, FIRE, BACKUP_AMBULANCE, or CONTROL_ROOM")
     notes: Optional[str] = None
 
+class AlternativeAmbulanceRequest(BaseModel):
+    reason: str = Field(..., description="Reason for requesting alternative ambulance (e.g. Collision Detected on Route, Unit Delayed, Vehicle Breakdown, High Acuity Critical Care Needed)")
+    notes: Optional[str] = None
+    hospital_id: Optional[int] = None
+
+class PatientNotPickedUpRequest(BaseModel):
+    reason: str = Field(..., description="Reason patient was not picked up (e.g. Patient Refused Transport (AMA), Patient Deceased on Scene, Gone on Arrival (GOA), Treated at Scene - No Transport Needed, Cancelled by Police)")
+    notes: Optional[str] = None
+
 
 class HospitalPreparationUpdate(BaseModel):
     preparation_status: str = Field(..., description="NOT_STARTED, TEAM_NOTIFIED, BAY_PREPARED, SPECIALISTS_STANDBY, READY_FOR_ARRIVAL")
@@ -151,6 +160,12 @@ class DispatchOut(BaseModel):
     rejection_reason: Optional[str] = None
     attempt_number: int = 1
     escalation_history: Optional[List[Dict[str, Any]]] = None
+
+    # Alternative ambulance & pickup failure tracking
+    alternative_ambulance_requested: Optional[bool] = False
+    alternative_ambulance_reason: Optional[str] = None
+    patient_pickup_status: Optional[str] = None
+    patient_pickup_failure_reason: Optional[str] = None
 
     # Emergency Handover Packet
     handover_packet: Optional[HandoverPacketOut] = None

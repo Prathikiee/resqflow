@@ -149,6 +149,15 @@ def upgrade_schema(target_engine=None):
                     conn.execute(text("ALTER TABLE dispatches ADD COLUMN attempt_number INTEGER DEFAULT 1"))
                 if "escalation_history_json" not in disp_cols:
                     conn.execute(text("ALTER TABLE dispatches ADD COLUMN escalation_history_json TEXT DEFAULT '[]'"))
+                bool_type = "BOOLEAN DEFAULT FALSE" if "postgres" in str(eng.url).lower() else "BOOLEAN DEFAULT 0"
+                if "alternative_ambulance_requested" not in disp_cols:
+                    conn.execute(text(f"ALTER TABLE dispatches ADD COLUMN alternative_ambulance_requested {bool_type}"))
+                if "alternative_ambulance_reason" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN alternative_ambulance_reason VARCHAR(255)"))
+                if "patient_pickup_status" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN patient_pickup_status VARCHAR(50)"))
+                if "patient_pickup_failure_reason" not in disp_cols:
+                    conn.execute(text("ALTER TABLE dispatches ADD COLUMN patient_pickup_failure_reason TEXT"))
                 conn.commit()
 
             if "handover_packets" not in table_names:

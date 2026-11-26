@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import "leaflet/dist/leaflet.css";
 import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import L from "leaflet";
+import { Crosshair, Navigation, AlertCircle } from "lucide-react";
 
 interface CitizenTrackingMapProps {
   incidentLat: number;
@@ -68,13 +69,19 @@ function MapViewController({
   incidentLng,
   ambulanceLat,
   ambulanceLng,
+  recenterSceneTrigger,
+  recenterAmbTrigger,
 }: {
   incidentLat: number;
   incidentLng: number;
   ambulanceLat?: number;
   ambulanceLng?: number;
+  recenterSceneTrigger: number;
+  recenterAmbTrigger: number;
 }) {
   const map = useMap();
+  const userInteractedRef = useRef(false);
+  const initialMountedRef = useRef(false);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -84,13 +91,26 @@ function MapViewController({
     const handleResize = () => map.invalidateSize();
     window.addEventListener("resize", handleResize);
 
+    const handleUserInteraction = () => {
+      userInteractedRef.current = true;
+    };
+
+    map.on("dragstart", handleUserInteraction);
+    map.on("zoomstart", handleUserInteraction);
+
     return () => {
       clearTimeout(timer);
       window.removeEventListener("resize", handleResize);
+      map.off("dragstart", handleUserInteraction);
+      map.off("zoomstart", handleUserInteraction);
     };
   }, [map]);
 
+  // Initial mount fitBounds / view setting only (never resets user pan on background polls)
   useEffect(() => {
+    if (initialMountedRef.current) return;
+    initialMountedRef.current = true;
+
     if (
       typeof ambulanceLat === "number" &&
       typeof ambulanceLng === "number" &&
@@ -104,9 +124,28 @@ function MapViewController({
       );
       map.fitBounds(bounds, { padding: [40, 40], maxZoom: 16 });
     } else {
-      map.setView([incidentLat, incidentLng], 15, { animate: true });
+      map.setView([incidentLat, incidentLng], 15, { animate: false });
     }
   }, [incidentLat, incidentLng, ambulanceLat, ambulanceLng, map]);
+
+  // Handle explicit recenter buttons
+  useEffect(() => {
+    if (recenterSceneTrigger > 0) {
+      userInteractedRef.current = false;
+      map.setView([incidentLat, incidentLng], 16, { animate: true });
+    }
+  }, [recenterSceneTrigger, incidentLat, incidentLng, map]);
+
+  useEffect(() => {
+    if (
+      recenterAmbTrigger > 0 &&
+      typeof ambulanceLat === "number" &&
+      typeof ambulanceLng === "number"
+    ) {
+      userInteractedRef.current = false;
+      map.setView([ambulanceLat, ambulanceLng], 16, { animate: true });
+    }
+  }, [recenterAmbTrigger, ambulanceLat, ambulanceLng, map]);
 
   return null;
 }
@@ -123,6 +162,9 @@ export default function CitizenTrackingMap({
   hospitalLng,
   hospitalName,
 }: CitizenTrackingMapProps) {
+  const [recenterSceneTrigger, setRecenterSceneTrigger] = useState(0);
+  const [recenterAmbTrigger, setRecenterAmbTrigger] = useState(0);
+
   const cartoApiKey = process.env.NEXT_PUBLIC_CARTO_API_KEY;
   const customTileUrl = process.env.NEXT_PUBLIC_MAP_TILE_URL;
   const customAttribution = process.env.NEXT_PUBLIC_MAP_ATTRIBUTION;
@@ -163,6 +205,41 @@ export default function CitizenTrackingMap({
 
   return (
     <div className="relative w-full h-64 sm:h-72 rounded-2xl overflow-hidden border border-slate-200 shadow-2xs">
+      {/* Floating View Controls (Recenter on Scene & Track Ambulance) */}
+      <div className="absolute top-2.5 left-2.5 z-[1000] flex items-center gap-1.5 bg-white/95 backdrop-blur-xs border border-slate-200 rounded-lg p-1 shadow-xs">
+        <button
+          type="button"
+          onClick={() => setRecenterSceneTrigger((prev) => prev + 1)}
+          className="px-2 py-0.5 text-[11px] font-semibold text-slate-700 hover:text-red-600 hover:bg-slate-50 rounded flex items-center gap-1 transition"
+          title="Recenter map on your reported emergency scene"
+        >
+          <Crosshair className="w-3 h-3 text-red-600" />
+          <span>My Location</span>
+        </button>
+        {hasAmbulanceCoords && (
+          <>
+            <span className="w-px h-3.5 bg-slate-200" />
+            <button
+              type="button"
+              onClick={() => setRecenterAmbTrigger((prev) => prev + 1)}
+              className="px-2 py-0.5 text-[11px] font-semibold text-slate-700 hover:text-blue-600 hover:bg-slate-50 rounded flex items-center gap-1 transition"
+              title="Track en route ambulance location"
+            >
+              <Navigation className="w-3 h-3 text-blue-600" />
+              <span>Ambulance</span>
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Honest fallback notification if ambulance telemetry is not yet active */}
+      {!hasAmbulanceCoords && (
+        <div className="absolute bottom-2.5 left-2.5 z-[1000] bg-slate-900/90 backdrop-blur-xs text-white rounded-lg px-2.5 py-1 text-[11px] font-semibold flex items-center gap-1.5 shadow-sm border border-slate-700">
+          <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          <span>Ambulance live location not yet available.</span>
+        </div>
+      )}
+
       <MapContainer
         center={[incidentLat, incidentLng]}
         zoom={15}
@@ -174,6 +251,8 @@ export default function CitizenTrackingMap({
           incidentLng={incidentLng}
           ambulanceLat={hasAmbulanceCoords ? ambulanceLat : undefined}
           ambulanceLng={hasAmbulanceCoords ? ambulanceLng : undefined}
+          recenterSceneTrigger={recenterSceneTrigger}
+          recenterAmbTrigger={recenterAmbTrigger}
         />
 
         <TileLayer attribution={tileAttribution} url={tileUrl} maxZoom={19} />

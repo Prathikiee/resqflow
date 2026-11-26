@@ -880,6 +880,32 @@ export default function DispatcherCommandCenterPage() {
                             </button>
                           </div>
                         )}
+
+                        {/* Alternative Ambulance Requested by Hospital Alert & Action */}
+                        {currentDispatch.alternative_ambulance_requested && (
+                          <div className="p-2.5 rounded bg-amber-50 border border-amber-300 space-y-1.5 mt-2">
+                            <div className="flex items-center gap-1.5 text-xs font-bold text-amber-900">
+                              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                              <span>Alternative Ambulance Requested by Receiving Facility</span>
+                            </div>
+                            <p className="text-[11px] text-amber-800">
+                              Reason: <strong>{currentDispatch.alternative_ambulance_reason || "Medical staff requested backup unit"}</strong>
+                            </p>
+                            <button
+                              type="button"
+                              disabled={isReassigning}
+                              onClick={() => handleTriggerReassignment(currentDispatch.id, currentDispatch.attempt_number)}
+                              className={`px-3 py-1.5 rounded-lg text-white text-xs font-bold flex items-center gap-1.5 transition shadow-2xs ${
+                                isReassigning
+                                  ? "bg-slate-400 cursor-not-allowed opacity-80"
+                                  : "bg-amber-600 hover:bg-amber-700 active:scale-95"
+                              }`}
+                            >
+                              <RefreshCw className={`w-3.5 h-3.5 ${isReassigning ? "animate-spin" : ""}`} />
+                              <span>{isReassigning ? "Reassigning..." : "Approve & Reassign Alternative Unit"}</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div className="p-3 rounded-lg bg-amber-50/60 border border-amber-200 text-xs text-amber-900 flex items-center justify-between">

@@ -171,6 +171,10 @@ interface DispatchRecord {
   hospital_preparation_notes?: string;
   hospital_acknowledged_at?: string;
   patient_arrived_hospital_confirmed_at?: string;
+  alternative_ambulance_requested?: boolean;
+  alternative_ambulance_reason?: string;
+  patient_pickup_status?: string;
+  patient_pickup_failure_reason?: string;
   created_at?: string;
   incident?: {
     id: number;
@@ -235,6 +239,15 @@ export default function HospitalPortalPage() {
   const [handoverNotesInput, setHandoverNotesInput] = useState("");
   const [rejectModalDispatch, setRejectModalDispatch] = useState<DispatchRecord | null>(null);
   const [rejectionReason, setRejectionReason] = useState("Trauma Bay Overcapacity / Divert Active");
+
+  // Facility Switcher Search state
+  const [isFacilitySearchOpen, setIsFacilitySearchOpen] = useState(false);
+  const [facilitySearchQuery, setFacilitySearchQuery] = useState("");
+
+  // Alternative Ambulance Request modal state
+  const [alternativeAmbulanceModalDispatch, setAlternativeAmbulanceModalDispatch] = useState<DispatchRecord | null>(null);
+  const [alternativeAmbulanceReason, setAlternativeAmbulanceReason] = useState("Crash/Collision Detected on Transit Route");
+  const [alternativeAmbulanceNotes, setAlternativeAmbulanceNotes] = useState("");
 
   // Doctor Management modal state
   const [isAddDoctorModalOpen, setIsAddDoctorModalOpen] = useState(false);
@@ -873,6 +886,51 @@ export default function HospitalPortalPage() {
     }
   };
 
+  // 1b. Request Alternative Ambulance
+  const handleRequestAlternativeAmbulance = async (dispatchId: number) => {
+    if (!dispatchId || isActionInProgressRef.current) return;
+    isActionInProgressRef.current = true;
+    setActionLoading(true);
+    const token = localStorage.getItem("lifelink_token");
+    const activeUrl = getBackendUrl();
+
+    try {
+      const resp = await fetch(`${activeUrl}/api/dispatch/${dispatchId}/request-alternative-ambulance`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          reason: alternativeAmbulanceReason,
+          notes: alternativeAmbulanceNotes.trim() || undefined,
+          hospital_id: hospital?.id,
+        }),
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || `Failed to request alternative ambulance (${resp.status})`);
+      }
+
+      setFeedbackMsg({
+        text: `Alternative ambulance requested from Dispatcher. Reason: ${alternativeAmbulanceReason}`,
+        type: "success",
+      });
+      setAlternativeAmbulanceModalDispatch(null);
+      setAlternativeAmbulanceNotes("");
+      await fetchHospitalData();
+    } catch (err: any) {
+      setFeedbackMsg({
+        text: `Request error: ${err.message}`,
+        type: "error",
+      });
+    } finally {
+      isActionInProgressRef.current = false;
+      setActionLoading(false);
+    }
+  };
+
   // 2. Preparation status update
   const handleUpdatePreparation = async (dispatchId: number, prepStatus: string) => {
     if (isActionInProgressRef.current) return;
@@ -1483,24 +1541,37 @@ export default function HospitalPortalPage() {
             <div className="flex items-center gap-2">
               {/* Regional Facility Switcher */}
               {allHospitals.length > 0 && (
-                <div className="flex items-center gap-1.5 bg-slate-100 border border-slate-200 rounded-lg px-2 py-1">
-                  <Building2 className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                  <select
-                    value={hospital?.id || user?.hospital_id || ""}
-                    onChange={(e) => handleSwitchFacility(Number(e.target.value))}
-                    disabled={isSwitchingFacility || actionLoading}
-                    className="bg-transparent text-xs font-semibold text-slate-800 outline-none cursor-pointer max-w-[130px] sm:max-w-[200px] md:max-w-[260px] truncate"
-                    title="Switch Hospital Facility View"
+                <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 bg-slate-100 border border-slate-200 rounded-lg px-2 py-1">
+                    <Building2 className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <select
+                      value={hospital?.id || user?.hospital_id || ""}
+                      onChange={(e) => handleSwitchFacility(Number(e.target.value))}
+                      disabled={isSwitchingFacility || actionLoading}
+                      className="bg-transparent text-xs font-semibold text-slate-800 outline-none cursor-pointer max-w-[130px] sm:max-w-[200px] md:max-w-[260px] truncate"
+                      title="Switch Hospital Facility View"
+                    >
+                      {allHospitals.map((h) => {
+                        const hasPending = (h.reserved_emergency_beds || 0) > 0;
+                        return (
+                          <option key={h.id} value={h.id} className="text-slate-900 bg-white">
+                            {h.name} [{h.facility_code || `HOSP-00${h.id}`}] {hasPending ? "🚨 [RESERVATION]" : ""}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setFacilitySearchQuery("");
+                      setIsFacilitySearchOpen(true);
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold rounded-lg shadow-2xs transition-colors"
+                    title="Search 30 regional facilities"
                   >
-                    {allHospitals.map((h) => {
-                      const hasPending = (h.reserved_emergency_beds || 0) > 0;
-                      return (
-                        <option key={h.id} value={h.id} className="text-slate-900 bg-white">
-                          {h.name} [{h.facility_code || `HOSP-00${h.id}`}] {hasPending ? "🚨 [RESERVATION]" : ""}
-                        </option>
-                      );
-                    })}
-                  </select>
+                    <Search className="w-3.5 h-3.5 text-slate-500" />
+                    <span className="hidden sm:inline">Search ({allHospitals.length})</span>
+                  </button>
                 </div>
               )}
 
@@ -1818,6 +1889,29 @@ export default function HospitalPortalPage() {
                             >
                               Mark Resolved
                             </button>
+
+                            {/* If an active dispatch exists for this ambulance, allow arranging alternative ambulance */}
+                            {(() => {
+                              const matchDispatch = dispatches.find(
+                                (d) => d.ambulance_id === alert.ambulance_id && !["COMPLETED", "CLOSED", "CANCELLED"].includes(d.status)
+                              );
+                              if (!matchDispatch) return null;
+                              return (
+                                <button
+                                  onClick={() => {
+                                    setAlternativeAmbulanceModalDispatch(matchDispatch);
+                                    setAlternativeAmbulanceReason("Crash/Collision Detected on Transit Route");
+                                    setAlternativeAmbulanceNotes(`Collision Alert #${alert.id} on Unit #${alert.ambulance_id}. Requesting immediate alternative unit for incident #${matchDispatch.incident_id}.`);
+                                  }}
+                                  disabled={actionLoading}
+                                  className="text-xs px-2.5 py-1 bg-red-600 text-white rounded font-bold hover:bg-red-700 disabled:opacity-50 flex items-center gap-1 shadow-2xs"
+                                  title="Arrange Alternative Ambulance via Dispatcher"
+                                >
+                                  <AlertTriangle className="w-3.5 h-3.5" />
+                                  Arrange Alternative Ambulance
+                                </button>
+                              );
+                            })()}
                           </div>
                         </div>
                       );
@@ -2426,7 +2520,7 @@ export default function HospitalPortalPage() {
 
                         {/* Working Actions Bar */}
                         <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-100">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <button
                               onClick={() => setSelectedIncidentModal(disp)}
                               className="text-xs px-3 py-1.5 bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 font-semibold"
@@ -2439,6 +2533,20 @@ export default function HospitalPortalPage() {
                             >
                               SBAR Clinical Handover
                             </button>
+                            {!isCompleted && !isArrived && (
+                              <button
+                                onClick={() => {
+                                  setAlternativeAmbulanceModalDispatch(disp);
+                                  setAlternativeAmbulanceReason("Crash/Collision Detected on Transit Route");
+                                  setAlternativeAmbulanceNotes("");
+                                }}
+                                className="text-xs px-3 py-1.5 bg-amber-50 text-amber-800 border border-amber-300 rounded-lg hover:bg-amber-100 font-semibold flex items-center gap-1.5 transition-colors"
+                                title="Request alternative ambulance from Dispatcher"
+                              >
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                                <span>Arrange Alternative Unit</span>
+                              </button>
+                            )}
                           </div>
 
                           {!isCompleted && (
@@ -2455,6 +2563,15 @@ export default function HospitalPortalPage() {
                             </button>
                           )}
                         </div>
+
+                        {disp.alternative_ambulance_requested && (
+                          <div className="mt-2 text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-200 rounded-lg p-2.5 flex items-center gap-2">
+                            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                            <span>
+                              <strong>Alternative Unit Requested:</strong> {disp.alternative_ambulance_reason}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -3948,6 +4065,262 @@ export default function HospitalPortalPage() {
                 className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold"
               >
                 Save Department
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 6. SEARCHABLE 30-HOSPITAL NETWORK FACILITY MODAL */}
+      {isFacilitySearchOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            {/* Modal Header */}
+            <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-blue-50 border border-blue-200 flex items-center justify-center text-blue-600">
+                  <Building2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Dakshina Kannada Hospital Network</h3>
+                  <p className="text-xs text-slate-500">
+                    Switch active operations view across all {allHospitals.length} verified regional facilities
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsFacilitySearchOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Search Filter Bar */}
+            <div className="p-4 border-b border-slate-100 bg-white">
+              <div className="relative">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Search by hospital name, area, address, or facility code (e.g. HOSP-MNG-001)..."
+                  value={facilitySearchQuery}
+                  onChange={(e) => setFacilitySearchQuery(e.target.value)}
+                  autoFocus
+                  className="w-full pl-9 pr-8 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all font-medium text-slate-900"
+                />
+                {facilitySearchQuery && (
+                  <button
+                    onClick={() => setFacilitySearchQuery("")}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Facilities List */}
+            <div className="p-4 overflow-y-auto space-y-2 flex-1">
+              {(() => {
+                const q = facilitySearchQuery.toLowerCase().trim();
+                const filtered = allHospitals.filter((h) => {
+                  if (!q) return true;
+                  return (
+                    (h.name && h.name.toLowerCase().includes(q)) ||
+                    (h.address && h.address.toLowerCase().includes(q)) ||
+                    (h.facility_code && h.facility_code.toLowerCase().includes(q))
+                  );
+                });
+
+                if (filtered.length === 0) {
+                  return (
+                    <div className="py-12 text-center space-y-2">
+                      <Building2 className="w-8 h-8 text-slate-300 mx-auto" />
+                      <p className="text-xs font-semibold text-slate-700">No facilities matching &quot;{facilitySearchQuery}&quot;</p>
+                      <p className="text-[11px] text-slate-400">Try searching for &quot;Mangaluru&quot;, &quot;Bantwal&quot;, &quot;Surathkal&quot;, or a facility code.</p>
+                    </div>
+                  );
+                }
+
+                return filtered.map((h) => {
+                  const isCurrent = h.id === hospital?.id;
+                  const hasReservation = (h.reserved_emergency_beds || 0) > 0;
+                  const erAvail = h.available_emergency_beds ?? 0;
+                  const icuAvail = h.available_icu_beds ?? 0;
+                  const readiness = h.readiness_status || "READY";
+
+                  return (
+                    <div
+                      key={h.id}
+                      className={`p-3.5 rounded-xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                        isCurrent
+                          ? "bg-blue-50/50 border-blue-300 shadow-2xs"
+                          : "bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/70"
+                      }`}
+                    >
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-bold text-xs text-slate-900 truncate">{h.name}</span>
+                          <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
+                            {h.facility_code || `HOSP-00${h.id}`}
+                          </span>
+                          {isCurrent && (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 border border-blue-200">
+                              Active Context
+                            </span>
+                          )}
+                          {hasReservation && (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 animate-pulse">
+                              🚨 Active Reservation
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-500 truncate flex items-center gap-1">
+                          <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
+                          <span>{h.address || "Dakshina Kannada"}</span>
+                        </div>
+                        <div className="flex items-center gap-3 text-[11px] pt-0.5">
+                          <span className="text-slate-600">
+                            ER Bays: <strong className={erAvail > 0 ? "text-emerald-700" : "text-red-700"}>{erAvail}</strong>/{h.total_emergency_beds || erAvail}
+                          </span>
+                          <span className="text-slate-600">
+                            ICU: <strong className={icuAvail > 0 ? "text-blue-700" : "text-amber-700"}>{icuAvail}</strong>/{h.total_icu_beds || icuAvail}
+                          </span>
+                          <span
+                            className={`font-bold uppercase text-[10px] px-1.5 py-0.5 rounded border ${
+                              readiness === "READY"
+                                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                : readiness === "BUSY"
+                                ? "bg-amber-50 text-amber-700 border-amber-200"
+                                : "bg-red-50 text-red-700 border-red-200"
+                            }`}
+                          >
+                            {readiness}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        {isCurrent ? (
+                          <span className="text-xs font-semibold text-blue-700 px-3 py-1.5 bg-white border border-blue-200 rounded-lg">
+                            Current View
+                          </span>
+                        ) : (
+                          <button
+                            onClick={async () => {
+                              setIsFacilitySearchOpen(false);
+                              await handleSwitchFacility(h.id);
+                            }}
+                            disabled={isSwitchingFacility || actionLoading}
+                            className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-colors flex items-center gap-1.5"
+                          >
+                            <span>Switch Facility</span>
+                            <ChevronRight className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-3 border-t border-slate-100 bg-slate-50 flex items-center justify-between text-xs text-slate-500">
+              <span>Showing all 30 seeded network hospitals in Dakshina Kannada.</span>
+              <button
+                onClick={() => setIsFacilitySearchOpen(false)}
+                className="px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-100"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 7. ALTERNATIVE AMBULANCE REQUEST MODAL */}
+      {alternativeAmbulanceModalDispatch && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full p-5 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2 text-amber-700 font-bold text-sm">
+                <AlertTriangle className="w-4 h-4 text-amber-600" />
+                <span>Arrange Alternative Ambulance</span>
+              </div>
+              <button
+                onClick={() => setAlternativeAmbulanceModalDispatch(null)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-xl space-y-1">
+                <div className="flex items-center justify-between text-slate-700">
+                  <span>
+                    <strong>Dispatch:</strong> #{alternativeAmbulanceModalDispatch.id} (Incident #{alternativeAmbulanceModalDispatch.incident_id})
+                  </span>
+                  <span className="font-bold text-amber-800">
+                    Unit: {alternativeAmbulanceModalDispatch.ambulance_call_sign || `#${alternativeAmbulanceModalDispatch.ambulance_id}`}
+                  </span>
+                </div>
+                <div className="text-slate-600">
+                  <strong>Complaint:</strong> {alternativeAmbulanceModalDispatch.incident?.chief_complaint || "Emergency Patient Transport"}
+                </div>
+                <div className="text-slate-500 text-[11px]">
+                  <strong>Current Mission Status:</strong> {alternativeAmbulanceModalDispatch.status}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Reason for Alternative Ambulance Request *</label>
+                <select
+                  value={alternativeAmbulanceReason}
+                  onChange={(e) => setAlternativeAmbulanceReason(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-semibold text-slate-800 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="Crash/Collision Detected on Transit Route">Crash/Collision Detected on Transit Route</option>
+                  <option value="Unit Delayed / Severe Traffic Bottleneck">Unit Delayed / Severe Traffic Bottleneck</option>
+                  <option value="Mechanical Breakdown / Equipment Failure">Mechanical Breakdown / Equipment Failure</option>
+                  <option value="Patient Acuity Requires Level 1 Trauma / Cardiac Support">Patient Acuity Requires Level 1 Trauma / Cardiac Support</option>
+                  <option value="Paramedic Requested Backup Unit">Paramedic Requested Backup Unit</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Operational & Clinical Notes for Dispatcher</label>
+                <textarea
+                  rows={3}
+                  placeholder="Provide details on vehicle condition, patient state, or urgent escalation notes..."
+                  value={alternativeAmbulanceNotes}
+                  onChange={(e) => setAlternativeAmbulanceNotes(e.target.value)}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div className="p-2.5 bg-slate-100 rounded-lg text-[11px] text-slate-600">
+                Submitting this request will instantly alert the Regional Dispatcher, mark this mission for alternative unit reallocation, and maintain the audit record.
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setAlternativeAmbulanceModalDispatch(null)}
+                className="px-4 py-2 border border-slate-300 text-slate-700 rounded-lg text-xs font-semibold hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => handleRequestAlternativeAmbulance(alternativeAmbulanceModalDispatch.id)}
+                disabled={actionLoading}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors"
+              >
+                {actionLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <AlertTriangle className="w-3.5 h-3.5" />}
+                <span>Submit Request to Dispatcher</span>
               </button>
             </div>
           </div>

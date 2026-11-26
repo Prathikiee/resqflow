@@ -85,6 +85,8 @@ function MapViewController({
   focusTrigger: number;
 }) {
   const map = useMap();
+  const userInteractedRef = React.useRef(false);
+  const initialMountedRef = React.useRef(false);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -94,9 +96,18 @@ function MapViewController({
     const handleResize = () => map.invalidateSize();
     window.addEventListener("resize", handleResize);
 
+    const handleUserInteraction = () => {
+      userInteractedRef.current = true;
+    };
+
+    map.on("dragstart", handleUserInteraction);
+    map.on("zoomstart", handleUserInteraction);
+
     return () => {
       clearTimeout(timer);
       window.removeEventListener("resize", handleResize);
+      map.off("dragstart", handleUserInteraction);
+      map.off("zoomstart", handleUserInteraction);
     };
   }, [map]);
 
@@ -114,6 +125,18 @@ function MapViewController({
       !isNaN(targetLat) &&
       !isNaN(targetLng) &&
       targetLat !== 0;
+
+    // Reset user interaction flag when explicit focus action is triggered
+    if (focusTrigger > 0) {
+      userInteractedRef.current = false;
+    }
+
+    // Do not override view if user is actively panning/zooming, unless it is initial mount or explicit focusTrigger
+    if (userInteractedRef.current && initialMountedRef.current && focusTrigger === 0) {
+      return;
+    }
+
+    initialMountedRef.current = true;
 
     if (focusMode === "ambulance" && hasAmb) {
       map.setView([ambulanceLat!, ambulanceLng!], 16, { animate: true });
@@ -309,9 +332,8 @@ export default function AmbulanceTrackingMap({
               [targetLat!, targetLng!],
             ]}
             color="#2563EB"
-            weight={4}
-            opacity={0.75}
-            dashArray="6, 8"
+            weight={5}
+            opacity={0.85}
           />
         )}
 
