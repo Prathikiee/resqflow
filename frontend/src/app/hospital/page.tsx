@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import { formatIST, getRemainingSeconds } from "@/lib/utils";
 import {
   Activity,
   AlertCircle,
@@ -721,9 +722,7 @@ export default function HospitalPortalPage() {
     }
 
     const updateTimer = () => {
-      const expMs = new Date(primaryPendingRequest.reservation_expires_at!).getTime();
-      const nowMs = Date.now();
-      const diffSec = Math.max(0, Math.floor((expMs - nowMs) / 1000));
+      const diffSec = getRemainingSeconds(primaryPendingRequest.reservation_expires_at);
       setRemainingSeconds(diffSec);
     };
 
@@ -2078,7 +2077,7 @@ export default function HospitalPortalPage() {
 
                     if (isPending) {
                       const reqRemainingSec = disp.reservation_expires_at
-                        ? Math.max(0, Math.floor((new Date(disp.reservation_expires_at).getTime() - nowMs) / 1000))
+                        ? getRemainingSeconds(disp.reservation_expires_at)
                         : null;
 
                       return (
@@ -2298,7 +2297,7 @@ export default function HospitalPortalPage() {
                                 <span>In-Transit Patient Vitals (Field Telemetry)</span>
                               </span>
                               <span className="text-[10px] text-slate-500 font-mono">
-                                Recorded at {new Date(disp.latest_vitals.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                Recorded at {formatIST(disp.latest_vitals.recorded_at, { timeOnly: true })}
                               </span>
                             </div>
 
@@ -2933,9 +2932,9 @@ export default function HospitalPortalPage() {
                               <td className="p-3 font-semibold text-slate-700">{disp.incident?.triage_level || "P1"}</td>
                               <td className="p-3 text-slate-800">{disp.incident?.chief_complaint}</td>
                               <td className="p-3 font-mono">{disp.ambulance_call_sign || `#${disp.ambulance_id}`}</td>
-                              <td className="p-3 text-slate-500">
+                              <td className="p-3 text-slate-500 font-mono text-xs">
                                 {disp.patient_arrived_hospital_confirmed_at
-                                  ? new Date(disp.patient_arrived_hospital_confirmed_at).toLocaleTimeString()
+                                  ? formatIST(disp.patient_arrived_hospital_confirmed_at, { timeOnly: true })
                                   : "Completed"}
                               </td>
                               <td className="p-3 font-bold text-emerald-600">COMPLETED</td>
@@ -3398,8 +3397,8 @@ export default function HospitalPortalPage() {
                     </span>
                   </div>
                   {activeHandoverModal.acknowledged_at && (
-                    <span className="text-[11px] text-blue-800 font-medium">
-                      Ack: {new Date(activeHandoverModal.acknowledged_at).toLocaleTimeString()}
+                    <span className="text-[11px] text-blue-800 font-medium font-mono">
+                      Ack: {formatIST(activeHandoverModal.acknowledged_at, { timeOnly: true })}
                     </span>
                   )}
                 </div>
@@ -3501,7 +3500,7 @@ export default function HospitalPortalPage() {
                     </div>
 
                     <div className="flex flex-wrap items-center justify-between text-[11px] text-slate-500 pt-1">
-                      <span>Recorded at: <strong>{new Date(activeHandoverModal.latest_vitals.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</strong></span>
+                      <span>Recorded at: <strong className="font-mono text-slate-800">{formatIST(activeHandoverModal.latest_vitals.recorded_at, { timeOnly: true, includeSeconds: true })}</strong></span>
                       {activeHandoverModal.latest_vitals.notes && (
                         <span className="italic text-slate-700 bg-white/80 px-2 py-0.5 rounded border border-rose-100">
                           &ldquo;{activeHandoverModal.latest_vitals.notes}&rdquo;
@@ -3530,8 +3529,8 @@ export default function HospitalPortalPage() {
                             <tbody className="divide-y divide-slate-100">
                               {activeHandoverModal.vitals.map((v: VitalsRecord) => (
                                 <tr key={v.id} className="hover:bg-slate-50">
-                                  <td className="py-1 px-2 font-mono text-[11px] text-slate-600">
-                                    {new Date(v.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                  <td className="py-1 px-2 font-mono text-[11px] text-slate-700 font-semibold">
+                                    {formatIST(v.recorded_at, { timeOnly: true })}
                                   </td>
                                   <td className="py-1 px-2 font-mono font-bold text-rose-700">{v.heart_rate}</td>
                                   <td className="py-1 px-2 font-mono font-semibold text-indigo-700">{v.blood_pressure_systolic}/{v.blood_pressure_diastolic}</td>

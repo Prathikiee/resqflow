@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { formatIST, getRemainingSeconds } from "@/lib/utils";
 import {
   Activity,
   AlertTriangle,
@@ -103,33 +104,10 @@ export default function DispatcherCommandCenterPage() {
     }
   }, []);
 
-  // Calculate remaining reservation TTL based on server timestamps
+  // Calculate remaining reservation TTL based on server timestamps with UTC normalization
   const calculateRemainingSeconds = useCallback((disp: any, serverDateStr?: string | null): number => {
     if (!disp?.reservation_expires_at) return 0;
-    const expiresMs = new Date(disp.reservation_expires_at).getTime();
-    if (isNaN(expiresMs)) return 0;
-
-    if (serverDateStr) {
-      const serverNowMs = new Date(serverDateStr).getTime();
-      if (!isNaN(serverNowMs)) {
-        return Math.max(0, Math.floor((expiresMs - serverNowMs) / 1000));
-      }
-    }
-
-    if (serverClockOffsetRef.current !== 0) {
-      const estimatedServerNow = Date.now() + serverClockOffsetRef.current;
-      return Math.max(0, Math.floor((expiresMs - estimatedServerNow) / 1000));
-    }
-
-    if (disp.dispatched_at) {
-      const dispatchedMs = new Date(disp.dispatched_at).getTime();
-      if (!isNaN(dispatchedMs) && expiresMs > dispatchedMs) {
-        const totalTtl = Math.floor((expiresMs - dispatchedMs) / 1000);
-        return Math.max(0, totalTtl);
-      }
-    }
-
-    return Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
+    return getRemainingSeconds(disp.reservation_expires_at);
   }, []);
 
   // Fetch all core operational data
@@ -658,8 +636,8 @@ export default function DispatcherCommandCenterPage() {
                                 {inc.triage_level || "P1"}
                               </span>
                               <span className="text-xs font-bold text-slate-900">Incident #{inc.id}</span>
-                              <span className="text-[10px] text-slate-400 font-mono">
-                                {new Date(inc.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                              <span className="text-[10px] text-slate-500 font-mono">
+                                {formatIST(inc.created_at, { timeOnly: true })}
                               </span>
                             </div>
                             <p className="text-xs text-slate-800 font-medium truncate">{inc.chief_complaint}</p>
@@ -969,8 +947,8 @@ export default function DispatcherCommandCenterPage() {
                                   <span className="font-bold text-amber-900 font-mono text-[11px]">
                                     Attempt #{esc.attempt_number} • {esc.failure_source || "TIMEOUT"}
                                   </span>
-                                  <span className="text-[10px] text-slate-400 font-mono">
-                                    {esc.timestamp ? new Date(esc.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : ""}
+                                  <span className="text-[10px] text-slate-500 font-mono">
+                                    {esc.timestamp ? formatIST(esc.timestamp, { timeOnly: true, includeSeconds: true }) : ""}
                                   </span>
                                 </div>
                                 <p className="text-[11px] text-slate-700">
@@ -1248,8 +1226,8 @@ export default function DispatcherCommandCenterPage() {
                       .map((inc) => (
                         <tr key={inc.id} className="hover:bg-slate-50 transition">
                           <td className="py-3 px-3 font-mono font-bold text-slate-900">#{inc.id}</td>
-                          <td className="py-3 px-3 font-mono text-slate-500">
-                            {new Date(inc.created_at).toLocaleString()}
+                          <td className="py-3 px-3 font-mono text-slate-600 text-xs">
+                            {formatIST(inc.created_at)}
                           </td>
                           <td className="py-3 px-3 font-medium text-slate-700">{inc.location_address}</td>
                           <td className="py-3 px-3 text-slate-600">{inc.chief_complaint}</td>

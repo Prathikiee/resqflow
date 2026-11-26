@@ -32,6 +32,19 @@ import {
   X,
 } from "lucide-react";
 import DynamicCitizenTrackingMap from "@/components/CitizenMapWrapper";
+import { formatIST, parseUtcDate } from "@/lib/utils";
+
+interface TimelineEventRecord {
+  id: number;
+  incident_id: number;
+  dispatch_id?: number | null;
+  event_type: string;
+  event_title: string;
+  event_description: string;
+  actor_type: string;
+  actor_reference?: string | null;
+  created_at: string;
+}
 
 interface IncidentRecord {
   id: number;
@@ -183,33 +196,13 @@ export default function CitizenPortalPage() {
   const [isCancelModalOpen, setIsCancelModalOpen] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [isCancelling, setIsCancelling] = useState(false);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEventRecord[]>([]);
 
   const isSubmittingRef = useRef(false);
   const descriptionInputRef = useRef<HTMLTextAreaElement | null>(null);
   const activeIncidentRef = useRef<IncidentRecord | null>(null);
   const activeDispatchRef = useRef<DispatchRecord | null>(null);
   const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-  // Helper: Format date into Indian Standard Time (IST)
-  const formatIST = (dateStr?: string) => {
-    if (!dateStr) return "";
-    try {
-      const d = new Date(dateStr);
-      return (
-        new Intl.DateTimeFormat("en-IN", {
-          timeZone: "Asia/Kolkata",
-          day: "numeric",
-          month: "short",
-          year: "numeric",
-          hour: "numeric",
-          minute: "numeric",
-          hour12: true,
-        }).format(d) + " IST"
-      );
-    } catch {
-      return dateStr;
-    }
-  };
 
   useEffect(() => {
     activeIncidentRef.current = activeIncident;
@@ -290,6 +283,18 @@ export default function CitizenPortalPage() {
             localStorage.setItem("lifelink_active_incident_id", String(active.id));
 
             try {
+              const tlResp = await fetch(`${backendUrl}/api/incidents/${active.id}/timeline`, {
+                headers: { Authorization: `Bearer ${token}` },
+              });
+              if (tlResp.ok) {
+                const tlData = await tlResp.json();
+                setTimelineEvents(tlData);
+              }
+            } catch {
+              // non-fatal timeline fetch failure
+            }
+
+            try {
               const dispResp = await fetch(`${backendUrl}/api/dispatch?incident_id=${active.id}`, {
                 headers: { Authorization: `Bearer ${token}` },
               });
@@ -346,6 +351,18 @@ export default function CitizenPortalPage() {
           setActiveIncident(activeInc);
           localStorage.setItem("lifelink_active_incident_id", String(activeInc.id));
           setHasNoActiveEmergency(false);
+
+          try {
+            const tlResp = await fetch(`${backendUrl}/api/incidents/${activeInc.id}/timeline`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (tlResp.ok) {
+              const tlData = await tlResp.json();
+              setTimelineEvents(tlData);
+            }
+          } catch {
+            // non-fatal
+          }
 
           try {
             const dispResp = await fetch(`${backendUrl}/api/dispatch?incident_id=${activeInc.id}`, {
@@ -754,6 +771,16 @@ export default function CitizenPortalPage() {
 
       setTimeout(async () => {
         try {
+          const tlResp = await fetch(`${backendUrl}/api/incidents/${createdInc.id}/timeline`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (tlResp.ok) {
+            const tlData = await tlResp.json();
+            setTimelineEvents(tlData);
+          }
+        } catch (_) {}
+
+        try {
           const dispResp = await fetch(`${backendUrl}/api/dispatch?incident_id=${createdInc.id}`, {
             headers: { Authorization: `Bearer ${token}` },
           });
@@ -762,7 +789,7 @@ export default function CitizenPortalPage() {
             if (disps.length > 0) setActiveDispatch(disps[0]);
           }
         } catch (_) {}
-      }, 1000);
+      }, 500);
     } catch (err: any) {
       setErrorMessage(err.message || "Failed to broadcast emergency SOS. Please retry.");
     } finally {
@@ -835,31 +862,16 @@ export default function CitizenPortalPage() {
     );
   }
 
-  // Calculate timeline stage (1 to 5)
+  // Calculate timeline stage (1 to 6) strictly based on actual backend data
   const getTimelineStage = () => {
     if (!activeIncident) return 1;
-    if (activeIncident.status === "RESOLVED" || activeIncident.status === "CLOSED") return 5;
-    if (activeIncident.status === "AT_HOSPITAL") return 5;
-    if (!activeDispatch) {
-      if (activeIncident.status === "TRIAGED" || activeIncident.status === "ALLOCATED") return 2;
-      return 1;
-    }
-    if (activeDispatch.status === "COMPLETED" || activeDispatch.status === "AT_HOSPITAL") return 5;
-    if (
-      activeDispatch.status === "ON_SCENE" ||
-      activeDispatch.status === "EN_ROUTE_HOSPITAL" ||
-      activeIncident.status === "ON_SCENE" ||
-      activeIncident.status === "TRANSPORTING"
-    )
-      return 4;
-    if (
-      activeDispatch.status === "EN_ROUTE_INCIDENT" ||
-      activeDispatch.coordination_status === "CONFIRMED" ||
-      activeIncident.status === "EN_ROUTE"
-    )
-      return 3;
-    if (activeDispatch.status === "ASSIGNED" || activeIncident.status === "DISPATCHED") return 2;
-    return 2;
+    if (activeIncident.status === "RESOLVED" || activeIncident.status === "CLOSED") return 6;
+    if (activeIncident.status === "AT_HOSPITAL" || activeDispatch?.status === "AT_HOSPITAL" || activeDispatch?.status === "COMPLETED") return 6;
+    if (activeDispatch?.status === "EN_ROUTE_HOSPITAL" || activeIncident.status === "TRANSPORTING") return 5;
+    if (activeDispatch?.status === "ON_SCENE" || activeIncident.status === "ON_SCENE") return 4;
+    if (activeDispatch?.status === "EN_ROUTE_INCIDENT" || activeIncident.status === "EN_ROUTE") return 3;
+    if (activeDispatch) return 2;
+    return 1;
   };
 
   const currentStage = getTimelineStage();
@@ -1284,29 +1296,30 @@ export default function CitizenPortalPage() {
                   <span className="text-xs sm:text-sm font-bold text-slate-900 uppercase tracking-wider block">
                     Response Progress
                   </span>
-                  <span className="text-xs font-bold text-slate-600">Step {currentStage} of 5</span>
+                  <span className="text-xs font-bold text-slate-600">Step {currentStage} of 6</span>
                 </div>
 
                 <div className="relative flex items-center justify-between pt-2">
                   <div className="absolute left-6 right-6 top-6 h-1 bg-slate-100 z-0" />
                   <div
                     className="absolute left-6 top-6 h-1 bg-emerald-500 z-0 transition-all duration-500"
-                    style={{ width: `${((currentStage - 1) / 4) * 85}%` }}
+                    style={{ width: `${((currentStage - 1) / 5) * 88}%` }}
                   />
 
                   {[
                     { num: 1, label: "Request Received" },
-                    { num: 2, label: "Ambulance Assigned" },
-                    { num: 3, label: "Ambulance En Route" },
-                    { num: 4, label: "Arrived at Location" },
-                    { num: 5, label: "Hospital Arrival" },
+                    { num: 2, label: "Ambulance Dispatched" },
+                    { num: 3, label: "En Route to Scene" },
+                    { num: 4, label: "Arrived on Scene" },
+                    { num: 5, label: "In Transit to Hospital" },
+                    { num: 6, label: "Hospital ER Care" },
                   ].map((step) => {
                     const isDone = currentStage >= step.num;
                     const isCurrent = currentStage === step.num;
                     return (
                       <div key={step.num} className="relative z-10 flex flex-col items-center">
                         <div
-                          className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs transition-all ${
+                          className={`w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center font-bold text-xs transition-all ${
                             isDone
                               ? "bg-emerald-600 text-white shadow-xs"
                               : isCurrent
@@ -1317,7 +1330,7 @@ export default function CitizenPortalPage() {
                           {isDone ? <Check className="w-4 h-4 stroke-[3]" /> : step.num}
                         </div>
                         <span
-                          className={`text-xs font-bold mt-2 text-center max-w-[70px] sm:max-w-none leading-tight ${
+                          className={`text-[11px] sm:text-xs font-bold mt-2 text-center max-w-[55px] sm:max-w-none leading-tight ${
                             isCurrent ? "text-blue-700" : isDone ? "text-slate-800" : "text-slate-500"
                           }`}
                         >
@@ -1336,17 +1349,60 @@ export default function CitizenPortalPage() {
                       {activeIncident.status === "CANCELLED"
                         ? "This emergency request was cancelled. Emergency resources have been returned to service."
                         : activeIncident.status === "RESOLVED" || activeIncident.status === "CLOSED"
-                        ? "Patient safely transferred to hospital emergency care."
+                        ? "Patient safely transferred to emergency department care. Mission concluded."
                         : currentStage === 1
-                        ? "Request received. Identifying nearest available ambulance and emergency department."
+                        ? "Request received and triaged. Identifying nearest available ambulance and suitable emergency hospital."
                         : currentStage === 2
-                        ? `Ambulance unit ${activeDispatch?.ambulance_call_sign || "assigned"}. Crew preparing to respond.`
+                        ? `Ambulance ${activeDispatch?.ambulance_call_sign || "assigned"}. Emergency department bed reserved.`
                         : currentStage === 3
                         ? `Ambulance ${activeDispatch?.ambulance_call_sign || "assigned"} is actively on the way to your location.`
                         : currentStage === 4
-                        ? "Paramedic crew has arrived at your location."
+                        ? "Paramedic crew has arrived at your location and is providing emergency stabilization."
+                        : currentStage === 5
+                        ? `Patient secured. Inbound to ${activeDispatch?.destination_hospital_name || "receiving emergency department"}.`
                         : "Patient transferred to hospital emergency care."}
                     </span>
+                  </div>
+                </div>
+
+                {/* Chronological Milestone Timeline */}
+                <div className="pt-3 border-t border-slate-100 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-800 uppercase tracking-wider block">
+                      Chronological Timeline (IST)
+                    </span>
+                    <span className="text-[11px] font-semibold text-slate-500">
+                      {timelineEvents.length} Recorded Milestone{timelineEvents.length !== 1 ? "s" : ""}
+                    </span>
+                  </div>
+
+                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                    {timelineEvents.length > 0 ? (
+                      timelineEvents.map((evt, idx) => (
+                        <div
+                          key={evt.id || idx}
+                          className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80 flex items-start justify-between gap-3 text-xs"
+                        >
+                          <div className="space-y-0.5">
+                            <span className="font-bold text-slate-900 block">{evt.event_title}</span>
+                            <p className="text-slate-600 text-[11px] leading-relaxed">{evt.event_description}</p>
+                          </div>
+                          <span className="text-slate-700 font-semibold shrink-0 text-right font-mono text-[11px] bg-white px-2 py-0.5 rounded border border-slate-200">
+                            {formatIST(evt.created_at)}
+                          </span>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between text-xs">
+                        <div>
+                          <span className="font-bold text-slate-900 block">Emergency SOS Registered</span>
+                          <p className="text-slate-600 text-[11px]">Request logged and dispatched to regional CAD operators.</p>
+                        </div>
+                        <span className="text-slate-700 font-semibold font-mono text-[11px] bg-white px-2 py-0.5 rounded border border-slate-200">
+                          {formatIST(activeIncident.created_at)}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

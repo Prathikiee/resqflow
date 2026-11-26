@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { formatIST, getRemainingSeconds } from "@/lib/utils";
 import {
   Activity,
   AlertOctagon,
@@ -111,14 +112,30 @@ interface AmbulanceEntity {
 }
 
 // -------------------------------------------------------------
-// Web Audio API Emergency Alarm (3-beep sequence)
+// Web Audio API Emergency Alarm (Triple Dual-Tone Medical Sequence)
 // -------------------------------------------------------------
-function playEmergencyAlarm(durationSeconds = 3): () => void {
+let sharedAudioContext: AudioContext | null = null;
+
+function getSharedAudioContext(): AudioContext | null {
+  if (typeof window === "undefined") return null;
+  const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+  if (!AudioCtxClass) return null;
+  if (!sharedAudioContext || sharedAudioContext.state === "closed") {
+    sharedAudioContext = new AudioCtxClass();
+  }
+  return sharedAudioContext;
+}
+
+function playEmergencyAlarm(durationSeconds = 4): () => void {
   try {
-    const AudioContextClass =
-      window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioContextClass) return () => {};
-    const audioCtx = new AudioContextClass();
+    const audioCtx = getSharedAudioContext();
+    if (!audioCtx) return () => {};
+
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume().catch((err) => {
+        console.warn("Autoplay blocked: user interaction required to unmute chime", err);
+      });
+    }
 
     let isStopped = false;
     let timerId: any = null;
@@ -126,36 +143,22 @@ function playEmergencyAlarm(durationSeconds = 3): () => void {
     const stopAlarm = () => {
       isStopped = true;
       if (timerId) clearTimeout(timerId);
-      try {
-        if (audioCtx.state !== "closed") {
-          audioCtx.close();
-        }
-      } catch (_) {}
     };
 
     const playBeepTriple = (timeOffset: number) => {
-      if (isStopped) return;
-      [0, 0.28, 0.56].forEach((delay, idx) => {
+      if (isStopped || audioCtx.state !== "running") return;
+      [0, 0.26, 0.52].forEach((delay, idx) => {
         const osc = audioCtx.createOscillator();
         const gain = audioCtx.createGain();
         const freq = idx === 2 ? 1046.5 : 880;
         osc.type = "sine";
-        osc.frequency.setValueAtTime(
-          freq,
-          audioCtx.currentTime + timeOffset + delay
-        );
-        gain.gain.setValueAtTime(
-          0.25,
-          audioCtx.currentTime + timeOffset + delay
-        );
-        gain.gain.exponentialRampToValueAtTime(
-          0.005,
-          audioCtx.currentTime + timeOffset + delay + 0.18
-        );
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime + timeOffset + delay);
+        gain.gain.setValueAtTime(0.28, audioCtx.currentTime + timeOffset + delay);
+        gain.gain.exponentialRampToValueAtTime(0.005, audioCtx.currentTime + timeOffset + delay + 0.17);
         osc.connect(gain);
         gain.connect(audioCtx.destination);
         osc.start(audioCtx.currentTime + timeOffset + delay);
-        osc.stop(audioCtx.currentTime + timeOffset + delay + 0.2);
+        osc.stop(audioCtx.currentTime + timeOffset + delay + 0.19);
       });
     };
 
@@ -231,6 +234,7 @@ export default function AmbulancePortalPage() {
 
   // Countdown state for incoming pending assignment
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
 
   // Toast / copy feedback
   const [copyToast, setCopyToast] = useState<string | null>(null);
@@ -240,6 +244,46 @@ export default function AmbulancePortalPage() {
   const alertedDispatchIdsRef = useRef<Set<number>>(new Set());
   const alarmStopRef = useRef<(() => void) | null>(null);
   const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  // Test/unlock audio on user gesture
+  const handleUnlockAudio = () => {
+    const ctx = getSharedAudioContext();
+    if (ctx) {
+      ctx.resume().then(() => {
+        setAudioUnlocked(true);
+        try {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(440, ctx.currentTime);
+          osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.12);
+          gain.gain.setValueAtTime(0.2, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(ctx.currentTime);
+          osc.stop(ctx.currentTime + 0.15);
+        } catch (_) {}
+      }).catch(() => {});
+    }
+  };
+
+  useEffect(() => {
+    const onUserGesture = () => {
+      const ctx = getSharedAudioContext();
+      if (ctx && ctx.state === "suspended") {
+        ctx.resume().then(() => setAudioUnlocked(true)).catch(() => {});
+      } else if (ctx && ctx.state === "running") {
+        setAudioUnlocked(true);
+      }
+    };
+    window.addEventListener("click", onUserGesture, { once: true });
+    window.addEventListener("keydown", onUserGesture, { once: true });
+    return () => {
+      window.removeEventListener("click", onUserGesture);
+      window.removeEventListener("keydown", onUserGesture);
+    };
+  }, []);
 
   // Data fetching
   const fetchMissionVitals = useCallback(
@@ -420,12 +464,16 @@ export default function AmbulancePortalPage() {
   useEffect(() => {
     if (pendingDispatch && !alertedDispatchIdsRef.current.has(pendingDispatch.id)) {
       alertedDispatchIdsRef.current.add(pendingDispatch.id);
-      const stop = playEmergencyAlarm(3.5);
+      const stop = playEmergencyAlarm(4);
       alarmStopRef.current = stop;
+    }
+    if (!pendingDispatch && alarmStopRef.current) {
+      alarmStopRef.current();
+      alarmStopRef.current = null;
     }
   }, [pendingDispatch]);
 
-  // Reservation countdown
+  // Reservation countdown with UTC normalization
   useEffect(() => {
     if (!pendingDispatch) {
       setRemainingSeconds(null);
@@ -434,13 +482,10 @@ export default function AmbulancePortalPage() {
 
     const updateTimer = () => {
       if (!pendingDispatch.reservation_expires_at) {
-        setRemainingSeconds(45);
+        setRemainingSeconds(90);
         return;
       }
-      const expiresMs = new Date(
-        pendingDispatch.reservation_expires_at
-      ).getTime();
-      const diffSecs = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000));
+      const diffSecs = getRemainingSeconds(pendingDispatch.reservation_expires_at);
       setRemainingSeconds(diffSecs);
     };
 
@@ -945,6 +990,33 @@ export default function AmbulancePortalPage() {
                 }`}
               />
               <span>{isOnDuty ? "On Duty" : "Off Duty"}</span>
+            </button>
+
+            {/* Audio Alerts Unlock / Status Button */}
+            <button
+              onClick={handleUnlockAudio}
+              className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition shadow-2xs cursor-pointer ${
+                audioUnlocked
+                  ? "bg-slate-50 text-slate-700 border-slate-200"
+                  : "bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300 animate-pulse"
+              }`}
+              title={
+                audioUnlocked
+                  ? "Mission chime audio is active and ready"
+                  : "Click to enable mission chime audio (required by browser autoplay policy)"
+              }
+            >
+              {audioUnlocked ? (
+                <>
+                  <Volume2 className="w-3.5 h-3.5 text-emerald-600" />
+                  <span className="hidden md:inline">Audio Ready</span>
+                </>
+              ) : (
+                <>
+                  <VolumeX className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Enable Audio</span>
+                </>
+              )}
             </button>
 
             {/* Live Telemetry Pulse */}
@@ -1698,11 +1770,8 @@ export default function AmbulancePortalPage() {
                                 <span>SpO2: <strong>{v.oxygen_saturation}%</strong></span>
                                 <span>RR: <strong>{v.respiratory_rate}</strong></span>
                               </div>
-                              <span className="text-[10px] text-slate-400">
-                                {new Date(v.recorded_at).toLocaleTimeString([], {
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                })}
+                              <span className="text-[10px] text-slate-500 font-mono">
+                                {formatIST(v.recorded_at, { timeOnly: true })}
                               </span>
                             </div>
                           ))}

@@ -221,7 +221,7 @@ def test_full_cross_portal_emergency_workflow(db, monkeypatch):
     # 10. SBAR Clinical Handover review and completion
     handover = get_handover_packet(dispatch_id=dispatch.id, db=db, current_user=hosp_staff)
     assert handover is not None
-    assert handover.situation is not None
+    assert handover.chief_complaint is not None
 
     complete_payload = HandoverCompleteRequest(
         completed_by="Dr. Aditi Shenoy",
@@ -307,3 +307,60 @@ def test_strict_hospital_data_isolation(db):
     with pytest.raises(HTTPException) as exc_info:
         confirm_hospital(dispatch_id=disp_a.id, payload=decision, db=db, current_user=staff_b)
     assert exc_info.value.status_code == 403
+
+
+def test_timestamp_utc_iso_serialization_and_timeline_chronology(db):
+    """
+    Verify:
+    1. Timestamp serialization outputs UTC with 'Z' suffix (avoiding client timezone distortion)
+    2. Chronological timeline events are sorted ascending and accurately timestamped
+    """
+    from fastapi.encoders import jsonable_encoder
+    from datetime import datetime, timezone
+    from backend.app.api.incidents import get_incident_timeline
+    from backend.app.services.timeline_service import log_incident_event
+
+    # 1. Test jsonable_encoder timezone serialization
+    naive_dt = datetime(2026, 11, 26, 5, 20, 0)
+    serialized = jsonable_encoder(naive_dt)
+    assert isinstance(serialized, str)
+    assert serialized.endswith("Z"), f"Expected UTC 'Z' suffix on naive datetime serialization, got: {serialized}"
+
+    # 2. Test timeline chronology
+    seed_database(db, force=False)
+    citizen = db.query(User).filter(User.role == ROLE_CITIZEN).first()
+    inc = Incident(
+        caller_name=citizen.full_name,
+        caller_phone="+91 98451 99999",
+        location_address="Test Junction, Mangaluru",
+        latitude=12.8700,
+        longitude=74.8420,
+        chief_complaint="Severe injury",
+        status="TRIAGED",
+        reporter_user_id=citizen.id,
+    )
+    db.add(inc)
+    db.commit()
+
+    log_incident_event(
+        db=db,
+        incident_id=inc.id,
+        event_type="INCIDENT_REGISTERED",
+        event_title="Emergency SOS Registered",
+        event_description="Test incident created",
+        actor_type="CITIZEN",
+    )
+    log_incident_event(
+        db=db,
+        incident_id=inc.id,
+        event_type="INCIDENT_TRIAGED",
+        event_title="Triage Priority Assessed",
+        event_description="Priority evaluated as P1",
+        actor_type="SYSTEM",
+    )
+
+    events = get_incident_timeline(incident_id=inc.id, db=db, current_user=citizen)
+    assert len(events) >= 2
+    for i in range(len(events) - 1):
+        assert events[i].created_at <= events[i+1].created_at
+

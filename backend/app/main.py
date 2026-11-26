@@ -12,6 +12,16 @@ from backend.app.core.ws import ws_manager
 from backend.app.core.security import decode_access_token
 from backend.app.api import incidents, ambulances, hospitals, seed, dispatch, witness_reports, auth, crash_alerts
 from backend.app.api.dispatch import check_and_escalate_expired_dispatches
+import fastapi.encoders
+from datetime import datetime
+
+# Global datetime serialization strategy: Ensure all UTC datetimes have ISO 8601 'Z' suffix
+def _serialize_datetime_iso_utc(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        return dt.isoformat() + "Z"
+    return dt.isoformat()
+
+fastapi.encoders.ENCODERS_BY_TYPE[datetime] = _serialize_datetime_iso_utc
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
