@@ -202,6 +202,8 @@ export default function HospitalPortalPage() {
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
   const [hospital, setHospital] = useState<any>(null);
+  const [allHospitals, setAllHospitals] = useState<any[]>([]);
+  const [isSwitchingFacility, setIsSwitchingFacility] = useState<boolean>(false);
   const [dispatches, setDispatches] = useState<DispatchRecord[]>([]);
   const [crashAlerts, setCrashAlerts] = useState<CrashAlertRecord[]>([]);
   const [collisionAlerts, setCollisionAlerts] = useState<CollisionAlertRecord[]>([]);
@@ -417,6 +419,17 @@ export default function HospitalPortalPage() {
       if (!handoverClinicianName) setHandoverClinicianName(userData.full_name || "ER Triage Officer");
 
       if (userData.hospital_id) {
+        // 0. Fetch Regional Hospitals for Facility Switcher
+        try {
+          const allHospResp = await fetch(`${activeUrl}/api/hospitals`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (allHospResp.ok) {
+            const hList = await allHospResp.json();
+            if (Array.isArray(hList)) setAllHospitals(hList);
+          }
+        } catch (_) {}
+
         // 1. Fetch Hospital Record
         const hospResp = await fetch(`${activeUrl}/api/hospitals/${userData.hospital_id}`, {
           headers: { Authorization: `Bearer ${token}` },
@@ -768,6 +781,51 @@ export default function HospitalPortalPage() {
   // =============================================================================
   // ACTIONS & HANDLERS
   // =============================================================================
+
+  // 0. Hospital Facility Context Switching
+  const handleSwitchFacility = async (targetHospitalId: number) => {
+    if (!targetHospitalId || targetHospitalId === hospital?.id) return;
+    setIsSwitchingFacility(true);
+    setActionLoading(true);
+    const activeUrl = getBackendUrl();
+    const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
+
+    try {
+      const resp = await fetch(`${activeUrl}/api/auth/switch-facility/${targetHospitalId}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || `Failed to switch facility context (${resp.status})`);
+      }
+
+      const authData = await resp.json();
+      if (typeof window !== "undefined") {
+        localStorage.setItem("lifelink_token", authData.access_token);
+        localStorage.setItem("lifelink_user", JSON.stringify(authData.user));
+        document.cookie = `lifelink_token=${authData.access_token}; path=/; max-age=2592000; SameSite=Lax`;
+      }
+      setUser(authData.user);
+      setFeedbackMsg({
+        text: `Switched operational context to ${authData.user?.full_name || "Facility"}!`,
+        type: "success",
+      });
+
+      // Clear previous dispatches immediately to ensure clean isolation
+      setDispatches([]);
+      await fetchHospitalData();
+    } catch (err: any) {
+      setFeedbackMsg({ text: `Facility switch error: ${err.message}`, type: "error" });
+    } finally {
+      setIsSwitchingFacility(false);
+      setActionLoading(false);
+    }
+  };
 
   // 1. Dual confirmation decision (Accept / Reject)
   const handleDecideReservation = async (
@@ -1417,12 +1475,35 @@ export default function HospitalPortalPage() {
         {/* Top Minimal Navigation Bar */}
         <TopNav
           title={hospital?.name || "Emergency Operations Portal"}
-          subtitle={`Facility Code: ${hospital?.facility_code || "KMC-AMB-01"} • ${hospital?.address || "Mangaluru"}`}
+          subtitle={`Facility Code: ${hospital?.facility_code || (hospital?.id ? `HOSP-00${hospital.id}` : "HOSPITAL-ER")} • ${hospital?.address || "Mangaluru"}`}
           wsConnected={wsConnected}
           connectionStatus={connectionStatus}
           onMenuToggle={() => setIsMobileMenuOpen(true)}
           actions={
             <div className="flex items-center gap-2">
+              {/* Regional Facility Switcher */}
+              {allHospitals.length > 0 && (
+                <div className="flex items-center gap-1.5 bg-slate-100 border border-slate-200 rounded-lg px-2 py-1">
+                  <Building2 className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                  <select
+                    value={hospital?.id || user?.hospital_id || ""}
+                    onChange={(e) => handleSwitchFacility(Number(e.target.value))}
+                    disabled={isSwitchingFacility || actionLoading}
+                    className="bg-transparent text-xs font-semibold text-slate-800 outline-none cursor-pointer max-w-[130px] sm:max-w-[200px] md:max-w-[260px] truncate"
+                    title="Switch Hospital Facility View"
+                  >
+                    {allHospitals.map((h) => {
+                      const hasPending = (h.reserved_emergency_beds || 0) > 0;
+                      return (
+                        <option key={h.id} value={h.id} className="text-slate-900 bg-white">
+                          {h.name} [{h.facility_code || `HOSP-00${h.id}`}] {hasPending ? "🚨 [RESERVATION]" : ""}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              )}
+
               <span className="text-[11px] font-semibold text-slate-500 hidden sm:inline">Readiness:</span>
               <span
                 className={`text-xs font-bold px-2.5 py-0.5 rounded-full uppercase border ${currentReadiness === "READY"

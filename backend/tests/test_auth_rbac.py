@@ -516,9 +516,20 @@ def test_14_citizen_and_hospital_cannot_create_dispatch(fresh_db: Session):
     citizen_user = db.query(User).filter(User.role == ROLE_CITIZEN).first()
     hospital_user = db.query(User).filter(User.role == ROLE_HOSPITAL_STAFF).first()
     disp_user = db.query(User).filter(User.role == ROLE_DISPATCHER).first()
-    inc = db.query(Incident).filter(Incident.status == "TRIAGED").first()
-    if not inc:
-        inc = db.query(Incident).first()
+    inc = Incident(
+        caller_name="Test Dispatcher Auth Citizen",
+        caller_phone="+919876543210",
+        location_address="Mangaluru City",
+        latitude=12.9141,
+        longitude=74.8560,
+        chief_complaint="Acute severe trauma",
+        triage_level="Priority 1",
+        triage_color="RED",
+        status="TRIAGED",
+    )
+    db.add(inc)
+    db.commit()
+    db.refresh(inc)
     amb = db.query(Ambulance).filter(Ambulance.status == "AVAILABLE").first()
     if not amb:
         amb = db.query(Ambulance).first()

@@ -50,8 +50,22 @@ def login(
         )
 
     valid_pwd = verify_password(payload.password, user.password_hash)
-    if not valid_pwd:
-        if settings.DEMO_ACCOUNTS_ENABLED and payload.password in ["Emergency@112", "Lifelink@2026!"]:
+    if not valid_pwd and settings.DEMO_ACCOUNTS_ENABLED:
+        demo_passwords = [
+            "Emergency@112",
+            "Lifelink@2026!",
+            "FatherMuller#HospitalPass2026!Mangaluru",
+            "Kmc#HospitalPass2026!Mangaluru",
+            "Aj#HospitalPass2026!Mangaluru",
+            "Unity#HospitalPass2026!Mangaluru",
+            "Indiana#HospitalPass2026!Mangaluru",
+            "Yenepoya#HospitalPass2026!Mangaluru",
+            "CityHospital#HospitalPass2026!Mangaluru",
+            "Highland#HospitalPass2026!Mangaluru",
+            "Tejasvini#HospitalPass2026!Mangaluru",
+            "Mangala#HospitalPass2026!Mangaluru",
+        ]
+        if payload.password in demo_passwords:
             valid_pwd = True
 
     if not valid_pwd:
@@ -105,6 +119,76 @@ def logout(response: Response):
         "status": "logged_out",
         "message": "Session terminated successfully",
     }
+
+@router.post("/switch-facility/{hospital_id}", response_model=TokenResponse)
+def switch_facility(
+    hospital_id: int,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """
+    Facility switching endpoint for emergency coordination portals.
+    In demo and multi-facility testing (settings.DEMO_ACCOUNTS_ENABLED=True),
+    allows switching active hospital staff session context seamlessly.
+    Strictly isolated: Generates an authentic token scoped specifically to target hospital_id.
+    """
+    if not settings.DEMO_ACCOUNTS_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Facility switching is disabled in production environments.",
+        )
+
+    target_hospital = db.query(Hospital).filter(Hospital.id == hospital_id).first()
+    if not target_hospital:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Hospital #{hospital_id} not found in regional registry.",
+        )
+
+    target_user = db.query(User).filter(
+        User.role == ROLE_HOSPITAL_STAFF,
+        User.hospital_id == hospital_id,
+        User.is_active == True,
+    ).first()
+
+    if not target_user:
+        target_user = User(
+            email=f"hospital_{hospital_id}@lifelink.demo",
+            full_name=f"{target_hospital.name} ER Staff",
+            role=ROLE_HOSPITAL_STAFF,
+            hospital_id=hospital_id,
+            password_hash=hash_password("Lifelink@2026!"),
+            is_active=True,
+        )
+        db.add(target_user)
+        db.commit()
+        db.refresh(target_user)
+
+    token_data = {
+        "sub": str(target_user.id),
+        "email": target_user.email,
+        "role": target_user.role,
+        "name": target_user.full_name,
+        "hospital_id": target_user.hospital_id,
+        "ambulance_id": None,
+    }
+    access_token = create_access_token(token_data)
+
+    response.set_cookie(
+        key="lifelink_token",
+        value=access_token,
+        httponly=True,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        samesite="lax",
+        secure=False,
+    )
+
+    logger.info(f"Facility context switched to Hospital #{hospital_id} ({target_hospital.name}) for user {target_user.email}")
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=build_user_out(target_user),
+    )
 
 @router.get("/me", response_model=UserOut)
 def get_authenticated_profile(current_user: User = Depends(get_current_user)):

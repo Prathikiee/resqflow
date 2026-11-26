@@ -1039,12 +1039,22 @@ def get_allocated_incidents(
     Strictly isolated: Staff from Hospital A cannot view incidents allocated to Hospital B.
     """
     verify_hospital_access(hospital_id, current_user)
+    # 1. Sweep and escalate any expired pending reservations for this hospital first
+    pending_dispatches = (
+        db.query(Dispatch)
+        .filter(
+            Dispatch.destination_hospital_id == hospital_id,
+            Dispatch.coordination_status == "PENDING_CONFIRMATIONS",
+        )
+        .all()
+    )
+    for p in pending_dispatches:
+        expire_single_dispatch_if_due(p, db)
+
+    # 2. Return fresh dispatches allocated to this hospital
     query = (
         db.query(Dispatch)
         .filter(Dispatch.destination_hospital_id == hospital_id)
         .order_by(Dispatch.created_at.desc())
     )
-    dispatches = query.all()
-    for d in dispatches:
-        expire_single_dispatch_if_due(d, db)
-    return dispatches
+    return query.all()

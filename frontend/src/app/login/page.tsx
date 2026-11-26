@@ -73,7 +73,7 @@ const DEMO_ACCOUNTS: DemoAccount[] = [
     label: "Hospital ER (Father Muller)",
     role: "HOSPITAL_STAFF",
     email: "fathermuller@lifelink.demo",
-    password: "Lifelink@2026!",
+    password: "FatherMuller#HospitalPass2026!Mangaluru",
     description: "Father Muller Kankanady bed reservation & pre-arrival handover review",
     badgeBg: "bg-emerald-50",
     badgeText: "text-emerald-700",

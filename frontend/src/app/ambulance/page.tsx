@@ -126,7 +126,7 @@ function getSharedAudioContext(): AudioContext | null {
   return sharedAudioContext;
 }
 
-function playEmergencyAlarm(durationSeconds = 4): () => void {
+function playEmergencyAlarm(durationSeconds = 5): () => void {
   try {
     const audioCtx = getSharedAudioContext();
     if (!audioCtx) return () => {};
