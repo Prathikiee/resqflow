@@ -82,6 +82,7 @@ export default function DispatcherCommandCenterPage() {
   const isSteppingLifecycleRef = useRef(false);
   const [isSteppingLifecycle, setIsSteppingLifecycle] = useState(false);
   const [isAutoAllocating, setIsAutoAllocating] = useState(false);
+  const [isReassigning, setIsReassigning] = useState(false);
   const selectedIncidentRef = useRef<any | null>(null);
   selectedIncidentRef.current = selectedIncident;
 
@@ -340,7 +341,9 @@ export default function DispatcherCommandCenterPage() {
     }
   };
 
-  const handleTriggerReassignment = async (dispatchId: number) => {
+  const handleTriggerReassignment = async (dispatchId: number, expectedAttempt?: number) => {
+    if (isReassigning) return;
+    setIsReassigning(true);
     const token = typeof window !== "undefined" ? localStorage.getItem("lifelink_token") : null;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -348,7 +351,10 @@ export default function DispatcherCommandCenterPage() {
     };
 
     try {
-      const res = await fetch(`${backendUrl}/api/dispatch/${dispatchId}/reassign`, {
+      const url = expectedAttempt !== undefined
+        ? `${backendUrl}/api/dispatch/${dispatchId}/reassign?expected_attempt=${expectedAttempt}`
+        : `${backendUrl}/api/dispatch/${dispatchId}/reassign`;
+      const res = await fetch(url, {
         method: "POST",
         headers,
       });
@@ -356,10 +362,17 @@ export default function DispatcherCommandCenterPage() {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || "Reassignment failed");
       }
-      addNotification(`Smart Escalation Reassignment triggered for Dispatch #${dispatchId}`);
+      const data = await res.json();
+      if (data.coordination_status === "REASSIGNMENT_REQUIRED") {
+        addNotification(`⚠️ Reassignment Attempt #${data.attempt_number || 1}: No alternative units available (${data.rejection_reason || "Check fleet status"})`);
+      } else {
+        addNotification(`✅ Emergency Reassigned (Attempt #${data.attempt_number}): New unit provisionally reserved.`);
+      }
       await fetchData();
     } catch (err: any) {
       alert(`Reassignment error: ${err.message}`);
+    } finally {
+      setIsReassigning(false);
     }
   };
 
@@ -854,11 +867,16 @@ export default function DispatcherCommandCenterPage() {
                             )}
                             <button
                               type="button"
-                              onClick={() => handleTriggerReassignment(currentDispatch.id)}
-                              className="px-2.5 py-1 rounded bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1 transition shadow-2xs"
+                              disabled={isReassigning}
+                              onClick={() => handleTriggerReassignment(currentDispatch.id, currentDispatch.attempt_number)}
+                              className={`px-3 py-1.5 rounded-lg text-white text-xs font-bold flex items-center gap-1.5 transition shadow-2xs ${
+                                isReassigning
+                                  ? "bg-slate-400 cursor-not-allowed opacity-80"
+                                  : "bg-red-600 hover:bg-red-700 active:scale-95"
+                              }`}
                             >
-                              <RefreshCw className="w-3.5 h-3.5" />
-                              <span>Reassign Available Unit</span>
+                              <RefreshCw className={`w-3.5 h-3.5 ${isReassigning ? "animate-spin" : ""}`} />
+                              <span>{isReassigning ? "Reassigning Available Unit..." : "Reassign Available Unit"}</span>
                             </button>
                           </div>
                         )}

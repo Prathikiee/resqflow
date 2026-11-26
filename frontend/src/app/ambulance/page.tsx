@@ -241,7 +241,7 @@ export default function AmbulancePortalPage() {
 
   const isActionInProgressRef = useRef(false);
   const processedEventsRef = useRef<Set<string>>(new Set());
-  const alertedDispatchIdsRef = useRef<Set<number>>(new Set());
+  const alertedDispatchIdsRef = useRef<Set<string>>(new Set());
   const alarmStopRef = useRef<(() => void) | null>(null);
   const backendUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -403,6 +403,24 @@ export default function AmbulancePortalPage() {
                   text: "Incoming Emergency Mission Assignment received!",
                   type: "info",
                 });
+              } else if (data.event === "DISPATCH_REASSIGNED" || data.event === "DISPATCH_ESCALATED") {
+                const targetAmbId = user?.ambulance_id;
+                if (targetAmbId && Number(data.payload?.new_ambulance_id) === Number(targetAmbId)) {
+                  setFeedbackMsg({
+                    text: `🚨 Reassigned Emergency Mission Assignment (Attempt #${data.payload?.attempt_number || 1}) received!`,
+                    type: "info",
+                  });
+                } else if (targetAmbId && Number(data.payload?.previous_ambulance_id) === Number(targetAmbId)) {
+                  setFeedbackMsg({
+                    text: "Previous provisional assignment was reassigned to another unit.",
+                    type: "info",
+                  });
+                }
+              } else if (data.event === "DISPATCH_ESCALATION_FAILED") {
+                setFeedbackMsg({
+                  text: "Provisional reservation expired. Awaiting Dispatcher reassignment.",
+                  type: "info",
+                });
               } else if (data.event === "PATIENT_PICKED_UP") {
                 setFeedbackMsg({
                   text: "Patient pickup confirmed. En route to receiving hospital ER.",
@@ -462,10 +480,13 @@ export default function AmbulancePortalPage() {
 
   // Incoming alert audio trigger
   useEffect(() => {
-    if (pendingDispatch && !alertedDispatchIdsRef.current.has(pendingDispatch.id)) {
-      alertedDispatchIdsRef.current.add(pendingDispatch.id);
-      const stop = playEmergencyAlarm(4);
-      alarmStopRef.current = stop;
+    if (pendingDispatch) {
+      const alertKey = `${pendingDispatch.id}_${pendingDispatch.attempt_number || 1}`;
+      if (!alertedDispatchIdsRef.current.has(alertKey)) {
+        alertedDispatchIdsRef.current.add(alertKey);
+        const stop = playEmergencyAlarm(4);
+        alarmStopRef.current = stop;
+      }
     }
     if (!pendingDispatch && alarmStopRef.current) {
       alarmStopRef.current();
@@ -512,7 +533,8 @@ export default function AmbulancePortalPage() {
 
   const handleConfirmMission = async (
     dispatchId: number,
-    decision: "ACCEPTED" | "REJECTED"
+    decision: "ACCEPTED" | "REJECTED",
+    attemptNumber?: number
   ) => {
     if (alarmStopRef.current) {
       alarmStopRef.current();
@@ -534,7 +556,7 @@ export default function AmbulancePortalPage() {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ decision }),
+          body: JSON.stringify({ decision, attempt_number: attemptNumber }),
         }
       );
 
@@ -1148,10 +1170,25 @@ export default function AmbulancePortalPage() {
                     <span className="px-2 py-0.5 rounded-md bg-red-600 text-white font-black text-xs uppercase tracking-wider">
                       Priority
                     </span>
+                    {pendingDispatch.attempt_number && pendingDispatch.attempt_number > 1 && (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-bold text-[10px] uppercase border border-amber-300">
+                        Attempt #{pendingDispatch.attempt_number}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-slate-500">
                     Dispatch #{pendingDispatch.id} • Unit {pendingDispatch.ambulance_call_sign}
                   </p>
+                  {!audioUnlocked && (
+                    <button
+                      type="button"
+                      onClick={handleUnlockAudio}
+                      className="mt-1 flex items-center gap-1 text-[11px] font-bold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-lg px-2 py-0.5 transition"
+                    >
+                      <Volume2 className="w-3.5 h-3.5 text-amber-600" />
+                      <span>Sound Siren Chime (Audio Muted)</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1217,7 +1254,7 @@ export default function AmbulancePortalPage() {
                 type="button"
                 disabled={actionLoading}
                 onClick={() =>
-                  handleConfirmMission(pendingDispatch.id, "REJECTED")
+                  handleConfirmMission(pendingDispatch.id, "REJECTED", pendingDispatch.attempt_number)
                 }
                 className="w-full py-3 px-4 rounded-2xl border border-slate-300 hover:bg-slate-100 text-slate-700 text-sm font-bold transition-colors"
               >
@@ -1228,7 +1265,7 @@ export default function AmbulancePortalPage() {
                 type="button"
                 disabled={actionLoading}
                 onClick={() =>
-                  handleConfirmMission(pendingDispatch.id, "ACCEPTED")
+                  handleConfirmMission(pendingDispatch.id, "ACCEPTED", pendingDispatch.attempt_number)
                 }
                 className="w-full py-3 px-4 rounded-2xl bg-red-600 hover:bg-red-700 text-white text-sm font-extrabold shadow-md flex items-center justify-center space-x-2 transition-colors"
               >
@@ -1936,20 +1973,39 @@ export default function AmbulancePortalPage() {
                           <span className="font-bold text-sm text-slate-900">
                             Mission #{m.id}
                           </span>
-                          <span
-                            className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
-                              m.status === "COMPLETED"
-                                ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                                : m.status === "CANCELLED"
-                                ? "bg-slate-100 text-slate-600 border border-slate-200"
-                                : "bg-blue-50 text-blue-700 border border-blue-200"
-                            }`}
-                          >
-                            {m.status.replace(/_/g, " ")}
-                          </span>
+                          {m.coordination_status === "REASSIGNMENT_REQUIRED" || m.coordination_status === "EXPIRED" ? (
+                            <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-amber-50 text-amber-700 border border-amber-200">
+                              Reservation Expired
+                            </span>
+                          ) : m.coordination_status === "REJECTED" ? (
+                            <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-red-50 text-red-700 border border-red-200">
+                              Declined
+                            </span>
+                          ) : (
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                                m.status === "COMPLETED"
+                                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                  : m.status === "CANCELLED"
+                                  ? "bg-slate-100 text-slate-600 border border-slate-200"
+                                  : m.status === "ASSIGNED" && m.coordination_status === "PENDING_CONFIRMATIONS"
+                                  ? "bg-amber-50 text-amber-700 border border-amber-200"
+                                  : "bg-blue-50 text-blue-700 border border-blue-200"
+                              }`}
+                            >
+                              {m.status === "ASSIGNED" && m.coordination_status === "PENDING_CONFIRMATIONS"
+                                ? "Pending Confirmation"
+                                : m.status.replace(/_/g, " ")}
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-slate-500 mt-0.5">
                           {m.incident?.chief_complaint || "Emergency Response"}
+                          {m.attempt_number && m.attempt_number > 1 && (
+                            <span className="ml-1.5 text-[10px] font-mono text-slate-500 font-semibold bg-slate-100 px-1 py-0.5 rounded">
+                              Attempt #{m.attempt_number}
+                            </span>
+                          )}
                         </p>
                       </div>
 

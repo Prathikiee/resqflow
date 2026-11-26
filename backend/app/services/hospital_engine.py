@@ -1,7 +1,7 @@
 from typing import List, Dict, Any
 import logging
 from backend.app.models.entities import Hospital, Incident
-from backend.app.services.routing_service import calculate_route
+from backend.app.services.routing_service import calculate_route, estimate_route_fast
 
 logger = logging.getLogger(__name__)
 
@@ -88,11 +88,12 @@ def rank_suitable_hospitals(
         if not h.accepting_emergencies or readiness == "DIVERT":
             continue
 
-        route_info = calculate_route(
+        route_info = estimate_route_fast(
             start_lat=incident.latitude,
             start_lon=incident.longitude,
             dest_lat=h.latitude,
             dest_lon=h.longitude,
+            include_geometry=True,
         )
 
         transit_mins = route_info["duration_minutes"]

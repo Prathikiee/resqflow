@@ -1,10 +1,13 @@
 import math
 import logging
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 import httpx
 from backend.app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Bounded in-memory route cache (keyed by rounded start/dest coordinates)
+_ROUTE_CACHE: Dict[Tuple[float, float, float, float], Dict[str, Any]] = {}
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """
@@ -42,17 +45,57 @@ def generate_fallback_waypoints(lat1: float, lon1: float, lat2: float, lon2: flo
         waypoints.append([round(lat, 6), round(lon, 6)])
     return waypoints
 
+def estimate_route_fast(
+    start_lat: float,
+    start_lon: float,
+    dest_lat: float,
+    dest_lon: float,
+    include_geometry: bool = True,
+) -> Dict[str, Any]:
+    """
+    Ultra-fast in-memory route calculation (<0.1ms).
+    Computes distance using Haversine with Mangaluru urban road tortuosity factor (1.32x)
+    and priority emergency response speed (40 km/h = 11.11 m/s).
+    """
+    cache_key = (round(start_lat, 4), round(start_lon, 4), round(dest_lat, 4), round(dest_lon, 4))
+    if cache_key in _ROUTE_CACHE:
+        return _ROUTE_CACHE[cache_key]
+
+    straight_distance = haversine_distance(start_lat, start_lon, dest_lat, dest_lon)
+    estimated_distance = straight_distance * 1.32
+    speed_mps = 11.11
+    estimated_duration = max(45.0, estimated_distance / speed_mps)
+
+    geometry = generate_fallback_waypoints(start_lat, start_lon, dest_lat, dest_lon) if include_geometry else []
+
+    res = {
+        "distance_meters": round(estimated_distance, 1),
+        "duration_seconds": round(estimated_duration, 1),
+        "duration_minutes": round(estimated_duration / 60.0, 1),
+        "geometry": geometry,
+        "routing_mode": "Deterministic Fallback",
+        "is_simulated": True,
+        "attribution": "Estimated via Haversine Distance & Urban Tortuosity Model (40 km/h response profile)",
+    }
+    if len(_ROUTE_CACHE) < 2000:
+        _ROUTE_CACHE[cache_key] = res
+    return res
+
 def calculate_route(
     start_lat: float,
     start_lon: float,
     dest_lat: float,
     dest_lon: float,
-    timeout_seconds: float = 3.0,
+    timeout_seconds: float = 0.8,
 ) -> Dict[str, Any]:
     """
     Computes route geometry, distance, and duration using OSRM with deterministic fallback.
-    Clearly tags whether the returned route is live OSRM data or an estimated fallback.
+    Cached in-memory to prevent duplicate network calls.
     """
+    cache_key = (round(start_lat, 4), round(start_lon, 4), round(dest_lat, 4), round(dest_lon, 4))
+    if cache_key in _ROUTE_CACHE:
+        return _ROUTE_CACHE[cache_key]
+
     osrm_url = f"{settings.OSRM_BASE_URL}/route/v1/driving/{start_lon},{start_lat};{dest_lon},{dest_lat}?overview=full&geometries=geojson"
 
     try:
@@ -72,7 +115,7 @@ def calculate_route(
                     # Emergency vehicle priority speed adjustment (15% reduction in drive time for lights & siren)
                     emergency_duration = max(30.0, duration_seconds * 0.85)
 
-                    return {
+                    res = {
                         "distance_meters": round(distance_meters, 1),
                         "duration_seconds": round(emergency_duration, 1),
                         "duration_minutes": round(emergency_duration / 60.0, 1),
@@ -81,26 +124,10 @@ def calculate_route(
                         "is_simulated": False,
                         "attribution": "OpenStreetMap & OSRM Routing Engine",
                     }
+                    if len(_ROUTE_CACHE) < 2000:
+                        _ROUTE_CACHE[cache_key] = res
+                    return res
     except Exception as e:
         logger.info(f"OSRM service unreachable or timed out ({e}). Utilizing deterministic emergency routing fallback.")
 
-    # Resilient Deterministic Fallback
-    straight_distance = haversine_distance(start_lat, start_lon, dest_lat, dest_lon)
-    # Urban road tortuosity factor in Mangaluru (actual road distance is ~1.32x straight line)
-    estimated_distance = straight_distance * 1.32
-
-    # Average emergency response vehicle speed in Mangaluru urban traffic: 40 km/h (11.11 m/s)
-    speed_mps = 11.11
-    estimated_duration = max(45.0, estimated_distance / speed_mps)
-
-    fallback_geometry = generate_fallback_waypoints(start_lat, start_lon, dest_lat, dest_lon)
-
-    return {
-        "distance_meters": round(estimated_distance, 1),
-        "duration_seconds": round(estimated_duration, 1),
-        "duration_minutes": round(estimated_duration / 60.0, 1),
-        "geometry": fallback_geometry,
-        "routing_mode": "Deterministic Fallback",
-        "is_simulated": True,
-        "attribution": "Estimated via Haversine Distance & Urban Tortuosity Model (40 km/h response profile)",
-    }
+    return estimate_route_fast(start_lat, start_lon, dest_lat, dest_lon, include_geometry=True)

@@ -770,7 +770,12 @@ export default function HospitalPortalPage() {
   // =============================================================================
 
   // 1. Dual confirmation decision (Accept / Reject)
-  const handleDecideReservation = async (dispatchId: number, decision: "ACCEPTED" | "REJECTED", reason?: string) => {
+  const handleDecideReservation = async (
+    dispatchId: number,
+    decision: "ACCEPTED" | "REJECTED",
+    reason?: string,
+    attemptNumber?: number
+  ) => {
     if (isActionInProgressRef.current) return;
     isActionInProgressRef.current = true;
     setActionLoading(true);
@@ -787,6 +792,7 @@ export default function HospitalPortalPage() {
         body: JSON.stringify({
           decision,
           reason: decision === "REJECTED" ? (reason || rejectionReason).trim() : undefined,
+          attempt_number: attemptNumber,
         }),
       });
 
@@ -1787,7 +1793,7 @@ export default function HospitalPortalPage() {
                     <div className="flex items-center gap-2">
                       {primaryPendingRequest && (
                         <button
-                          onClick={() => handleDecideReservation(primaryPendingRequest.id, "ACCEPTED")}
+                          onClick={() => handleDecideReservation(primaryPendingRequest.id, "ACCEPTED", undefined, primaryPendingRequest.attempt_number)}
                           disabled={actionLoading}
                           className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-sm flex items-center gap-1 transition"
                         >
@@ -2168,11 +2174,15 @@ export default function HospitalPortalPage() {
                                 Reject / Divert
                               </button>
                               <button
-                                onClick={() => handleDecideReservation(disp.id, "ACCEPTED")}
-                                disabled={actionLoading}
-                                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-sm transition-colors flex items-center gap-1.5"
+                                onClick={() => handleDecideReservation(disp.id, "ACCEPTED", undefined, disp.attempt_number)}
+                                disabled={actionLoading || reqRemainingSec === 0}
+                                className={`px-5 py-2 text-white text-xs font-bold rounded-lg shadow-sm transition-colors flex items-center gap-1.5 ${
+                                  reqRemainingSec === 0
+                                    ? "bg-slate-400 cursor-not-allowed opacity-75"
+                                    : "bg-emerald-600 hover:bg-emerald-700"
+                                }`}
                               >
-                                <Check className="w-4 h-4" /> Accept Bed Reservation
+                                <Check className="w-4 h-4" /> {reqRemainingSec === 0 ? "Reservation Expired" : "Accept Bed Reservation"}
                               </button>
                             </div>
                           </div>
@@ -3359,7 +3369,7 @@ export default function HospitalPortalPage() {
               </button>
               <button
                 type="button"
-                onClick={() => handleDecideReservation(rejectModalDispatch.id, "REJECTED", rejectionReason)}
+                onClick={() => handleDecideReservation(rejectModalDispatch.id, "REJECTED", rejectionReason, rejectModalDispatch.attempt_number)}
                 disabled={actionLoading}
                 className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-sm"
               >

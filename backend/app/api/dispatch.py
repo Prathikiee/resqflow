@@ -237,7 +237,7 @@ def auto_escalate_dispatch(
         if is_postgres(db):
             amb_q = amb_q.with_for_update()
         old_amb = amb_q.first()
-        if old_amb and old_amb.status == "RESERVED" and old_amb.reservation_dispatch_id == dispatch.id:
+        if old_amb and old_amb.status == "RESERVED" and (old_amb.reservation_dispatch_id == dispatch.id or old_amb.reservation_dispatch_id is None):
             old_amb.status = "AVAILABLE"
             old_amb.reservation_dispatch_id = None
 
@@ -327,14 +327,17 @@ def auto_escalate_dispatch(
         broadcast_sync("DISPATCH_ESCALATION_FAILED", {
             "dispatch_id": dispatch.id,
             "incident_id": dispatch.incident_id,
+            "ambulance_id": dispatch.ambulance_id,
             "failure_source": failure_source,
             "reason": failure_reason,
+            "coordination_status": dispatch.coordination_status,
         }, broadcast_to_all=True)
         broadcast_sync("DISPATCH_CONFIRMATION_UPDATED", {
             "dispatch_id": dispatch.id,
             "coordination_status": dispatch.coordination_status,
             "ambulance_confirmation": dispatch.ambulance_confirmation_status,
             "hospital_confirmation": dispatch.hospital_confirmation_status,
+            "ambulance_id": dispatch.ambulance_id,
         }, broadcast_to_all=True)
         return dispatch
 
@@ -364,6 +367,22 @@ def auto_escalate_dispatch(
             incident.status = "TRIAGED"
         db.commit()
         db.refresh(dispatch)
+
+        broadcast_sync("DISPATCH_ESCALATION_FAILED", {
+            "dispatch_id": dispatch.id,
+            "incident_id": dispatch.incident_id,
+            "ambulance_id": dispatch.ambulance_id,
+            "failure_source": failure_source,
+            "reason": failure_reason,
+            "coordination_status": dispatch.coordination_status,
+        }, broadcast_to_all=True)
+        broadcast_sync("DISPATCH_CONFIRMATION_UPDATED", {
+            "dispatch_id": dispatch.id,
+            "coordination_status": dispatch.coordination_status,
+            "ambulance_confirmation": dispatch.ambulance_confirmation_status,
+            "hospital_confirmation": dispatch.hospital_confirmation_status,
+            "ambulance_id": dispatch.ambulance_id,
+        }, broadcast_to_all=True)
         return dispatch
 
     best_amb_cand = ranking["ranked_ambulances"][0]
@@ -526,6 +545,7 @@ def auto_escalate_dispatch(
         "attempt_number": dispatch.attempt_number,
         "new_ambulance_id": new_amb.id,
         "new_ambulance_call_sign": new_amb.call_sign,
+        "previous_ambulance_id": old_amb.id if old_amb else None,
         "previous_ambulance_call_sign": old_amb.call_sign if old_amb else None,
         "failure_source": failure_source,
         "failure_reason": failure_reason,
@@ -537,12 +557,16 @@ def auto_escalate_dispatch(
         "hospital_confirmation": dispatch.hospital_confirmation_status,
         "reservation_expires_at": reservation_expires.isoformat(),
         "attempt_number": dispatch.attempt_number,
+        "new_ambulance_id": new_amb.id,
+        "previous_ambulance_id": old_amb.id if old_amb else None,
     }, ambulance_id=new_amb.id, hospital_id=new_hosp.id if new_hosp else None, broadcast_to_all=True)
     broadcast_sync("DISPATCH_REASSIGNED", {
         "dispatch_id": dispatch.id,
         "incident_id": incident.id,
         "new_ambulance_id": new_amb.id,
         "new_ambulance_call_sign": new_amb.call_sign,
+        "previous_ambulance_id": old_amb.id if old_amb else None,
+        "previous_ambulance_call_sign": old_amb.call_sign if old_amb else None,
         "attempt_number": dispatch.attempt_number,
     }, ambulance_id=new_amb.id, hospital_id=new_hosp.id if new_hosp else None, broadcast_to_all=True)
 

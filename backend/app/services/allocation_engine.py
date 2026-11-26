@@ -1,7 +1,7 @@
 from typing import List, Dict, Any, Tuple
 import logging
 from backend.app.models.entities import Ambulance, Incident
-from backend.app.services.routing_service import calculate_route
+from backend.app.services.routing_service import calculate_route, estimate_route_fast
 
 logger = logging.getLogger(__name__)
 
@@ -96,12 +96,13 @@ def score_and_rank_ambulances(
             })
             continue
 
-        # Step 2: Route & Response Time Calculation
-        route_info = calculate_route(
+        # Step 2: Route & Response Time Calculation (Fast deterministic ranking)
+        route_info = estimate_route_fast(
             start_lat=amb.current_latitude,
             start_lon=amb.current_longitude,
             dest_lat=incident.latitude,
             dest_lon=incident.longitude,
+            include_geometry=True,
         )
 
         eta_minutes = route_info["duration_minutes"]
