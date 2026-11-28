@@ -139,6 +139,7 @@ class BedCapacityBreakdownUpdate(BaseModel):
     icu: Optional[BedCategoryInput] = None
     hdu: Optional[BedCategoryInput] = None
     general_ward: Optional[BedCategoryInput] = None
+    trauma: Optional[BedCategoryInput] = None
     isolation: Optional[BedCategoryInput] = None
     pediatric: Optional[BedCategoryInput] = None
     updated_by_name: Optional[str] = None

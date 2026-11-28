@@ -71,15 +71,16 @@ def rank_suitable_hospitals(
 
     # Determine clinical target specialty based on incident
     target_specialties: List[str] = ["Emergency Medicine"]
-    if incident.chest_pain or "cardiac" in (incident.chief_complaint or "").lower():
+    complaint_lower = (incident.chief_complaint or "").lower()
+    if getattr(incident, "chest_pain", False) or any(k in complaint_lower for k in ["cardiac", "chest pain", "heart", "stemi", "cardio"]):
         target_specialties.append("Cardiology")
-    if incident.suspected_stroke:
+    if getattr(incident, "suspected_stroke", False) or "stroke" in complaint_lower:
         target_specialties.append("Stroke Unit")
-    if incident.severe_bleeding or incident.severe_trauma:
+    if getattr(incident, "severe_bleeding", False) or getattr(incident, "severe_trauma", False) or any(k in complaint_lower for k in ["trauma", "bleed", "fracture", "accident", "crash"]):
         target_specialties.append("Trauma Level 1")
     if incident.patient_age is not None and incident.patient_age < 16:
         target_specialties.append("Pediatrics")
-    if "burn" in (incident.chief_complaint or "").lower():
+    if "burn" in complaint_lower:
         target_specialties.append("Burn Care")
 
     for h in hospitals:
@@ -98,6 +99,7 @@ def rank_suitable_hospitals(
 
         transit_mins = route_info["duration_minutes"]
         reasons: List[str] = []
+        equip_score = 0.0
 
         # 1. Specialty Match Score (Weight: 35%)
         hospital_specialties = [s.lower() for s in (h.specialties or [])]
@@ -116,15 +118,77 @@ def rank_suitable_hospitals(
         doctors = getattr(h, "doctors_availability", []) or []
         active_specialists = [
             d["name"] for d in doctors
-            if d.get("status") == "AVAILABLE" and any(ts.lower() in d.get("specialty", "").lower() for ts in target_specialties)
+            if (d.get("is_on_duty") or d.get("effective_status") == "AVAILABLE" or d.get("status") == "AVAILABLE")
+            and any(ts.lower() in str(d.get("specialty", "")).lower() or ts.lower() in str(d.get("department", "")).lower() for ts in target_specialties)
         ]
         if active_specialists:
             s_specialty = min(100.0, s_specialty + 10.0)
             reasons.append(f"On-Duty Medical Staffing: Active specialists on shift ({', '.join(active_specialists[:2])}).")
 
+        # Department Operational Status & Emergency Routing Check
+        depts = getattr(h, "departments", []) or []
+        for d in depts:
+            dept_name = str(d.get("name", "")).lower()
+            dept_status = str(d.get("operational_status", "ACTIVE")).upper()
+            emergency_cov = d.get("emergency_coverage", True)
+            for ts in target_specialties:
+                if ts.lower() in dept_name or any(ts.lower() in str(s).lower() for s in d.get("specialty_availability", [])):
+                    if dept_status == "TEMPORARILY_CLOSED" or not emergency_cov:
+                        s_specialty = max(0.0, s_specialty - 25.0)
+                        reasons.append(f"Department Alert: {d.get('name')} is {dept_status} / Emergency routing disabled.")
+                    elif dept_status == "LIMITED":
+                        s_specialty = max(0.0, s_specialty - 10.0)
+                        reasons.append(f"Department Advisory: {d.get('name')} operating under LIMITED capacity.")
+
+        # 2. Transit Proximity Score (Weight: 30%)
+        # 100 pts at 1 min, decays by 4 pts per minute
+        s_proximity = max(5.0, min(100.0, 100.0 - (transit_mins * 4.0)))
+        reasons.append(f"Transit Duration: ~{transit_mins} mins ({round(route_info['distance_meters']/1000, 1)} km from incident scene).")
+
+        # 3. ICU Bed Availability Score (Weight: 20%)
+        icu_ratio = h.available_icu_beds / max(1, h.total_icu_beds)
+        s_icu = min(100.0, icu_ratio * 100.0)
+        reasons.append(f"Critical Bed Status: {h.available_icu_beds}/{h.total_icu_beds} ICU beds vacant.")
+
+        # 4. Emergency Bay Capacity Score (Weight: 15%) & Reservation Guard
+        reserved_beds = getattr(h, "reserved_emergency_beds", 0) or 0
+        effective_er_beds = max(0, h.available_emergency_beds - reserved_beds)
+        er_ratio = effective_er_beds / max(1, h.total_emergency_beds)
+        s_er = min(100.0, er_ratio * 100.0)
+        reasons.append(f"Emergency Bay Status: {effective_er_beds}/{h.total_emergency_beds} unreserved bays open ({reserved_beds} reserved).")
+
+        # Clinical Capabilities Matrix Check
+        caps = getattr(h, "capabilities", {}) or {}
+        if "Cardiology" in target_specialties:
+            if caps.get("cardiac_emergency") == "UNAVAILABLE":
+                s_specialty = max(0.0, s_specialty - 30.0)
+                reasons.append("Clinical Capability Constraint: Cardiac Emergency Support marked UNAVAILABLE.")
+            elif caps.get("cardiac_emergency") == "AVAILABLE":
+                equip_score += 4.0
+        if "Trauma Level 1" in target_specialties:
+            if caps.get("trauma_capability") == "UNAVAILABLE":
+                s_specialty = max(0.0, s_specialty - 30.0)
+                reasons.append("Clinical Capability Constraint: Polytrauma Resuscitation marked UNAVAILABLE.")
+            elif caps.get("trauma_capability") == "AVAILABLE":
+                equip_score += 4.0
+            if caps.get("operating_theatre") == "UNAVAILABLE":
+                s_specialty = max(0.0, s_specialty - 20.0)
+                reasons.append("Clinical Capability Constraint: Emergency Operating Theatre marked UNAVAILABLE.")
+        if incident.suspected_stroke and caps.get("emergency_imaging") == "UNAVAILABLE":
+            s_specialty = max(0.0, s_specialty - 25.0)
+            reasons.append("Clinical Capability Constraint: Emergency Imaging CT marked UNAVAILABLE.")
+
+        is_critical_case = (
+            getattr(incident, "triage_color", "") == "RED"
+            or "Priority 1" in str(getattr(incident, "triage_level", ""))
+            or getattr(incident, "severity", "") in ["CRITICAL", "HIGH"]
+        )
+        if is_critical_case and caps.get("icu_availability") == "UNAVAILABLE":
+            s_icu = max(0.0, s_icu - 30.0)
+            reasons.append("Clinical Capability Constraint: Critical Care ICU admission marked UNAVAILABLE.")
+
         # Clinical Equipment Readiness Check
         equipment = getattr(h, "equipment_readiness", {}) or {}
-        equip_score = 0.0
         if "Cardiology" in target_specialties and equipment.get("cath_lab") == "OPERATIONAL":
             equip_score += 5.0
             reasons.append("Advanced Facility Capability: Active Cardiac Cath Lab Operational.")
@@ -193,6 +257,7 @@ def rank_suitable_hospitals(
         "incident_id": incident.id,
         "target_clinical_departments": target_specialties,
         "ranked_hospitals": ranked_list,
+        "ranked_candidates": candidates,
         "recommended_hospital": ranked_list[0] if ranked_list else None,
         "ranking_weights": {
             "clinical_specialty": "35%",

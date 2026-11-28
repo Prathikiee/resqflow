@@ -242,10 +242,10 @@ export default function LoginPage() {
             ))}
           </div>
 
-          {/* Mangaluru 10 Hospitals Selector */}
+          {/* Dakshina Kannada 30 Hospitals Selector */}
           <div className="mt-3 pt-3 border-t border-slate-100">
             <label className="block text-[11px] font-semibold text-slate-600 mb-1 flex items-center justify-between">
-              <span>Switch Hospital ER Account (10 Mangaluru Facilities):</span>
+              <span>Quick Login: Regional Hospital ER (30 Facilities):</span>
               <span className="text-[10px] text-emerald-600 font-mono font-medium">Isolated Facility Context</span>
             </label>
             <select
@@ -255,7 +255,7 @@ export default function LoginPage() {
               }}
               className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800 font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500"
             >
-              <option value="" disabled>-- Select one of 10 Mangaluru Demo Hospitals --</option>
+              <option value="" disabled>-- Select one of 30 Regional Demo Hospitals --</option>
               {HOSPITAL_DEMO_ACCOUNTS.map((hosp) => (
                 <option key={hosp.email} value={hosp.email}>
                   {hosp.name} [{hosp.code}]

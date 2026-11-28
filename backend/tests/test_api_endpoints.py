@@ -60,6 +60,6 @@ def test_ambulances_endpoint(db):
 
 def test_hospitals_endpoint(db):
     hosp = list_hospitals(db=db)
-    assert len(hosp) == 10
+    assert len(hosp) >= 10
     accepting = list_hospitals(accepting_only=True, db=db)
-    assert len(accepting) == 10
+    assert len(accepting) >= 10

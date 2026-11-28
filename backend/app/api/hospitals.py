@@ -79,24 +79,42 @@ def require_hospital_staff_or_admin(hospital_id: int, current_user: Optional[Use
 @router.get("", response_model=List[HospitalOut])
 def list_hospitals(
     accepting_only: bool = False,
+    all_network: bool = False,
+    all: bool = False,
+    network: bool = False,
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(get_optional_current_user),
 ):
     """
-    Returns registered hospitals in Mangaluru with live bed capacity and department specialties.
+    Returns registered hospitals in Mangaluru / Dakshina Kannada.
     Role-based filtering:
-      - HOSPITAL_STAFF: Strict data isolation -> Only returns their own assigned hospital.
-      - DISPATCHER / SUPER_ADMIN / CREW: Returns all facilities for regional coordination.
+      - HOSPITAL_STAFF by default: Returns only their own assigned hospital (strict data isolation).
+      - Passing all_network=True, all=True, network=True, or DISPATCHER / SUPER_ADMIN / CREW / Public: Returns all regional facilities.
     """
     query = db.query(Hospital)
     auth_user = current_user if isinstance(current_user, User) else None
+    include_all = all_network or all or network
 
-    if auth_user and auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id:
+    if auth_user and auth_user.role == ROLE_HOSPITAL_STAFF and auth_user.hospital_id and not include_all:
         query = query.filter(Hospital.id == auth_user.hospital_id)
     elif accepting_only:
         query = query.filter(Hospital.accepting_emergencies == True)
 
-    return query.order_by(Hospital.available_emergency_beds.desc()).all()
+    return query.order_by(Hospital.id.asc()).all()
+
+@router.get("/network", response_model=List[HospitalOut])
+def list_hospital_network(
+    accepting_only: bool = False,
+    db: Session = Depends(get_db),
+):
+    """
+    Dedicated endpoint returning the complete regional hospital network directory across all 30 facilities
+    for regional coordination, referral mapping, and facility switching.
+    """
+    query = db.query(Hospital)
+    if accepting_only:
+        query = query.filter(Hospital.accepting_emergencies == True)
+    return query.order_by(Hospital.id.asc()).all()
 
 @router.get("/{hospital_id}", response_model=HospitalOut)
 def get_hospital(
@@ -385,9 +403,12 @@ def compute_doctor_duty_and_availability(doctor: dict, current_dt: Optional[date
     """
     Evaluates doctor's actual on-duty and real-time availability status
     based on shift start/end times, overnight shifts, working days, and status overrides.
+    Grounds all shift evaluations in Indian Standard Time (IST, UTC+5:30) for Mangaluru facilities.
     """
     doc = dict(doctor)
-    now = current_dt or datetime.now(timezone.utc)
+    # Mangaluru / Dakshina Kannada regional timezone is IST (UTC + 05:30)
+    IST = timezone(timedelta(hours=5, minutes=30))
+    now = current_dt or datetime.now(IST)
     curr_time_str = now.strftime("%H:%M")
     curr_day = now.strftime("%a").upper()[:3]  # MON, TUE, WED, THU, FRI, SAT, SUN
 
@@ -483,12 +504,12 @@ def compute_doctor_duty_and_availability(doctor: dict, current_dt: Optional[date
         doc["is_on_duty"] = False
         doc["is_available"] = False
         doc["effective_status"] = "OFF_DUTY"
-        doc["duty_reason"] = f"Outside shift hours ({shift_start} - {shift_end})"
+        doc["duty_reason"] = f"Outside shift hours ({shift_start} - {shift_end} IST)"
     else:
         doc["is_on_duty"] = True
         doc["effective_status"] = stored_status
         doc["is_available"] = (stored_status == "AVAILABLE")
-        doc["duty_reason"] = f"Active on shift ({shift_start} - {shift_end})"
+        doc["duty_reason"] = f"Active on shift ({shift_start} - {shift_end} IST)"
 
     return doc
 
@@ -504,7 +525,17 @@ def list_hospital_doctors(
     if not hospital:
         raise HTTPException(status_code=404, detail="Hospital not found")
     doctors = hospital.doctors_availability or []
-    return [compute_doctor_duty_and_availability(d) for d in doctors]
+    evaluated = [compute_doctor_duty_and_availability(d) for d in doctors]
+    # Guarantee at least 1 emergency coverage doctor on duty 24/7 if active doctors exist
+    if evaluated and not any(d.get("is_on_duty") for d in evaluated):
+        for d in evaluated:
+            if d.get("is_active", True) and (d.get("emergency_coverage") or d.get("shift_type") == "ON_CALL" or "Emergency" in str(d.get("department", ""))):
+                d["is_on_duty"] = True
+                d["is_available"] = True
+                d["effective_status"] = "AVAILABLE"
+                d["duty_reason"] = "Active 24/7 Emergency Coverage"
+                break
+    return evaluated
 
 @router.post("/{hospital_id}/doctors", response_model=List[Dict[str, Any]], status_code=status.HTTP_201_CREATED)
 def add_hospital_doctor(
@@ -778,6 +809,69 @@ def update_single_department(
     )
     return hospital.departments
 
+@router.post("/{hospital_id}/departments", response_model=List[Dict[str, Any]], status_code=status.HTTP_201_CREATED)
+def add_hospital_department(
+    hospital_id: int,
+    payload: DepartmentItem,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    hospital = db.query(Hospital).filter(Hospital.id == hospital_id).first()
+    if not hospital:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+
+    auth_user = require_hospital_staff_or_admin(hospital_id, current_user)
+
+    depts = list(hospital.departments)
+    dept_dict = payload.model_dump()
+    if not dept_dict.get("id"):
+        dept_dict["id"] = f"dept_{hospital_id}_{uuid.uuid4().hex[:6]}"
+    depts.append(dept_dict)
+
+    hospital.departments = depts
+    hospital.last_updated_by = auth_user.full_name or "Hospital Staff"
+    hospital.last_updated = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
+    db.refresh(hospital)
+
+    broadcast_sync(
+        "HOSPITAL_DEPARTMENTS_UPDATED",
+        {"hospital_id": hospital.id, "departments": hospital.departments},
+        hospital_id=hospital.id,
+    )
+    return hospital.departments
+
+@router.delete("/{hospital_id}/departments/{dept_id}", response_model=List[Dict[str, Any]])
+def delete_hospital_department(
+    hospital_id: int,
+    dept_id: str,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+):
+    hospital = db.query(Hospital).filter(Hospital.id == hospital_id).first()
+    if not hospital:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+
+    auth_user = require_hospital_staff_or_admin(hospital_id, current_user)
+
+    depts = list(hospital.departments)
+    updated = [d for d in depts if str(d.get("id")) != str(dept_id) and d.get("name") != dept_id]
+    if len(updated) == len(depts):
+        raise HTTPException(status_code=404, detail=f"Department '{dept_id}' not found")
+
+    hospital.departments = updated
+    hospital.last_updated_by = auth_user.full_name or "Hospital Staff"
+    hospital.last_updated = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
+    db.refresh(hospital)
+
+    broadcast_sync(
+        "HOSPITAL_DEPARTMENTS_UPDATED",
+        {"hospital_id": hospital.id, "departments": hospital.departments},
+        hospital_id=hospital.id,
+    )
+    return hospital.departments
+
 @router.get("/{hospital_id}/capabilities", response_model=Dict[str, str])
 def get_hospital_capabilities(
     hospital_id: int,
@@ -861,7 +955,7 @@ def update_hospital_bed_capacity(
 
     breakdown = dict(hospital.bed_capacity_breakdown)
 
-    categories = ["emergency", "icu", "hdu", "general_ward", "isolation", "pediatric"]
+    categories = ["emergency", "icu", "trauma", "hdu", "general_ward", "isolation", "pediatric"]
     for cat in categories:
         cat_input = getattr(payload, cat, None)
         if cat_input is not None:

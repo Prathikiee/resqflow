@@ -276,7 +276,19 @@ export default function HospitalPortalPage() {
   // Departments & Capabilities Form state
   const [capabilitiesTab, setCapabilitiesTab] = useState<"DEPARTMENTS" | "CAPABILITIES">("DEPARTMENTS");
   const [editingDepartment, setEditingDepartment] = useState<Department | null>(null);
+  const [isAddDeptModalOpen, setIsAddDeptModalOpen] = useState(false);
+  const [deptForm, setDeptForm] = useState({
+    name: "",
+    operational_status: "ACTIVE",
+    operating_hours: "24/7",
+    emergency_coverage: true,
+    specialty_availability: "Emergency Surgery, Critical Resuscitation",
+    notes: "",
+  });
   const [capabilitiesState, setCapabilitiesState] = useState<{ [key: string]: string }>({});
+
+  // Facility context error (prevents silent fallback)
+  const [facilityLoadError, setFacilityLoadError] = useState<string | null>(null);
 
   // Unified Inbound Queue Filter
   const [inboundFilter, setInboundFilter] = useState<"ALL" | "PENDING" | "EN_ROUTE" | "ARRIVING_SOON" | "ARRIVED" | "COMPLETED">("ALL");
@@ -431,51 +443,99 @@ export default function HospitalPortalPage() {
       setUser(userData);
       if (!handoverClinicianName) setHandoverClinicianName(userData.full_name || "ER Triage Officer");
 
-      if (userData.hospital_id) {
-        // 0. Fetch Regional Hospitals for Facility Switcher
-        try {
-          const allHospResp = await fetch(`${activeUrl}/api/hospitals`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          if (allHospResp.ok) {
-            const hList = await allHospResp.json();
-            if (Array.isArray(hList)) setAllHospitals(hList);
-          }
-        } catch (_) {}
-
-        // 1. Fetch Hospital Record
-        const hospResp = await fetch(`${activeUrl}/api/hospitals/${userData.hospital_id}`, {
+      // 0. Fetch Regional Hospital Network for Facility Switcher (All 30 Facilities)
+      let networkList: any[] = [];
+      try {
+        const allHospResp = await fetch(`${activeUrl}/api/hospitals/network`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        if (hospResp.ok) {
-          const hData = await hospResp.json();
-          setHospital(hData);
-          setCapabilitiesState(hData.capabilities || {});
-          setBedCapacityForm(hData.bed_capacity_breakdown || {});
-          setProfileForm({
-            name: hData.name || "",
-            address: hData.address || "",
-            latitude: hData.latitude || 12.875,
-            longitude: hData.longitude || 74.845,
-            contact_number: hData.contact_number || "",
-            facility_type: hData.facility_type || "Tertiary Multi-Specialty Hospital",
-            emergency_department_hours: hData.emergency_department_hours || "24/7 Rapid Response",
-            emergency_contact_person: hData.emergency_contact_person || "",
-            readiness_status: hData.readiness_status || "READY",
-            accepting_emergencies: hData.accepting_emergencies ?? true,
-          });
+        if (allHospResp.ok) {
+          const hList = await allHospResp.json();
+          if (Array.isArray(hList) && hList.length > 0) {
+            networkList = hList;
+            setAllHospitals(hList);
+          }
         }
+      } catch (_) {}
+
+      // Fallback query if /network endpoint is not used
+      if (networkList.length === 0) {
+        try {
+          const fallbackResp = await fetch(`${activeUrl}/api/hospitals?all_network=true`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (fallbackResp.ok) {
+            const hList = await fallbackResp.json();
+            if (Array.isArray(hList) && hList.length > 0) {
+              networkList = hList;
+              setAllHospitals(hList);
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Resolve effective hospital ID
+      let effectiveHospitalId = userData.hospital_id;
+      if (!effectiveHospitalId) {
+        setFacilityLoadError("No operational facility assigned to your user session. Please select a facility from 'Switch Facility (30)' in the left sidebar.");
+        setIsLoading(false);
+        return;
+      }
+
+      // 1. Fetch Hospital Record
+      const hospResp = await fetch(`${activeUrl}/api/hospitals/${effectiveHospitalId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!hospResp.ok) {
+        setFacilityLoadError(`Unable to load facility record for Hospital #${effectiveHospitalId} (${hospResp.status}). Please use 'Switch Facility (30)' in the left sidebar to select a valid facility.`);
+        setIsLoading(false);
+        return;
+      }
+      setFacilityLoadError(null);
+      const hData = await hospResp.json();
+      setHospital(hData);
+      if (hData.doctors_availability && Array.isArray(hData.doctors_availability) && hData.doctors_availability.length > 0) {
+        setDoctors((prev) => (prev.length === 0 ? hData.doctors_availability : prev));
+      }
+      setCapabilitiesState(hData.capabilities || {});
+      const breakdown = hData.bed_capacity_breakdown || {};
+      if (!breakdown.trauma) {
+        breakdown.trauma = {
+          name: "Trauma & Resuscitation Unit",
+          total: 12,
+          occupied: 3,
+          reserved: 0,
+          unavailable: 0,
+          available: 9,
+        };
+      }
+      setBedCapacityForm(breakdown);
+      setProfileForm({
+        name: hData.name || "",
+        address: hData.address || "",
+        latitude: hData.latitude || 12.875,
+        longitude: hData.longitude || 74.845,
+        contact_number: hData.contact_number || "",
+        facility_type: hData.facility_type || "Tertiary Multi-Specialty Hospital",
+        emergency_department_hours: hData.emergency_department_hours || "24/7 Rapid Response",
+        emergency_contact_person: hData.emergency_contact_person || "",
+        readiness_status: hData.readiness_status || "READY",
+        accepting_emergencies: hData.accepting_emergencies ?? true,
+      });
 
         // 2. Fetch Hospital Doctors with live shift evaluation
-        const docResp = await fetch(`${activeUrl}/api/hospitals/${userData.hospital_id}/doctors`, {
+        const docResp = await fetch(`${activeUrl}/api/hospitals/${effectiveHospitalId}/doctors`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (docResp.ok) {
-          setDoctors(await docResp.json());
+          const docData = await docResp.json();
+          if (Array.isArray(docData)) {
+            setDoctors(docData);
+          }
         }
 
         // 3. Fetch Allocated Incidents
-        const dispResp = await fetch(`${activeUrl}/api/hospitals/${userData.hospital_id}/allocated-incidents`, {
+        const dispResp = await fetch(`${activeUrl}/api/hospitals/${effectiveHospitalId}/allocated-incidents`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (dispResp.ok) {
@@ -489,7 +549,6 @@ export default function HospitalPortalPage() {
         if (crashResp.ok) {
           setCrashAlerts(await crashResp.json());
         }
-      }
     } catch (err: any) {
       console.warn("Hospital data fetch error:", err);
     } finally {
@@ -551,6 +610,7 @@ export default function HospitalPortalPage() {
             "AMBULANCE_CRASH_DETECTED",
             "AMBULANCE_COLLISION_ALERT",
             "INCIDENT_CREATED",
+            "DEMO_RESET",
           ];
           if (relevantTypes.includes(type)) {
             fetchCollisionAlertsRef.current();
@@ -583,7 +643,7 @@ export default function HospitalPortalPage() {
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) ws.close();
     };
-  }, [getBackendUrl]);
+  }, [getBackendUrl, user?.id, user?.hospital_id]);
 
   // =============================================================================
   // DERIVED METRICS & FILTERED DISPATCHES
@@ -1325,6 +1385,120 @@ export default function HospitalPortalPage() {
     } catch (_) { }
   };
 
+  const handleAddDepartment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!hospital?.id) return;
+    if (!deptForm.name.trim()) {
+      setFeedbackMsg({ text: "Department name is required.", type: "error" });
+      return;
+    }
+    setActionLoading(true);
+    const token = localStorage.getItem("lifelink_token");
+    try {
+      const specs = deptForm.specialty_availability
+        ? deptForm.specialty_availability.split(",").map((s) => s.trim()).filter(Boolean)
+        : [];
+      const resp = await fetch(`${backendUrl}/api/hospitals/${hospital.id}/departments`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          name: deptForm.name.trim(),
+          operational_status: deptForm.operational_status,
+          operating_hours: deptForm.operating_hours.trim() || "24/7",
+          emergency_coverage: deptForm.emergency_coverage,
+          specialty_availability: specs,
+          notes: deptForm.notes.trim() || undefined,
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to add department");
+      }
+      setFeedbackMsg({ text: `Department '${deptForm.name}' added successfully!`, type: "success" });
+      setIsAddDeptModalOpen(false);
+      setDeptForm({
+        name: "",
+        operational_status: "ACTIVE",
+        operating_hours: "24/7",
+        emergency_coverage: true,
+        specialty_availability: "Emergency Surgery, Critical Resuscitation",
+        notes: "",
+      });
+      await fetchHospitalData();
+    } catch (err: any) {
+      setFeedbackMsg({ text: `Department error: ${err.message}`, type: "error" });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDeleteDepartment = async (deptId: string, deptName: string) => {
+    if (!hospital?.id) return;
+    if (!confirm(`Are you sure you want to remove the ${deptName} department?`)) return;
+    setActionLoading(true);
+    const token = localStorage.getItem("lifelink_token");
+    try {
+      const resp = await fetch(`${backendUrl}/api/hospitals/${hospital.id}/departments/${deptId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to delete department");
+      }
+      setFeedbackMsg({ text: `Department '${deptName}' removed successfully.`, type: "info" });
+      setEditingDepartment(null);
+      await fetchHospitalData();
+    } catch (err: any) {
+      setFeedbackMsg({ text: `Department error: ${err.message}`, type: "error" });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleQuickUpdateReadiness = async (readiness_status: string, accepting_emergencies?: boolean) => {
+    if (!hospital?.id) return;
+    setActionLoading(true);
+    const token = localStorage.getItem("lifelink_token");
+    try {
+      const payload: any = { readiness_status };
+      if (accepting_emergencies !== undefined) {
+        payload.accepting_emergencies = accepting_emergencies;
+      }
+      const resp = await fetch(`${backendUrl}/api/hospitals/${hospital.id}/readiness`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to update readiness");
+      }
+      const updated = await resp.json();
+      setHospital(updated);
+      setProfileForm((prev) => ({
+        ...prev,
+        readiness_status: updated.readiness_status,
+        accepting_emergencies: updated.accepting_emergencies,
+      }));
+      setFeedbackMsg({
+        text: `Facility operational readiness updated to ${readiness_status} (${updated.accepting_emergencies ? "Accepting Emergencies" : "Intake Diverted"}).`,
+        type: "success",
+      });
+      await fetchHospitalData();
+    } catch (err: any) {
+      setFeedbackMsg({ text: `Readiness update error: ${err.message}`, type: "error" });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   // 8. Hospital Settings / Profile Save
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1525,7 +1699,12 @@ export default function HospitalPortalPage() {
         isOpenMobile={isMobileMenuOpen}
         onCloseMobile={() => setIsMobileMenuOpen(false)}
         onLogout={handleLogout}
-        entityName={hospital?.name || "Mangaluru Medical Center"}
+        entityName={hospital?.name || "KMC Hospital Ambedkar Circle"}
+        facilityCode={hospital?.facility_code || (hospital?.id ? `HOSP-MNG-${String(hospital.id).padStart(3, "0")}` : "HOSP-MNG-001")}
+        onSwitchFacility={() => {
+          setFacilitySearchQuery("");
+          setIsFacilitySearchOpen(true);
+        }}
       />
 
       {/* 2. MAIN APPLICATION CONTENT AREA */}
@@ -1533,48 +1712,12 @@ export default function HospitalPortalPage() {
         {/* Top Minimal Navigation Bar */}
         <TopNav
           title={hospital?.name || "Emergency Operations Portal"}
-          subtitle={`Facility Code: ${hospital?.facility_code || (hospital?.id ? `HOSP-00${hospital.id}` : "HOSPITAL-ER")} • ${hospital?.address || "Mangaluru"}`}
+          subtitle={`Facility Code: ${hospital?.facility_code || (hospital?.id ? `HOSP-MNG-${String(hospital.id).padStart(3, "0")}` : "HOSP-MNG-001")} • ${hospital?.address || "Mangaluru"}`}
           wsConnected={wsConnected}
           connectionStatus={connectionStatus}
           onMenuToggle={() => setIsMobileMenuOpen(true)}
           actions={
             <div className="flex items-center gap-2">
-              {/* Regional Facility Switcher */}
-              {allHospitals.length > 0 && (
-                <div className="flex items-center gap-1.5">
-                  <div className="flex items-center gap-1.5 bg-slate-100 border border-slate-200 rounded-lg px-2 py-1">
-                    <Building2 className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                    <select
-                      value={hospital?.id || user?.hospital_id || ""}
-                      onChange={(e) => handleSwitchFacility(Number(e.target.value))}
-                      disabled={isSwitchingFacility || actionLoading}
-                      className="bg-transparent text-xs font-semibold text-slate-800 outline-none cursor-pointer max-w-[130px] sm:max-w-[200px] md:max-w-[260px] truncate"
-                      title="Switch Hospital Facility View"
-                    >
-                      {allHospitals.map((h) => {
-                        const hasPending = (h.reserved_emergency_beds || 0) > 0;
-                        return (
-                          <option key={h.id} value={h.id} className="text-slate-900 bg-white">
-                            {h.name} [{h.facility_code || `HOSP-00${h.id}`}] {hasPending ? "🚨 [RESERVATION]" : ""}
-                          </option>
-                        );
-                      })}
-                    </select>
-                  </div>
-                  <button
-                    onClick={() => {
-                      setFacilitySearchQuery("");
-                      setIsFacilitySearchOpen(true);
-                    }}
-                    className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold rounded-lg shadow-2xs transition-colors"
-                    title="Search 30 regional facilities"
-                  >
-                    <Search className="w-3.5 h-3.5 text-slate-500" />
-                    <span className="hidden sm:inline">Search ({allHospitals.length})</span>
-                  </button>
-                </div>
-              )}
-
               <span className="text-[11px] font-semibold text-slate-500 hidden sm:inline">Readiness:</span>
               <span
                 className={`text-xs font-bold px-2.5 py-0.5 rounded-full uppercase border ${currentReadiness === "READY"
@@ -1597,6 +1740,100 @@ export default function HospitalPortalPage() {
             </div>
           }
         />
+
+        {/* Dedicated Regional Facility Operations Bar - Prominent Across Desktop & Mobile */}
+        <div className="bg-gradient-to-r from-blue-50/90 via-white to-slate-50 border-b border-slate-200 px-4 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+              <Building2 className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-extrabold text-slate-900 tracking-tight truncate">
+                  {hospital?.name || "Loading Regional Facility..."}
+                </span>
+                <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200">
+                  {hospital?.facility_code || (hospital?.id ? `HOSP-MNG-${String(hospital.id).padStart(3, "0")}` : "HOSP-MNG-001")}
+                </span>
+                <span className="text-[10px] font-semibold text-slate-500 hidden md:inline">
+                  • {hospital?.facility_type || "Tertiary Hospital"} • {hospital?.address?.split(",")[0] || "Mangaluru"}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 font-medium truncate flex items-center gap-1.5 mt-0.5">
+                <span>ER Staff: {user?.full_name || "Emergency Department"}</span>
+                <span>•</span>
+                <span className="text-emerald-700 font-bold">{hospital?.available_emergency_beds ?? 0} ER Bays Free</span>
+                <span>•</span>
+                <span className="text-purple-700 font-bold">{onDutyDoctors.length} Doctors On Duty</span>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="text-right hidden sm:block">
+              <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">Emergency Intake</span>
+              <span className={`text-xs font-black ${
+                hospital?.accepting_emergencies ? "text-emerald-700" : "text-red-700"
+              }`}>
+                {hospital?.accepting_emergencies ? "● ACCEPTING CASES" : "● DIVERT / CLOSED"}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 px-3 py-1 bg-white border border-slate-200 rounded-lg shadow-2xs">
+              <span className="text-[11px] font-semibold text-slate-500">Readiness:</span>
+              <span
+                className={`text-xs font-extrabold uppercase px-2 py-0.5 rounded-full ${
+                  currentReadiness === "READY"
+                    ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                    : currentReadiness === "BUSY"
+                    ? "bg-amber-50 text-amber-700 border border-amber-200"
+                    : "bg-red-50 text-red-700 border border-red-200"
+                }`}
+              >
+                {currentReadiness}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Facility Load / Context Error Alert Banner */}
+        {facilityLoadError && (
+          <div className="mx-4 sm:mx-6 mt-3 p-3.5 bg-red-50 border border-red-300 rounded-xl flex items-center gap-3 shadow-2xs">
+            <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
+            <div className="min-w-0">
+              <span className="text-xs font-bold text-red-900 block truncate">
+                Facility Context Warning
+              </span>
+              <span className="text-[11px] text-red-700 block mt-0.5">
+                {facilityLoadError}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Global Pending Inbound Reservation Alert for Other Facilities */}
+        {(() => {
+          const otherWithReservation = allHospitals.find(
+            (h) => (h.reserved_emergency_beds || 0) > 0 && h.id !== hospital?.id
+          );
+          if (!otherWithReservation) return null;
+          return (
+            <div className="mx-4 sm:mx-6 mt-3 p-3 bg-amber-50 border border-amber-300 rounded-xl flex items-center justify-between gap-3 shadow-2xs">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <Radio className="w-4 h-4 text-amber-600 animate-pulse shrink-0" />
+                <span className="text-xs font-bold text-amber-900 truncate">
+                  🚨 Active inbound reservation pending at {otherWithReservation.name} [{otherWithReservation.facility_code}]
+                </span>
+              </div>
+              <button
+                onClick={() => handleSwitchFacility(otherWithReservation.id)}
+                disabled={isSwitchingFacility || actionLoading}
+                className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-lg shrink-0 transition shadow-2xs"
+              >
+                Switch to Respond
+              </button>
+            </div>
+          );
+        })()}
 
         {/* Global Feedback Banner */}
         {feedbackMsg && (
@@ -1689,6 +1926,125 @@ export default function HospitalPortalPage() {
                   </div>
                   <div className="text-[11px] text-emerald-600 font-medium mt-1">
                     {availableDoctors.length} currently available
+                  </div>
+                </div>
+              </div>
+
+              {/* Facility Operational Readiness & Rapid Triage Intake Panel */}
+              <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-2">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                      <Activity className="w-4 h-4 text-blue-600" />
+                      <span>Facility Operational Readiness & Intake Management</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-500">
+                      Live facility operational status and intake routing. Directly synchronizes with regional dispatch matching engine.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-slate-500">Readiness:</span>
+                    <span
+                      className={`text-xs font-black uppercase px-2.5 py-0.5 rounded-full border ${
+                        currentReadiness === "READY"
+                          ? "bg-emerald-50 text-emerald-700 border-emerald-300"
+                          : currentReadiness === "BUSY"
+                          ? "bg-amber-50 text-amber-700 border-amber-300"
+                          : "bg-red-50 text-red-700 border-red-300"
+                      }`}
+                    >
+                      {currentReadiness}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                  {/* Facility Readiness Selector */}
+                  <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-1.5">
+                    <label className="text-[11px] font-bold text-slate-700 block">Facility Readiness</label>
+                    <select
+                      value={hospital?.readiness_status || "READY"}
+                      onChange={(e) => handleQuickUpdateReadiness(e.target.value)}
+                      disabled={actionLoading}
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded font-bold text-xs"
+                    >
+                      <option value="READY">READY (Immediate Inbound Reception)</option>
+                      <option value="BUSY">BUSY (High Turnaround / Queue Delay)</option>
+                      <option value="DIVERT">DIVERT (Temporary Critical Divert)</option>
+                    </select>
+                    <span className="text-[10px] text-slate-500 block">Directly updates dispatch suitability score</span>
+                  </div>
+
+                  {/* Emergency Intake Toggle */}
+                  <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-1.5">
+                    <label className="text-[11px] font-bold text-slate-700 block">Emergency Intake Gatekeeper</label>
+                    <button
+                      type="button"
+                      onClick={() => handleQuickUpdateReadiness(hospital?.readiness_status || "READY", !hospital?.accepting_emergencies)}
+                      disabled={actionLoading}
+                      className={`w-full py-1.5 px-3 rounded font-bold text-xs border transition ${
+                        hospital?.accepting_emergencies
+                          ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700"
+                          : "bg-red-600 text-white border-red-600 hover:bg-red-700"
+                      }`}
+                    >
+                      {hospital?.accepting_emergencies ? "✓ Accepting Inbound Cases" : "✕ Intake Diverted (Closed)"}
+                    </button>
+                    <span className="text-[10px] text-slate-500 block">Toggles regional dispatch emergency routing</span>
+                  </div>
+
+                  {/* Oxygen Status Indicator */}
+                  <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-1.5">
+                    <label className="text-[11px] font-bold text-slate-700 block">Oxygen Reserves</label>
+                    <select
+                      value={hospital?.oxygen_status || "NORMAL"}
+                      onChange={async (e) => {
+                        if (!hospital?.id) return;
+                        const token = localStorage.getItem("lifelink_token");
+                        await fetch(`${backendUrl}/api/hospitals/${hospital.id}/readiness`, {
+                          method: "PATCH",
+                          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                          body: JSON.stringify({ oxygen_status: e.target.value }),
+                        });
+                        await fetchHospitalData();
+                      }}
+                      disabled={actionLoading}
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded font-semibold text-xs"
+                    >
+                      <option value="NORMAL">NORMAL (Pipeline Supply Adequate)</option>
+                      <option value="REFILL_SCHEDULED">REFILL SCHEDULED</option>
+                      <option value="LOW">LOW (Supply Conservation Protocol)</option>
+                      <option value="CRITICAL">CRITICAL (Emergency Refill)</option>
+                    </select>
+                    <span className="text-[10px] text-slate-500 block">Central cryogenic O2 telemetry</span>
+                  </div>
+
+                  {/* Ventilator Availability */}
+                  <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-1.5">
+                    <label className="text-[11px] font-bold text-slate-700 block">Ventilators Free</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min="0"
+                        max={hospital?.ventilators_total || 20}
+                        value={hospital?.ventilators_available ?? 6}
+                        onChange={async (e) => {
+                          if (!hospital?.id) return;
+                          const val = Number(e.target.value);
+                          const token = localStorage.getItem("lifelink_token");
+                          await fetch(`${backendUrl}/api/hospitals/${hospital.id}/readiness`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                            body: JSON.stringify({ ventilators_available: val }),
+                          });
+                          await fetchHospitalData();
+                        }}
+                        disabled={actionLoading}
+                        className="w-20 px-2.5 py-1 bg-white border border-slate-200 rounded font-mono font-bold text-xs"
+                      />
+                      <span className="text-slate-500 text-xs">/ {hospital?.ventilators_total || 10} Total</span>
+                    </div>
+                    <span className="text-[10px] text-slate-500 block">ICU mechanical ventilation capacity</span>
                   </div>
                 </div>
               </div>
@@ -2924,22 +3280,44 @@ export default function HospitalPortalPage() {
                   </p>
                 </div>
 
-                {/* Sub-tabs */}
-                <div className="flex items-center gap-1 bg-white p-1 rounded-lg border border-slate-200">
-                  <button
-                    onClick={() => setCapabilitiesTab("DEPARTMENTS")}
-                    className={`text-xs px-3 py-1.5 rounded font-semibold ${capabilitiesTab === "DEPARTMENTS" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
-                      }`}
-                  >
-                    Departments ({hospital?.departments?.length || 0})
-                  </button>
-                  <button
-                    onClick={() => setCapabilitiesTab("CAPABILITIES")}
-                    className={`text-xs px-3 py-1.5 rounded font-semibold ${capabilitiesTab === "CAPABILITIES" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
-                      }`}
-                  >
-                    Facility Indicators
-                  </button>
+                {/* Sub-tabs and Action */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <div className="flex items-center gap-1 bg-white p-1 rounded-lg border border-slate-200">
+                    <button
+                      onClick={() => setCapabilitiesTab("DEPARTMENTS")}
+                      className={`text-xs px-3 py-1.5 rounded font-semibold ${capabilitiesTab === "DEPARTMENTS" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
+                        }`}
+                    >
+                      Departments ({hospital?.departments?.length || 0})
+                    </button>
+                    <button
+                      onClick={() => setCapabilitiesTab("CAPABILITIES")}
+                      className={`text-xs px-3 py-1.5 rounded font-semibold ${capabilitiesTab === "CAPABILITIES" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
+                        }`}
+                    >
+                      Facility Indicators
+                    </button>
+                  </div>
+
+                  {capabilitiesTab === "DEPARTMENTS" && (
+                    <button
+                      onClick={() => {
+                        setDeptForm({
+                          name: "",
+                          operational_status: "ACTIVE",
+                          operating_hours: "24/7",
+                          emergency_coverage: true,
+                          specialty_availability: "Emergency Surgery, Critical Resuscitation",
+                          notes: "",
+                        });
+                        setIsAddDeptModalOpen(true);
+                      }}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg shadow-2xs flex items-center gap-1.5"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Add Department</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -2977,12 +3355,21 @@ export default function HospitalPortalPage() {
                         </div>
                       </div>
 
-                      <div className="flex justify-end gap-2 pt-2 border-t border-slate-50">
+                      <div className="flex justify-between items-center pt-2 border-t border-slate-50">
+                        <button
+                          onClick={() => handleDeleteDepartment(dept.id, dept.name)}
+                          disabled={actionLoading}
+                          className="text-xs font-medium text-red-500 hover:text-red-700 flex items-center gap-1"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Remove</span>
+                        </button>
                         <button
                           onClick={() => setEditingDepartment(dept)}
-                          className="text-xs font-semibold text-blue-600 hover:text-blue-700"
+                          className="text-xs font-bold text-blue-600 hover:text-blue-700 flex items-center gap-1"
                         >
-                          Edit Status & Notes
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Edit Status & Details</span>
                         </button>
                       </div>
                     </div>
@@ -3984,7 +4371,111 @@ export default function HospitalPortalPage() {
         </div>
       )}
 
-      {/* 5. EDIT DEPARTMENT MODAL */}
+      {/* 5. ADD DEPARTMENT MODAL */}
+      {isAddDeptModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-xl shadow-xl border border-slate-200 max-w-md w-full p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+              <h3 className="text-sm font-bold text-slate-900">Add Clinical Department</h3>
+              <button onClick={() => setIsAddDeptModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddDepartment} className="space-y-3 text-xs">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">Department Name *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Cardiology & Cath Lab"
+                  value={deptForm.name}
+                  onChange={(e) => setDeptForm({ ...deptForm, name: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded font-semibold text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">Operational Status</label>
+                <select
+                  value={deptForm.operational_status}
+                  onChange={(e) => setDeptForm({ ...deptForm, operational_status: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded font-semibold text-slate-800"
+                >
+                  <option value="ACTIVE">ACTIVE (Full Emergency Operation)</option>
+                  <option value="LIMITED">LIMITED (Partial Capacity / Restrictions)</option>
+                  <option value="TEMPORARILY_CLOSED">TEMPORARILY_CLOSED (Divert / Maintenance)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">Operating Hours</label>
+                <input
+                  type="text"
+                  placeholder="24/7 or 08:00 - 20:00"
+                  value={deptForm.operating_hours}
+                  onChange={(e) => setDeptForm({ ...deptForm, operating_hours: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="addDeptEmerg"
+                  checked={deptForm.emergency_coverage}
+                  onChange={(e) => setDeptForm({ ...deptForm, emergency_coverage: e.target.checked })}
+                  className="rounded text-blue-600"
+                />
+                <label htmlFor="addDeptEmerg" className="text-xs font-semibold text-slate-800">
+                  Active in Ambulance Routing & Dispatch Matching
+                </label>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">Specialties (comma-separated)</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Trauma Surgery, Vascular Surgery"
+                  value={deptForm.specialty_availability}
+                  onChange={(e) => setDeptForm({ ...deptForm, specialty_availability: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">Operational Notes</label>
+                <textarea
+                  rows={2}
+                  placeholder="Special clinical capabilities, on-call resident team, etc."
+                  value={deptForm.notes}
+                  onChange={(e) => setDeptForm({ ...deptForm, notes: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsAddDeptModalOpen(false)}
+                  className="px-4 py-2 border border-slate-300 text-slate-700 rounded-lg text-xs font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={actionLoading}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold"
+                >
+                  Add Department
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 6. EDIT DEPARTMENT MODAL */}
       {editingDepartment && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
           <div className="bg-white rounded-xl shadow-xl border border-slate-200 max-w-md w-full p-5 space-y-4">
@@ -3996,6 +4487,16 @@ export default function HospitalPortalPage() {
             </div>
 
             <div className="space-y-3 text-xs">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">Department Name</label>
+                <input
+                  type="text"
+                  value={editingDepartment.name}
+                  onChange={(e) => setEditingDepartment({ ...editingDepartment, name: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded font-semibold text-slate-800"
+                />
+              </div>
+
               <div>
                 <label className="block text-[11px] font-bold text-slate-700 mb-1">Operational Status</label>
                 <select
@@ -4028,8 +4529,23 @@ export default function HospitalPortalPage() {
                   className="rounded text-blue-600"
                 />
                 <label htmlFor="deptEmerg" className="text-xs font-semibold text-slate-800">
-                  Active in Ambulance Routing Algorithm
+                  Active in Ambulance Routing & Dispatch Matching
                 </label>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">Specialties (comma-separated)</label>
+                <input
+                  type="text"
+                  value={(editingDepartment.specialty_availability || []).join(", ")}
+                  onChange={(e) =>
+                    setEditingDepartment({
+                      ...editingDepartment,
+                      specialty_availability: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                    })
+                  }
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded"
+                />
               </div>
 
               <div>
@@ -4043,29 +4559,43 @@ export default function HospitalPortalPage() {
               </div>
             </div>
 
-            <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+            <div className="flex justify-between items-center gap-2 pt-3 border-t border-slate-100">
               <button
                 type="button"
-                onClick={() => setEditingDepartment(null)}
-                className="px-4 py-2 border border-slate-300 text-slate-700 rounded-lg text-xs font-semibold"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  handleUpdateDepartment(editingDepartment.id, {
-                    operational_status: editingDepartment.operational_status,
-                    operating_hours: editingDepartment.operating_hours,
-                    emergency_coverage: editingDepartment.emergency_coverage,
-                    notes: editingDepartment.notes,
-                  })
-                }
+                onClick={() => handleDeleteDepartment(editingDepartment.id, editingDepartment.name)}
                 disabled={actionLoading}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold"
+                className="px-3 py-1.5 text-red-600 hover:bg-red-50 border border-red-200 rounded-lg text-xs font-bold transition flex items-center gap-1"
               >
-                Save Department
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete</span>
               </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingDepartment(null)}
+                  className="px-4 py-2 border border-slate-300 text-slate-700 rounded-lg text-xs font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleUpdateDepartment(editingDepartment.id, {
+                      name: editingDepartment.name,
+                      operational_status: editingDepartment.operational_status,
+                      operating_hours: editingDepartment.operating_hours,
+                      emergency_coverage: editingDepartment.emergency_coverage,
+                      specialty_availability: editingDepartment.specialty_availability,
+                      notes: editingDepartment.notes,
+                    })
+                  }
+                  disabled={actionLoading}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold"
+                >
+                  Save Changes
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -4128,7 +4658,8 @@ export default function HospitalPortalPage() {
                   return (
                     (h.name && h.name.toLowerCase().includes(q)) ||
                     (h.address && h.address.toLowerCase().includes(q)) ||
-                    (h.facility_code && h.facility_code.toLowerCase().includes(q))
+                    (h.facility_code && h.facility_code.toLowerCase().includes(q)) ||
+                    (h.facility_type && h.facility_type.toLowerCase().includes(q))
                   );
                 });
 

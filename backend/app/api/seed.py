@@ -39,3 +39,31 @@ def trigger_seed(
         "message": "Seeded realistic Mangaluru operational dataset",
         "counts": result,
     }
+
+
+@router.post("/clean-demo-reset")
+def clean_demo_reset(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Clears all operational emergency incidents, dispatches, handovers, vitals,
+    events, and crash alerts across all portals for a completely fresh demo start.
+    Preserves all 30 hospitals, doctors, departments, equipment, ambulances, and users.
+    """
+    from backend.app.services.clean_reset_service import execute_clean_demo_reset
+    from backend.app.core.auth import ROLE_DISPATCHER
+
+    if settings.ENVIRONMENT.lower() == "production":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Demo reset is strictly disabled in production environments.",
+        )
+
+    if current_user.role not in [ROLE_SUPER_ADMIN, ROLE_DISPATCHER]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Only Super Administrators and Dispatchers can reset demo cases.",
+        )
+
+    return execute_clean_demo_reset(db, broadcast=True)

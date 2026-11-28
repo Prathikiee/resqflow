@@ -146,7 +146,7 @@ export default function DispatcherCommandCenterPage() {
       const [incRes, ambRes, hospRes, dispRes, witRes] = await Promise.all([
         fetch(`${backendUrl}/api/incidents`, { headers }),
         fetch(`${backendUrl}/api/ambulances`, { headers }),
-        fetch(`${backendUrl}/api/hospitals`, { headers }),
+        fetch(`${backendUrl}/api/hospitals/network`, { headers }),
         fetch(`${backendUrl}/api/dispatch`, { headers }),
         fetch(`${backendUrl}/api/witness-reports`, { headers }),
       ]);
@@ -167,14 +167,19 @@ export default function DispatcherCommandCenterPage() {
         const savedIdStr = typeof window !== "undefined" ? localStorage.getItem("lifelink_selected_incident_id") : null;
         const targetId = selectedIncidentRef.current?.id ?? (savedIdStr ? Number(savedIdStr) : null);
 
-        if (targetId) {
+        if (incData.length === 0) {
+          setSelectedIncident(null);
+          if (typeof window !== "undefined") {
+            localStorage.removeItem("lifelink_selected_incident_id");
+          }
+        } else if (targetId) {
           const matched = incData.find((i: any) => Number(i.id) === Number(targetId));
           if (matched) {
             setSelectedIncident(matched);
-          } else if (!selectedIncidentRef.current && incData.length > 0) {
+          } else {
             setSelectedIncident(incData[0]);
           }
-        } else if (!selectedIncidentRef.current && incData.length > 0) {
+        } else {
           setSelectedIncident(incData[0]);
         }
       }
@@ -226,6 +231,21 @@ export default function DispatcherCommandCenterPage() {
                 addNotification(`⚠️ Dispatch #${data.payload?.dispatch_id} Escalated (Attempt #${data.payload?.attempt_number})`);
               } else if (data.event === "DISPATCH_ESCALATION_FAILED") {
                 addNotification(`🚨 Escalation Exhausted: Dispatch #${data.payload?.dispatch_id} requires manual reassignment!`);
+              } else if (data.event === "AMBULANCE_STATUS_UPDATED" || data.event === "AMBULANCE_LOCATION_UPDATED") {
+                if (data.payload?.ambulance_id) {
+                  setAmbulances((prev) =>
+                    prev.map((amb) =>
+                      amb.id === data.payload.ambulance_id
+                        ? {
+                            ...amb,
+                            current_latitude: data.payload.current_latitude ?? amb.current_latitude,
+                            current_longitude: data.payload.current_longitude ?? amb.current_longitude,
+                            status: data.payload.status ?? amb.status,
+                          }
+                        : amb
+                    )
+                  );
+                }
               } else if (data.event === "AMBULANCE_CRASH_DETECTED") {
                 addNotification(`⚠️ CRITICAL: Ambulance Unit ${data.payload?.ambulance_call_sign || '#' + data.payload?.ambulance_id} Collision Detected!`);
               } else if (data.event === "CRASH_ALERT_UPDATED") {
@@ -238,6 +258,20 @@ export default function DispatcherCommandCenterPage() {
                 addNotification(`Mission Stage Updated: ${data.payload?.status}`);
               } else if (data.event === "HANDOVER_ACKNOWLEDGED") {
                 addNotification(`Clinical Handover Acknowledged at Hospital ER`);
+              } else if (data.event === "HOSPITAL_CAPACITY_UPDATED") {
+                addNotification(`Hospital Capacity Updated: ${data.payload?.name || "Facility"}`);
+              } else if (data.event === "HOSPITAL_DOCTOR_UPDATED") {
+                addNotification(`Hospital Doctor Roster Updated: Facility #${data.payload?.hospital_id}`);
+              } else if (data.event === "HOSPITAL_DEPARTMENTS_UPDATED") {
+                addNotification(`Hospital Departments Updated: Facility #${data.payload?.hospital_id}`);
+              } else if (data.event === "HOSPITAL_CAPABILITIES_UPDATED") {
+                addNotification(`Hospital Capabilities Matrix Updated: Facility #${data.payload?.hospital_id}`);
+              } else if (data.event === "DEMO_RESET") {
+                setSelectedIncident(null);
+                if (typeof window !== "undefined") {
+                  localStorage.removeItem("lifelink_selected_incident_id");
+                }
+                addNotification("Demo Reset: All operational emergency cases cleared.");
               }
               fetchData();
             }
@@ -1204,9 +1238,11 @@ export default function DispatcherCommandCenterPage() {
                 <table className="w-full text-left text-xs">
                   <thead className="bg-slate-50 border-y border-slate-200 text-slate-600 uppercase font-mono text-[10px]">
                     <tr>
+                      <th className="py-2.5 px-3">Code</th>
                       <th className="py-2.5 px-3">Facility Name</th>
                       <th className="py-2.5 px-3">Readiness</th>
-                      <th className="py-2.5 px-3">ER Beds</th>
+                      <th className="py-2.5 px-3">Emergency Intake</th>
+                      <th className="py-2.5 px-3">ER Bays</th>
                       <th className="py-2.5 px-3">ICU Beds</th>
                       <th className="py-2.5 px-3">Ward Beds</th>
                       <th className="py-2.5 px-3">Contact</th>
@@ -1215,6 +1251,9 @@ export default function DispatcherCommandCenterPage() {
                   <tbody className="divide-y divide-slate-100">
                     {hospitals.map((hosp) => (
                       <tr key={hosp.id} className="hover:bg-slate-50 transition">
+                        <td className="py-3 px-3 font-mono font-bold text-slate-600">
+                          {hosp.facility_code || `HOSP-00${hosp.id}`}
+                        </td>
                         <td className="py-3 px-3 font-bold text-slate-900">{hosp.name}</td>
                         <td className="py-3 px-3">
                           <span
@@ -1227,6 +1266,17 @@ export default function DispatcherCommandCenterPage() {
                             }`}
                           >
                             {hosp.readiness_status || "READY"}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${
+                              hosp.accepting_emergencies
+                                ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
+                                : "bg-red-50 text-red-700 border border-red-200"
+                            }`}
+                          >
+                            {hosp.accepting_emergencies ? "Accepting" : "Diverted"}
                           </span>
                         </td>
                         <td className="py-3 px-3 font-mono font-bold text-emerald-700">

@@ -2673,6 +2673,7 @@ def record_patient_not_picked_up(
 
     return dispatch
 
+@router.get("/route")
 @router.get("/route/preview")
 def preview_route(
     start_lat: float,

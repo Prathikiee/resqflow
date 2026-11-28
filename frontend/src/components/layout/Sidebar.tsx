@@ -31,6 +31,8 @@ interface SidebarProps {
   onCloseMobile: () => void;
   onLogout: () => void;
   entityName?: string;
+  facilityCode?: string;
+  onSwitchFacility?: () => void;
 }
 
 export default function Sidebar({
@@ -44,6 +46,8 @@ export default function Sidebar({
   onCloseMobile,
   onLogout,
   entityName,
+  facilityCode,
+  onSwitchFacility,
 }: SidebarProps) {
   const getRoleBadge = () => {
     switch (role) {
@@ -123,10 +127,27 @@ export default function Sidebar({
 
         {/* Role Identification Subheader */}
         <div className="px-4 py-3 bg-slate-50 border-b border-slate-200/80">
-          <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Operational Console</p>
+          <div className="flex items-center justify-between">
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Operational Console</p>
+            {facilityCode && (
+              <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200">
+                {facilityCode}
+              </span>
+            )}
+          </div>
           <p className="text-xs font-bold text-slate-900 truncate mt-0.5">
             {entityName || roleLabel}
           </p>
+          {onSwitchFacility && (
+            <button
+              onClick={onSwitchFacility}
+              className="mt-2 w-full flex items-center justify-center gap-1.5 py-1 px-2.5 rounded-lg border border-blue-200 bg-white hover:bg-blue-50 text-blue-700 text-xs font-bold shadow-2xs transition"
+              title="Switch Hospital Facility View"
+            >
+              <Building2 className="w-3.5 h-3.5" />
+              <span>Switch Facility (30)</span>
+            </button>
+          )}
         </div>
 
         {/* Navigation Items */}

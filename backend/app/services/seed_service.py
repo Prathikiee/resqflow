@@ -2361,11 +2361,9 @@ def seed_database(db: Session, force: bool = False) -> dict:
             seeded_counts["ambulances"] += 1
         db.commit()
 
-    # Seed initial demonstration incident if none exist
-    inc_count = db.query(Incident).count()
-    if inc_count == 0 or force:
-        if force:
-            db.query(Incident).delete()
+    # Seed initial demonstration incident only when force=True
+    if force:
+        db.query(Incident).delete()
         triage = assess_incident_severity(
             chief_complaint="Elderly person collapsed at Kadri Hills jogging park with acute chest pain and respiratory distress",
             consciousness_level="Voice",

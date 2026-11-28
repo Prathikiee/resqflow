@@ -9,10 +9,10 @@ const DynamicAmbulanceTrackingMap = dynamic<AmbulanceTrackingMapProps>(
   {
     ssr: false,
     loading: () => (
-      <div className="w-full h-80 sm:h-96 flex flex-col items-center justify-center bg-slate-50 border border-slate-200 rounded-2xl space-y-2">
-        <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
-        <p className="text-xs text-slate-500 font-medium">
-          Initializing Mission Navigation Map...
+      <div className="w-full h-80 sm:h-96 min-h-[320px] flex flex-col items-center justify-center bg-slate-900 border border-slate-700 rounded-3xl space-y-2 text-white shadow-md">
+        <Loader2 className="w-7 h-7 animate-spin text-blue-500" />
+        <p className="text-xs text-slate-300 font-bold tracking-wide">
+          Initializing Road Route & Live Navigation Engine...
         </p>
       </div>
     ),

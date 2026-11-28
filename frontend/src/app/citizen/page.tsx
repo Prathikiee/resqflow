@@ -538,7 +538,7 @@ export default function CitizenPortalPage() {
 
           // 5. Live GPS telemetry
           if (
-            eventType === "AMBULANCE_STATUS_UPDATED" &&
+            (eventType === "AMBULANCE_STATUS_UPDATED" || eventType === "AMBULANCE_LOCATION_UPDATED") &&
             curDisp &&
             payload.ambulance_id === curDisp.ambulance_id
           ) {
@@ -562,6 +562,18 @@ export default function CitizenPortalPage() {
           }
           if (eventType === "INCIDENT_CLOSED" && curInc && payload.incident_id === curInc.id) {
             setActiveIncident((prev: any) => (prev ? { ...prev, status: "CLOSED" } : prev));
+          }
+
+          // 7. System Demo Reset
+          if (eventType === "DEMO_RESET") {
+            setActiveIncident(null);
+            setActiveDispatch(null);
+            setTimelineEvents([]);
+            setHasNoActiveEmergency(true);
+            setIsTrackingViewOpen(false);
+            if (typeof window !== "undefined") {
+              localStorage.removeItem("lifelink_active_incident_id");
+            }
           }
         } catch (_) {}
       };

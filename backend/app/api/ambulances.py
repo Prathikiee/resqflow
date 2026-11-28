@@ -137,33 +137,67 @@ def update_ambulance_telemetry(
             detail="Access denied: Insufficient permissions to update ambulance telemetry",
         )
 
+    # 1. Stale timestamp protection: prevent older buffered packets from overwriting newer updates
+    if payload.timestamp and amb.last_updated:
+        try:
+            last_ts = amb.last_updated.replace(tzinfo=timezone.utc).timestamp()
+            if payload.timestamp < (last_ts - 2.0):
+                # Stale packet arriving out-of-order; return current state without regressing position
+                return amb
+        except Exception:
+            pass
+
+    # 2. Dispatch validation if telemetry is bound to a specific mission attempt
+    active_disp = db.query(Dispatch).filter(
+        Dispatch.ambulance_id == amb.id,
+        Dispatch.status.notin_(["COMPLETED", "CANCELLED"]),
+    ).first()
+
+    if payload.dispatch_id and active_disp and active_disp.id != payload.dispatch_id:
+        # Ignore telemetry targeted for an inactive or prior dispatch
+        return amb
+
     amb.current_latitude = payload.latitude
     amb.current_longitude = payload.longitude
+    amb.last_updated = datetime.now(timezone.utc).replace(tzinfo=None)
     if payload.status:
         amb.status = payload.status.upper().strip()
 
     db.commit()
     db.refresh(amb)
 
-    # Look up active dispatch to notify assigned citizen reporter via WebSocket
-    active_disp = db.query(Dispatch).filter(
-        Dispatch.ambulance_id == amb.id,
-        Dispatch.status.notin_(["COMPLETED", "CANCELLED"]),
-    ).first()
     reporter_uid = None
     if active_disp and active_disp.incident:
         reporter_uid = active_disp.incident.reporter_user_id
 
+    now_ts = datetime.now(timezone.utc).timestamp()
+    telemetry_payload = {
+        "ambulance_id": amb.id,
+        "call_sign": amb.call_sign,
+        "status": amb.status,
+        "current_latitude": amb.current_latitude,
+        "current_longitude": amb.current_longitude,
+        "accuracy": payload.accuracy,
+        "heading": payload.heading,
+        "speed": payload.speed,
+        "timestamp": payload.timestamp or now_ts,
+        "dispatch_id": active_disp.id if active_disp else None,
+        "incident_id": active_disp.incident_id if active_disp else None,
+        "attempt_number": payload.attempt_number or (active_disp.attempt_number if active_disp else None),
+        "is_simulated": bool(payload.is_simulated),
+    }
+
     broadcast_sync(
         "AMBULANCE_STATUS_UPDATED",
-        {
-            "ambulance_id": amb.id,
-            "call_sign": amb.call_sign,
-            "status": amb.status,
-            "current_latitude": amb.current_latitude,
-            "current_longitude": amb.current_longitude,
-            "dispatch_id": active_disp.id if active_disp else None,
-        },
+        telemetry_payload,
+        ambulance_id=amb.id,
+        reporter_user_id=reporter_uid,
+        entity_type="ambulance",
+        entity_id=amb.id,
+    )
+    broadcast_sync(
+        "AMBULANCE_LOCATION_UPDATED",
+        telemetry_payload,
         ambulance_id=amb.id,
         reporter_user_id=reporter_uid,
         entity_type="ambulance",

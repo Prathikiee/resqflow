@@ -415,9 +415,16 @@ class Hospital(Base):
         ped_unavail = 0
         ped_avail = max(0, ped_tot - ped_occ - ped_res - ped_unavail)
 
+        trauma_tot = 12
+        trauma_occ = 3
+        trauma_res = 0
+        trauma_unavail = 0
+        trauma_avail = max(0, trauma_tot - trauma_occ - trauma_res - trauma_unavail)
+
         return {
             "emergency": {"name": "Emergency / ER", "total": er_tot, "occupied": er_occ, "reserved": er_res, "unavailable": er_unavail, "available": er_avail},
             "icu": {"name": "Intensive Care Unit (ICU)", "total": icu_tot, "occupied": icu_occ, "reserved": icu_res, "unavailable": icu_unavail, "available": icu_avail},
+            "trauma": {"name": "Trauma & Resuscitation Unit", "total": trauma_tot, "occupied": trauma_occ, "reserved": trauma_res, "unavailable": trauma_unavail, "available": trauma_avail},
             "hdu": {"name": "High Dependency Unit (HDU)", "total": hdu_tot, "occupied": hdu_occ, "reserved": hdu_res, "unavailable": hdu_unavail, "available": hdu_avail},
             "general_ward": {"name": "General Inpatient Ward", "total": ward_tot, "occupied": ward_occ, "reserved": ward_res, "unavailable": ward_unavail, "available": ward_avail},
             "isolation": {"name": "Isolation / Airborne Infection", "total": iso_tot, "occupied": iso_occ, "reserved": iso_res, "unavailable": iso_unavail, "available": iso_avail},
